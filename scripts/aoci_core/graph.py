@@ -74,6 +74,36 @@ def extract_path_refs(text: str, known: Optional[Set[str]] = None) -> List[str]:
     return list(dict.fromkeys(found))
 
 
+class ParsedEntry:
+    """Lightweight slotted representation of a parsed `object-fras-v2` line."""
+
+    __slots__ = ("rel", "layer", "domain", "imp", "size", "f", "r", "a", "s", "raw")
+
+    def __init__(
+        self,
+        rel: str,
+        layer: str,
+        domain: str,
+        imp: int,
+        size: str,
+        f: str,
+        r: str,
+        a: str,
+        s: str,
+        raw: str,
+    ) -> None:
+        self.rel = rel
+        self.layer = layer
+        self.domain = domain
+        self.imp = imp
+        self.size = size
+        self.f = f
+        self.r = r
+        self.a = a
+        self.s = s
+        self.raw = raw
+
+
 def parse_entry_fields(line: str) -> Optional[Dict[str, str]]:
     m = ENTRY_RE.match(line)
     if not m:
@@ -81,20 +111,39 @@ def parse_entry_fields(line: str) -> Optional[Dict[str, str]]:
     return {k: (v.strip() if isinstance(v, str) else v) for k, v in m.groupdict().items()}
 
 
-def validate_parsed_entry_tags(
+def parse_entries_map(entries: Dict[str, str]) -> Dict[str, ParsedEntry]:
+    """Parse all valid `object-fras-v2` lines in `entries` in a single pass."""
+    parsed: Dict[str, ParsedEntry] = {}
+    for rel, line in entries.items():
+        m = ENTRY_RE.match(line)
+        if not m:
+            continue
+        parsed[rel] = ParsedEntry(
+            rel=rel,
+            layer=m.group("layer"),
+            domain=m.group("domain"),
+            imp=int(m.group("imp")),
+            size=m.group("size"),
+            f=m.group("f").strip(),
+            r=m.group("r").strip(),
+            a=m.group("a").strip(),
+            s=m.group("s").strip(),
+            raw=line,
+        )
+    return parsed
+
+
+def _validate_tag_fields(
     rel: str,
-    fields: Dict[str, str],
+    layer: str,
+    size: str,
+    f_val: str,
     raw_line: str,
     actual_lines: Optional[int] = None,
 ) -> List[Tuple[str, str]]:
-    """Shared [LDIS] tag & field validator used across `upsert`, `verify`, `scan`, `ack`, `lint`, and `pool`."""
     from .constants import compute_size_tier
 
     errs: List[Tuple[str, str]] = []
-    layer = fields["layer"]
-    size = fields["size"]
-    f_val = fields["f"]
-
     if layer not in VALID_LAYERS:
         errs.append(
             ("layer-invalid", f"Invalid Layer `{layer}` in `{rel}` (allowed: {''.join(sorted(VALID_LAYERS))})")
@@ -133,38 +182,61 @@ def validate_parsed_entry_tags(
     return errs
 
 
-def build_fras_graph(entries: Dict[str, str]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
-    """Build directed edges `X -> Y` (`X` depends on `Y`) and reverse callers in O(total refs)."""
-    known = set(entries.keys())
+def validate_parsed_entry_tags(
+    rel: str,
+    fields: Dict[str, str],
+    raw_line: str,
+    actual_lines: Optional[int] = None,
+) -> List[Tuple[str, str]]:
+    """Shared [LDIS] tag & field validator used across `upsert`, `verify`, `scan`, `ack`, `lint`, and `pool`."""
+    return _validate_tag_fields(
+        rel,
+        fields["layer"],
+        fields["size"],
+        fields["f"],
+        raw_line,
+        actual_lines=actual_lines,
+    )
+
+
+def _build_fras_graph_from_parsed(
+    known: Set[str],
+    parsed: Dict[str, ParsedEntry],
+) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
     deps: Dict[str, Set[str]] = {rel: set() for rel in known}
     dependents: Dict[str, Set[str]] = {rel: set() for rel in known}
-    for rel, line in entries.items():
-        f = parse_entry_fields(line)
-        if not f:
-            continue
-        for dep in extract_path_refs(f["r"], known):
+    for rel, pe in parsed.items():
+        for dep in extract_path_refs(pe.r, known):
             if dep != rel:
                 deps[rel].add(dep)
                 dependents[dep].add(rel)
-        for caller in extract_path_refs(f["a"], known):
+        for caller in extract_path_refs(pe.a, known):
             if caller != rel:
                 deps[caller].add(rel)
                 dependents[rel].add(caller)
     return deps, dependents
 
 
-def build_explicit_mention_index(entries: Dict[str, str]) -> Dict[str, Set[str]]:
-    """Map each indexed path `P` to every entry whose `R:` or `A:` explicitly mentions `P`."""
-    known = set(entries.keys())
+def build_fras_graph(entries: Dict[str, str]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """Build directed edges `X -> Y` (`X` depends on `Y`) and reverse callers in O(total refs)."""
+    return _build_fras_graph_from_parsed(set(entries.keys()), parse_entries_map(entries))
+
+
+def _build_explicit_mention_index_from_parsed(
+    known: Set[str],
+    parsed: Dict[str, ParsedEntry],
+) -> Dict[str, Set[str]]:
     mentioned_by: Dict[str, Set[str]] = {rel: set() for rel in known}
-    for rel, line in entries.items():
-        f = parse_entry_fields(line)
-        if not f:
-            continue
-        for target in extract_path_refs(f["r"], known) + extract_path_refs(f["a"], known):
+    for rel, pe in parsed.items():
+        for target in extract_path_refs(pe.r, known) + extract_path_refs(pe.a, known):
             if target != rel:
                 mentioned_by[target].add(rel)
     return mentioned_by
+
+
+def build_explicit_mention_index(entries: Dict[str, str]) -> Dict[str, Set[str]]:
+    """Map each indexed path `P` to every entry whose `R:` or `A:` explicitly mentions `P`."""
+    return _build_explicit_mention_index_from_parsed(set(entries.keys()), parse_entries_map(entries))
 
 
 def bfs_neighbors_with_distance(adj: Dict[str, Set[str]], starts: Sequence[str], depth: int) -> Dict[str, int]:
@@ -293,9 +365,11 @@ def build_context_subgraph(
     }
 
 
-def find_dangling_refs(root: Path, entries: Dict[str, str]) -> Dict[str, List[str]]:
-    """Path-like R:/A: references that point neither to an indexed entry nor to a file/dir on disk."""
-    known = set(entries.keys())
+def _find_dangling_refs_from_parsed(
+    root: Path,
+    known: Set[str],
+    parsed: Dict[str, ParsedEntry],
+) -> Dict[str, List[str]]:
     known_top_dirs = {p.split("/", 1)[0] for p in known if "/" in p}
     dangling: Dict[str, List[str]] = {}
 
@@ -309,12 +383,9 @@ def find_dangling_refs(root: Path, entries: Dict[str, str]) -> Dict[str, List[st
             segs.append(chunk.split("<-", 1)[1] if "<-" in chunk else chunk)
         return segs
 
-    for rel, line in entries.items():
-        f = parse_entry_fields(line)
-        if not f:
-            continue
+    for rel, pe in parsed.items():
         bad: List[str] = []
-        for field, is_api in ((f["r"], False), (f["a"], True)):
+        for field, is_api in ((pe.r, False), (pe.a, True)):
             for seg in _ref_segments(field, is_api):
                 cleaned = seg.replace("<-", " ")
                 for tok in RELPATH_TOKEN_RE.findall(cleaned):
@@ -346,6 +417,11 @@ def find_dangling_refs(root: Path, entries: Dict[str, str]) -> Dict[str, List[st
     return dangling
 
 
+def find_dangling_refs(root: Path, entries: Dict[str, str]) -> Dict[str, List[str]]:
+    """Path-like R:/A: references that point neither to an indexed entry nor to a file/dir on disk."""
+    return _find_dangling_refs_from_parsed(root, set(entries.keys()), parse_entries_map(entries))
+
+
 def semantic_word_count(text: str) -> int:
     """Count word-equivalents across whitespace-delimited scripts and spaceless CJK (~2 chars/word)."""
     cjk_chars = len(CJK_CHAR_RE.findall(text))
@@ -362,38 +438,36 @@ def lint_entries(
 ) -> List[Dict[str, str]]:
     """Return lint findings `{path, code, message}` for FRAS tag/size errors and quality issues."""
     findings: List[Dict[str, str]] = []
+    parsed = parse_entries_map(entries)
 
     def add(path: str, code: str, msg: str) -> None:
         findings.append({"path": path, "code": code, "message": msg})
 
-    for rel, line in sorted(entries.items()):
-        f = parse_entry_fields(line)
-        if not f:
-            continue
+    for rel in sorted(parsed.keys()):
+        pe = parsed[rel]
         fp = fingerprints.get(rel) if fingerprints is not None else None
         actual_l = int(fp["lines"]) if fp is not None else None
-        for err_code, err_msg in validate_parsed_entry_tags(rel, f, line, actual_lines=actual_l):
+        for err_code, err_msg in _validate_tag_fields(rel, pe.layer, pe.size, pe.f, pe.raw, actual_lines=actual_l):
             add(rel, err_code, err_msg)
-        imp = int(f["imp"])
-        f_units = semantic_word_count(f["f"])
-        if f["f"] not in ("", "-") and "<todo" not in line.lower():
+        f_units = semantic_word_count(pe.f)
+        if pe.f not in ("", "-") and "<todo" not in pe.raw.lower():
             if f_units < 3:
                 add(rel, "F-too-short", f"F: has only {f_units} word-unit(s); name concrete objects and operations")
-            elif VAGUE_F_RE.search(f["f"]) and f_units <= 5:
-                add(rel, "F-vague", f"F: looks like filler (`{f['f']}`); state the actual responsibility")
-        body = line.split("]:", 1)[1] if "]:" in line else line
+            elif VAGUE_F_RE.search(pe.f) and f_units <= 5:
+                add(rel, "F-vague", f"F: looks like filler (`{pe.f}`); state the actual responsibility")
+        body = pe.raw.split("]:", 1)[1] if "]:" in pe.raw else pe.raw
         tokens = estimate_tokens(body)
-        lo, hi = IMPORTANCE_TOKEN_BUDGET.get(imp, (15, 150))
+        lo, hi = IMPORTANCE_TOKEN_BUDGET.get(pe.imp, (15, 150))
         if tokens > int(hi * 1.5):
-            add(rel, "budget-over", f"~{tokens} tokens exceeds Importance {imp} budget ({lo}-{hi}); trim or lower I")
-        elif imp >= 5 and tokens < int(lo * 0.5):
-            add(rel, "budget-under", f"~{tokens} tokens is thin for Importance {imp} (target {lo}-{hi})")
-        if imp >= 8 and f["s"] in ("-", ""):
-            add(rel, "S-empty-hub", f"Importance {imp} hub has `S:-`; capture its non-obvious invariants")
-        if declared_domains and f["domain"] not in declared_domains:
-            add(rel, "domain-undeclared", f"Domain `{f['domain']}` is not declared in aoci.meta.txt")
+            add(rel, "budget-over", f"~{tokens} tokens exceeds Importance {pe.imp} budget ({lo}-{hi}); trim or lower I")
+        elif pe.imp >= 5 and tokens < int(lo * 0.5):
+            add(rel, "budget-under", f"~{tokens} tokens is thin for Importance {pe.imp} (target {lo}-{hi})")
+        if pe.imp >= 8 and pe.s in ("-", ""):
+            add(rel, "S-empty-hub", f"Importance {pe.imp} hub has `S:-`; capture its non-obvious invariants")
+        if declared_domains and pe.domain not in declared_domains:
+            add(rel, "domain-undeclared", f"Domain `{pe.domain}` is not declared in aoci.meta.txt")
 
-    for rel, refs in find_dangling_refs(root, entries).items():
+    for rel, refs in _find_dangling_refs_from_parsed(root, set(entries.keys()), parsed).items():
         add(rel, "ref-dangling", f"R:/A: references missing path(s): {', '.join(refs)}")
     return findings
 
@@ -501,19 +575,14 @@ def find_dependency_cycles(adj: Dict[str, Set[str]]) -> List[List[str]]:
     return sccs
 
 
-def check_layer_violations(
-    entries: Dict[str, str],
+def _check_layer_violations_from_parsed(
+    parsed: Dict[str, ParsedEntry],
     deps_adj: Dict[str, Set[str]],
     forbidden: Dict[str, Set[str]],
 ) -> List[Dict[str, str]]:
-    """Check every directed dependency edge `(src -> dst)` against forbidden layer transitions."""
     if not forbidden:
         return []
-    layers: Dict[str, str] = {}
-    for rel, line in entries.items():
-        f = parse_entry_fields(line)
-        if f:
-            layers[rel] = f["layer"]
+    layers = {rel: pe.layer for rel, pe in parsed.items()}
 
     violations: List[Dict[str, str]] = []
     for src in sorted(deps_adj.keys()):
@@ -537,6 +606,17 @@ def check_layer_violations(
                     }
                 )
     return violations
+
+
+def check_layer_violations(
+    entries: Dict[str, str],
+    deps_adj: Dict[str, Set[str]],
+    forbidden: Dict[str, Set[str]],
+) -> List[Dict[str, str]]:
+    """Check every directed dependency edge `(src -> dst)` against forbidden layer transitions."""
+    if not forbidden:
+        return []
+    return _check_layer_violations_from_parsed(parse_entries_map(entries), deps_adj, forbidden)
 
 
 def _sanitize_graph_label(text: str, fmt: str) -> str:

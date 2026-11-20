@@ -110,6 +110,8 @@ def save_session_snapshot(root: Path, sid: str, drift: Dict[str, Any], overwrite
         "malformed": len(malformed_texts),
         "malformed_texts": malformed_texts,
         "invalid_texts": invalid_texts,
+        "stop_retries": 0,
+        "last_blocked_count": 0,
     }
     write_session_snapshot(root, sid, data)
     if not overwrite:
@@ -302,22 +304,41 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     if payload.get("fullyIdle") is False:
         return {}
 
-    # Loop guards for both hosts: allow exit if this turn already continued from a Stop hook
-    if payload.get("continuationActive") is True or payload.get("stop_hook_active") is True:
-        return {}
-
+    # Loop guards for both hosts: inspect snapshot first so continuation only proceeds on retry #1
+    is_continuation = payload.get("continuationActive") is True or payload.get("stop_hook_active") is True
     roots = discover_indexed_roots(payload)
     if not roots:
         return {}
 
     sid = session_id_of(payload)
+    snapshots_by_root: Dict[Path, Optional[Dict[str, Any]]] = {}
+    if sid:
+        for root, _ in roots:
+            snapshots_by_root[root] = load_session_snapshot(root, sid)
+
+    if is_continuation:
+        if not sid:
+            return {}
+        can_retry = False
+        for snap in snapshots_by_root.values():
+            if snap is not None:
+                retries = int(snap.get("stop_retries", 0) or 0)
+                last_cnt = int(snap.get("last_blocked_count", 0) or 0)
+                if 1 <= retries < 2 and last_cnt > 0:
+                    can_retry = True
+                    break
+        if not can_retry:
+            return {}
+
     findings: List[str] = []
     ignored_total = 0
+    total_unsynced = 0
+    blocked_root_counts: Dict[Path, int] = {}
     for root, git_info in roots:
         git_status = aoci_index.check_git_exclusion(root, git_info, check_status=False)
         drift = aoci_index.compute_drift(root, git_info, fast_mtime=True)
 
-        snapshot = load_session_snapshot(root, sid)
+        snapshot = snapshots_by_root.get(root) if sid else None
         snap_sig: Dict[str, Optional[str]] = snapshot["signature"] if snapshot else {}
         cur_sig = aoci_index.drift_signature(drift)
 
@@ -397,8 +418,22 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
         if invalid_new:
             parts.append(f"invalid_entries({invalid_new})")
 
+        root_unsynced = (
+            len(renamed)
+            + len(similar)
+            + len(display_added)
+            + len(modified)
+            + len(missing)
+            + len(display_deleted)
+            + malformed_new
+            + invalid_new
+            + (1 if (git_status["is_git"] and not git_status["ok"]) else 0)
+        )
+        total_unsynced += root_unsynced
+
         if parts:
             findings.append(f"- `{root}`: " + "; ".join(parts))
+            blocked_root_counts[root] = root_unsynced
         elif snapshot is not None and sid:
             # Turn is clean: retire any pre-existing exemptions that have since been resolved
             pruned_sig = {k: v for k, v in snap_sig.items() if k in cur_sig and cur_sig[k] == v}
@@ -418,13 +453,17 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
             inv_changed = (not isinstance(old_inv_list, list)) or (
                 Counter(kept_inv) != Counter(str(x) for x in old_inv_list)
             )
-            if pruned_sig != snap_sig or mal_changed or inv_changed:
+            retries_dirty = int(snapshot.get("stop_retries", 0) or 0) != 0
+            blocked_dirty = int(snapshot.get("last_blocked_count", 0) or 0) != 0
+            if pruned_sig != snap_sig or mal_changed or inv_changed or retries_dirty or blocked_dirty:
                 updated = {
                     "created_at": snapshot.get("created_at") or aoci_index.utc_now_iso(),
                     "signature": pruned_sig,
                     "malformed": len(kept_mal),
                     "malformed_texts": kept_mal,
                     "invalid_texts": kept_inv,
+                    "stop_retries": 0,
+                    "last_blocked_count": 0,
                 }
                 try:
                     write_session_snapshot(root, sid, updated)
@@ -433,6 +472,39 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
 
     if not findings:
         return {}
+
+    if is_continuation:
+        prev_total_blocked = sum(
+            int(s.get("last_blocked_count", 0) or 0)
+            for s in snapshots_by_root.values()
+            if s is not None
+        )
+        max_prev_retries = max(
+            (int(s.get("stop_retries", 0) or 0) for s in snapshots_by_root.values() if s is not None),
+            default=0,
+        )
+        if max_prev_retries >= 2 or not (0 < total_unsynced < prev_total_blocked):
+            return {}
+
+    if sid:
+        for root, cur_cnt in blocked_root_counts.items():
+            snap = snapshots_by_root.get(root)
+            prev_retries = int(snap.get("stop_retries", 0) or 0) if (is_continuation and snap is not None) else 0
+            if prev_retries >= 2:
+                continue
+            base_snap = dict(snap) if snap is not None else {
+                "created_at": aoci_index.utc_now_iso(),
+                "signature": {},
+                "malformed": 0,
+                "malformed_texts": [],
+                "invalid_texts": [],
+            }
+            base_snap["stop_retries"] = prev_retries + 1
+            base_snap["last_blocked_count"] = cur_cnt
+            try:
+                write_session_snapshot(root, sid, base_snap)
+            except OSError:
+                pass
 
     script_cli = _quoted_script_path()
     reason = (

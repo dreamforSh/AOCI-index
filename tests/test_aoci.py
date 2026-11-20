@@ -9,6 +9,7 @@ Each test builds a throwaway Git repository and drives the real CLI via subproce
 from __future__ import annotations
 
 import ast
+import atexit
 import gzip
 import json
 import os
@@ -21,6 +22,7 @@ import time
 import unittest
 from unittest import mock
 from pathlib import Path
+from typing import Optional
 
 sys.dont_write_bytecode = True
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -73,13 +75,40 @@ def age_file(path: Path, seconds: int = 60) -> None:
     os.utime(path, (t, t))
 
 
+_TEMPLATE_TMP: Optional[tempfile.TemporaryDirectory] = None
+_TEMPLATE_GIT_DIR: Optional[Path] = None
+
+
+def _cleanup_template_git_dir() -> None:
+    global _TEMPLATE_TMP, _TEMPLATE_GIT_DIR
+    if _TEMPLATE_TMP is not None:
+        try:
+            _TEMPLATE_TMP.cleanup()
+        except OSError:
+            pass
+        _TEMPLATE_TMP = None
+        _TEMPLATE_GIT_DIR = None
+
+
+def _get_template_git_dir() -> Path:
+    global _TEMPLATE_TMP, _TEMPLATE_GIT_DIR
+    if _TEMPLATE_GIT_DIR is None or not _TEMPLATE_GIT_DIR.is_dir():
+        _TEMPLATE_TMP = tempfile.TemporaryDirectory(dir=os.environ.get("AOCI_TEST_TMP"))
+        atexit.register(_cleanup_template_git_dir)
+        tpl = Path(_TEMPLATE_TMP.name) / "tpl"
+        tpl.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=tpl, check=True)
+        _TEMPLATE_GIT_DIR = tpl / ".git"
+    return _TEMPLATE_GIT_DIR
+
+
 @unittest.skipUnless(HAS_GIT, "git is required")
 class RepoTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(dir=os.environ.get("AOCI_TEST_TMP"))
         self.root = Path(self._tmp.name) / "repo"
         self.root.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        shutil.copytree(_get_template_git_dir(), self.root / ".git")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -319,15 +348,15 @@ class DriftTests(RepoTestCase):
         self.assertIn("src/env.py <- src/jwt.py", out)
 
     def test_racy_flag_self_heals_after_window_passes(self):
-        p = self.write("fresh.py", "value = 42\n", aged=False)
-        t_recent = time.time() - 1.5  # inside 3s RACY_WINDOW_NS
-        os.utime(p, (t_recent, t_recent))
         self.init()
+        p = self.write("fresh.py", "value = 42\n", aged=False)
+        t_recent = time.time() - 1.6  # inside 3s RACY_WINDOW_NS with subprocess headroom
+        os.utime(p, (t_recent, t_recent))
         self.assertEqual(self.upsert("fresh.py[CX2T]: F:defines fresh value forty two | R:- | A:- | S:-")[0], 0)
         base1 = json.loads((self.root / ".aoci" / "baseline.json").read_text(encoding="utf-8"))
         self.assertTrue(base1["files"]["fresh.py"].get("racy"))
 
-        time.sleep(2.0)  # now >3s past p's mtime without touching p
+        time.sleep(max(0.35, 3.1 - (time.time() - t_recent)))  # now >3s past p's mtime without touching p
         code, out = cli("scan", "--root", str(self.root), "--fast")
         self.assertEqual(code, 0, out)
         base2 = json.loads((self.root / ".aoci" / "baseline.json").read_text(encoding="utf-8"))
@@ -3357,6 +3386,171 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         scan4 = cli_json("scan", "--root", str(self.root))["drift"]
         by_p4 = {it["path"]: it for it in scan4["modified"]}
         self.assertEqual(by_p4["pkg/models.py"]["change_kind"], "contract_changed")
+
+    def test_single_read_sig_hash_on_scan_and_transient_key_stripping(self):
+        import contextlib
+        import io
+
+        self.write("src/mod.py", "def compute(x: int) -> int:\n    return x + 1\n")
+        self.write("src/other.py", "def run() -> int:\n    return 1\n")
+        self.write("src/unindexed.py", "def pending() -> int:\n    return 0\n")
+        self.init()
+        self.assertEqual(
+            self.upsert(
+                "src/mod.py[CX2T]: F:computes incremented integer | R:- | A:compute | S:-",
+                "src/other.py[CX2T]: F:runs secondary worker | R:- | A:run | S:-",
+            )[0],
+            0,
+        )
+
+        # Modify both tracked files (one impl_only, one contract_changed)
+        self.write("src/mod.py", "def compute(x: int) -> int:\n    return x + 2\n")
+        self.write("src/other.py", "def run(flag: bool = False) -> int:\n    return 2 if flag else 1\n")
+
+        # `scan` must compute `sig_hash` inside `inspect_and_fingerprint_one` on the single read (0 `compute_signature_hash` calls)
+        with mock.patch.object(aoci_index, "compute_signature_hash", side_effect=AssertionError("must not re-read modified files")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = aoci_index.main(["scan", "--root", str(self.root), "--fast", "--json"])
+            self.assertEqual(rc, 0)
+        scan_data = json.loads(buf.getvalue())
+        by_p = {it["path"]: it for it in scan_data["drift"]["modified"]}
+        self.assertEqual(by_p["src/mod.py"]["change_kind"], "impl_only")
+        self.assertEqual(by_p["src/other.py"]["change_kind"], "contract_changed")
+
+        # Transient `_cur_sig_hash` must never be persisted to baseline.json or scan_fps.json
+        base_files = json.loads((self.root / ".aoci" / "baseline.json").read_text(encoding="utf-8"))["files"]
+        for fp_rec in base_files.values():
+            self.assertFalse(any(k.startswith("_") for k in fp_rec), fp_rec)
+        scan_fp_path = self.root / ".aoci" / ".cache" / "scan_fps.json"
+        if scan_fp_path.is_file():
+            sfp_files = json.loads(scan_fp_path.read_text(encoding="utf-8"))["files"]
+            for fp_rec in sfp_files.values():
+                self.assertFalse(any(k.startswith("_") for k in fp_rec), fp_rec)
+
+        # IgnoreMatcher combined-regex fast path matches non-negated rules identically
+        fast_m = aoci_index.IgnoreMatcher(["generated/", "*.pb.go", "/rootonly.txt"])
+        self.assertTrue(fast_m.is_ignored("a/generated/x.py"))
+        self.assertTrue(fast_m.is_ignored("api/foo.pb.go"))
+        self.assertTrue(fast_m.is_ignored("rootonly.txt"))
+        self.assertFalse(fast_m.is_ignored("sub/rootonly.txt"))
+        self.assertFalse(fast_m.is_ignored("src/mod.py"))
+
+    def test_post_checkout_hook_skips_file_checkout_arg3_zero(self):
+        self.write("app.py", "def run():\n    return 1\n\n\nFLAG = True\n")
+        self.init()
+        ins = cli_json("install-git-hooks", "--root", str(self.root))
+        self.assertTrue(ins["ok"])
+        pc_path = self.root / ".git" / "hooks" / "post-checkout"
+        pm_path = self.root / ".git" / "hooks" / "post-merge"
+        pc_txt = pc_path.read_text(encoding="utf-8")
+        pm_txt = pm_path.read_text(encoding="utf-8")
+        self.assertIn('${3:-1}" = "1"', pc_txt)
+        self.assertNotIn('${3:-1}', pm_txt)
+
+        sh_bin = shutil.which("sh")
+        if sh_bin:
+            marker = self.root / ".aoci" / "hook_ran.txt"
+            spy_script = self.root / "spy_restore.py"
+            spy_script.write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            ginfo = aoci_index.detect_git_info(self.root)
+            from aoci_core import githooks as _gh
+
+            _gh.install_git_hooks(self.root, ginfo, python_cmd=sys.executable, script_path=spy_script)
+            # `$3 == 0` (single-file `git checkout -- <file>`) MUST skip restore
+            r0 = subprocess.run([sh_bin, str(pc_path), "abc", "def", "0"], cwd=str(self.root), capture_output=True, text=True)
+            self.assertEqual(r0.returncode, 0, r0.stderr)
+            self.assertFalse(marker.exists())
+            # `$3 == 1` (branch switch) MUST invoke restore
+            r1 = subprocess.run([sh_bin, str(pc_path), "abc", "def", "1"], cwd=str(self.root), capture_output=True, text=True)
+            self.assertEqual(r1.returncode, 0, r1.stderr)
+            self.assertTrue(marker.is_file())
+
+    def test_convergent_stop_hook_retry_on_progress_and_exit_on_stall_or_cap(self):
+        self.init()
+        base = {"cwd": str(self.root), "session_id": "conv-1"}
+        hook("session-start", dict(base, hook_event_name="SessionStart"))
+        for name in ("a.py", "b.py", "c.py"):
+            self.write(name, f"{name[0]} = 1\n")
+
+        # Stop #1 with 3 unsynced files -> blocks and persists stop_retries=1, last_blocked_count=3
+        s1 = hook("stop", dict(base, hook_event_name="Stop", stop_hook_active=False))
+        self.assertEqual(s1.get("decision"), "block")
+        snap1 = json.loads((self.root / ".aoci" / ".sessions" / "conv-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(snap1["stop_retries"], 1)
+        self.assertEqual(snap1["last_blocked_count"], 3)
+
+        # Agent syncs `a.py` (3 -> 2 unsynced): strict convergence allows ONE extra continuation block
+        self.assertEqual(self.upsert("a.py[CX2T]: F:defines module constant a | R:- | A:- | S:-")[0], 0)
+        s2 = hook("stop", dict(base, hook_event_name="Stop", stop_hook_active=True))
+        self.assertEqual(s2.get("decision"), "block")
+        snap2 = json.loads((self.root / ".aoci" / ".sessions" / "conv-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(snap2["stop_retries"], 2)
+        self.assertEqual(snap2["last_blocked_count"], 2)
+
+        # Even if agent makes progress again (2 -> 1), stop_retries >= 2 exits immediately
+        self.assertEqual(self.upsert("b.py[CX2T]: F:defines module constant b | R:- | A:- | S:-")[0], 0)
+        s3 = hook("stop", dict(base, hook_event_name="Stop", stop_hook_active=True))
+        self.assertEqual(s3, {})
+
+        # New turn-start resets retry counters; finishing cleanly keeps counters at 0
+        hook("turn-start", dict(base, hook_event_name="UserPromptSubmit"))
+        snap_reset = json.loads((self.root / ".aoci" / ".sessions" / "conv-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(snap_reset["stop_retries"], 0)
+        self.assertEqual(snap_reset["last_blocked_count"], 0)
+
+        # Missing session_id with continuationActive=True returns {} immediately
+        self.assertEqual(
+            hook("stop", {"cwd": str(self.root), "hookEventName": "Stop", "continuationActive": True}, host="antigravity"),
+            {},
+        )
+
+        # Stalled continuation (`cur_unsynced >= last_blocked_count`) returns {} immediately
+        stall_base = {"cwd": str(self.root), "conversationId": "conv-stall"}
+        hook("session-start", dict(stall_base, hookEventName="SessionStart"), host="antigravity")
+        self.write("d.py", "d = 1\n")
+        st1 = hook(
+            "stop",
+            dict(stall_base, hookEventName="Stop", terminationReason="NO_TOOL_CALL", continuationActive=False),
+            host="antigravity",
+        )
+        self.assertEqual(st1.get("decision"), "continue")
+        st2 = hook(
+            "stop",
+            dict(stall_base, hookEventName="Stop", terminationReason="NO_TOOL_CALL", continuationActive=True),
+            host="antigravity",
+        )
+        self.assertEqual(st2, {})
+
+        # Clean finish resets `stop_retries` and `last_blocked_count` to 0
+        self.assertEqual(
+            self.upsert(
+                "c.py[CX2T]: F:defines module constant c | R:- | A:- | S:-",
+                "d.py[CX2T]: F:defines module constant d | R:- | A:- | S:-",
+            )[0],
+            0,
+        )
+        hook("turn-start", dict(base, hook_event_name="UserPromptSubmit"))
+        self.assertEqual(hook("stop", dict(base, hook_event_name="Stop", stop_hook_active=False)), {})
+        snap_clean = json.loads((self.root / ".aoci" / ".sessions" / "conv-1.json").read_text(encoding="utf-8"))
+        self.assertEqual(snap_clean["stop_retries"], 0)
+        self.assertEqual(snap_clean["last_blocked_count"], 0)
+
+        # Clean finish on `conv-stall` also resets `stop_retries` and `last_blocked_count` without `turn-start`
+        self.assertEqual(
+            hook(
+                "stop",
+                dict(stall_base, hookEventName="Stop", terminationReason="NO_TOOL_CALL", continuationActive=False),
+                host="antigravity",
+            ),
+            {},
+        )
+        stall_clean = json.loads((self.root / ".aoci" / ".sessions" / "conv-stall.json").read_text(encoding="utf-8"))
+        self.assertEqual(stall_clean["stop_retries"], 0)
+        self.assertEqual(stall_clean["last_blocked_count"], 0)
 
 
 if __name__ == "__main__":

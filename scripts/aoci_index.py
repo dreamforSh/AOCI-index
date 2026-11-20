@@ -151,6 +151,7 @@ from aoci_core.graph import (  # noqa: E402
     _CAMEL_PART_RE,
     _CJK_RUN_RE,
     BM25Index,
+    ParsedEntry,
     _load_layer_rules_from_aoci,
     _sanitize_graph_label,
     _tokenize_search,
@@ -168,6 +169,7 @@ from aoci_core.graph import (  # noqa: E402
     find_dangling_refs,
     find_dependency_cycles,
     lint_entries,
+    parse_entries_map,
     parse_entry_fields,
     parse_glossary,
     parse_layer_rules,
@@ -393,6 +395,10 @@ class IgnoreMatcher:
         self.patterns: List[str] = []
         self._rules: List[Tuple[Any, bool, bool]] = []
         self._dir_cache: Dict[str, bool] = {}
+        self._fast_file_rx: Optional[Any] = None
+        self._fast_dir_rx: Optional[Any] = None
+        self._fast_built: bool = False
+        self._fast_can_use: bool = False
         for raw in patterns:
             self.add(raw)
 
@@ -414,6 +420,10 @@ class IgnoreMatcher:
         self._rules.append((re.compile(prefix + _glob_to_regex(body) + "$"), negate, dir_only))
         self.patterns.append(raw.strip())
         self._dir_cache.clear()
+        self._fast_file_rx = None
+        self._fast_dir_rx = None
+        self._fast_built = False
+        self._fast_can_use = False
 
     def __bool__(self) -> bool:
         return bool(self._rules)
@@ -421,7 +431,29 @@ class IgnoreMatcher:
     def __iter__(self):  # backward compatibility with list-of-patterns callers
         return iter(self.patterns)
 
+    def _ensure_fast_regexes(self) -> None:
+        if self._fast_built:
+            return
+        self._fast_built = True
+        if not self._rules or any(neg for _, neg, _ in self._rules):
+            self._fast_can_use = False
+            return
+        file_pats = [rx.pattern for rx, _, dir_only in self._rules if not dir_only]
+        dir_pats = [rx.pattern for rx, _, _ in self._rules]
+        try:
+            self._fast_file_rx = re.compile("(?:" + ")|(?:".join(file_pats) + ")") if file_pats else None
+            self._fast_dir_rx = re.compile("(?:" + ")|(?:".join(dir_pats) + ")") if dir_pats else None
+            self._fast_can_use = True
+        except re.error:
+            self._fast_file_rx = None
+            self._fast_dir_rx = None
+            self._fast_can_use = False
+
     def _decide(self, subject: str, is_dir: bool) -> bool:
+        self._ensure_fast_regexes()
+        if self._fast_can_use:
+            rx = self._fast_dir_rx if is_dir else self._fast_file_rx
+            return bool(rx is not None and rx.match(subject))
         result = False
         for rx, negate, dir_only in self._rules:
             if dir_only and not is_dir:
@@ -1115,7 +1147,15 @@ def inspect_and_fingerprint_one(
     if is_probably_binary_bytes(raw[:8192]):
         return rel, None, "binary-content"
 
-    return rel, _fingerprint_bytes(raw, st), None
+    normalized = raw.replace(b"\r\n", b"\n") if b"\r\n" in raw else raw
+    fp = _fingerprint_bytes_norm(normalized, st)
+    if (
+        cached is not None
+        and fp["sha256"] != cached.get("sha256")
+        and isinstance(cached.get("sig_hash"), str)
+    ):
+        fp["_cur_sig_hash"] = compute_signature_hash_from_bytes(normalized, full.suffix.lower(), rel)
+    return rel, fp, None
 
 
 def _git_head_key(git_info: Dict[str, Any]) -> Optional[str]:
@@ -1407,8 +1447,7 @@ def _is_scan_cache_fresh(fp: Dict[str, Any], now_ns: Optional[int] = None) -> Di
     Clears `racy` once sub-second mtime timestamps have stabilized (>5ms since write) so rapid
     multi-batch cold bootstrap skips redundant hashing while keeping 1s coarse FS protections intact.
     """
-    cleaned = dict(fp)
-    cleaned.pop("size_tier", None)
+    cleaned = {k: v for k, v in fp.items() if k != "size_tier" and not k.startswith("_")}
     if cleaned.get("racy"):
         mtime_ns = int(cleaned.get("mtime_ns", 0) or 0)
         ts_now = time.time_ns() if now_ns is None else now_ns
@@ -1638,7 +1677,8 @@ def save_baseline(
     baseline["updated_at"] = utc_now_iso()
     files = baseline.get("files", {})
     baseline["files"] = {
-        rel: {k: v for k, v in fp.items() if k != "size_tier"} for rel, fp in files.items()
+        rel: {k: v for k, v in fp.items() if k != "size_tier" and not k.startswith("_")}
+        for rel, fp in files.items()
     }
     atomic_write_text(
         aoci_dir / BASELINE_FILE,
@@ -2555,12 +2595,16 @@ def _classify_modified_entry(
     root: Path,
     rel: str,
     cached: Optional[Dict[str, Any]],
+    cur_fp: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Classify a modified file against its baseline `sig_hash`: `impl_only`, `contract_changed`, or `unknown`."""
     old_sig = cached.get("sig_hash") if isinstance(cached, dict) else None
     if not isinstance(old_sig, str) or not old_sig:
         return "unknown"
-    cur_sig = compute_signature_hash(root / rel, rel)
+    if isinstance(cur_fp, dict) and "_cur_sig_hash" in cur_fp:
+        cur_sig = cur_fp.get("_cur_sig_hash")
+    else:
+        cur_sig = compute_signature_hash(root / rel, rel)
     if cur_sig is None:
         return "unknown"
     return "impl_only" if cur_sig == old_sig else "contract_changed"
@@ -2626,7 +2670,7 @@ def compute_drift(
                 raw_added.append(item)
         elif fp["sha256"] != cached.get("sha256"):
             mod_item = {k: v for k, v in item.items() if k != "sha256"}
-            mod_item["change_kind"] = _classify_modified_entry(root, rel, cached)
+            mod_item["change_kind"] = _classify_modified_entry(root, rel, cached, cur_fp=fp)
             modified.append(mod_item)
         elif rel not in code_set:
             missing_in_code.append({k: v for k, v in item.items() if k != "sha256"})
@@ -4022,13 +4066,6 @@ def search_entries_bm25_detailed(
         index_cls=BM25Index,
         glossary=glossary,
     )
-
-
-def _parse_code_filter_set(raw: Optional[str]) -> Optional[Set[str]]:
-    if not raw:
-        return None
-    chars = {ch for part in raw.upper().split(",") for ch in part.strip() if ch.isalnum()}
-    return chars or None
 
 
 def cmd_query(args: argparse.Namespace) -> int:

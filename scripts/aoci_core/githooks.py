@@ -58,10 +58,11 @@ def _format_hook_python_cmd(raw_py: Optional[str]) -> str:
     if not raw_py:
         return "python" if os.name == "nt" else "python3"
     s = raw_py.strip()
-    if " " in s and not s.startswith(('"', "'")):
+    if not s.startswith(('"', "'")):
         p = Path(s)
         if p.exists() or "/" in s or "\\" in s:
-            return f'"{p.as_posix()}"'
+            posix = p.as_posix() if ("\\" in s or " " in s) else s
+            return f'"{posix}"' if " " in posix else posix
     return s
 
 
@@ -141,6 +142,16 @@ def install_git_hooks(
     script_posix = cli_path.resolve().as_posix()
     aoci_rel = f"{AOCI_DIR_NAME}" if sub_rel == "." else f"{sub_rel.strip('/')}/{AOCI_DIR_NAME}"
 
+    post_checkout_block = "\n".join(
+        [
+            GIT_HOOK_BEGIN,
+            f'if [ "${{3:-1}}" = "1" ] && [ -f "{sub_rel}/{AOCI_DIR_NAME}/{CODE_FILE}" ]; then',
+            f'  {py_tok} "{script_posix}" restore --root "{sub_rel}" >/dev/null 2>&1 || true',
+            "fi",
+            GIT_HOOK_END,
+        ]
+    ) + "\n"
+
     restore_block = "\n".join(
         [
             GIT_HOOK_BEGIN,
@@ -152,7 +163,8 @@ def install_git_hooks(
     ) + "\n"
 
     actions: Dict[str, str] = {}
-    for hook_name in ("post-checkout", "post-merge", "post-rewrite"):
+    actions["post-checkout"] = _upsert_git_hook_block(hooks_dir / "post-checkout", post_checkout_block, dry_run)
+    for hook_name in ("post-merge", "post-rewrite"):
         actions[hook_name] = _upsert_git_hook_block(hooks_dir / hook_name, restore_block, dry_run)
 
     if with_pre_commit:
