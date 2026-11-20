@@ -1841,6 +1841,7 @@ class Phase1FixesTests(RepoTestCase):
                 "aoci_export",
                 "aoci_pool",
                 "aoci_pack",
+                "aoci_zoom",
             },
         )
         for t_name, t_spec in tools.items():
@@ -1852,7 +1853,7 @@ class Phase1FixesTests(RepoTestCase):
 
         res_list = aoci_mcp.handle_rpc_request({"jsonrpc": "2.0", "id": 21, "method": "resources/list"})
         res_uris = {r["uri"] for r in res_list["result"]["resources"]}
-        self.assertEqual(res_uris, {"aoci://manifest", "aoci://meta", "aoci://code", "aoci://shards/INDEX"})
+        self.assertEqual(res_uris, {"aoci://manifest", "aoci://meta", "aoci://code", "aoci://hubs", "aoci://shards/INDEX"})
 
         prm_list = aoci_mcp.handle_rpc_request({"jsonrpc": "2.0", "id": 22, "method": "prompts/list"})
         prm_names = {p["name"] for p in prm_list["result"]["prompts"]}
@@ -3555,7 +3556,8 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
 
 if __name__ == "__main__":
-    from test_ext_pack import TaskPackTests  # noqa: F401
-    from test_ext_tests import TestImpactTests  # noqa: F401
+    from test_ext_pack import TaskPackTests  # noqa: E401, F401
+    from test_ext_tests import TestImpactTests  # noqa: E401, F401
+    from test_ext_zoom import HubZoomTests  # noqa: E402, F401
 
     unittest.main(verbosity=2)

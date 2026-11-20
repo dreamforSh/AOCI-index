@@ -74,6 +74,7 @@ if _SCRIPT_DIR not in sys.path:
 
 from aoci_core import githooks as _githooks  # noqa: E402
 from aoci_core import graph as _graph  # noqa: E402
+from aoci_core import hubs as _hubs  # noqa: E402
 from aoci_core import pack as _pack  # noqa: E402
 from aoci_core import parsers as _parsers  # noqa: E402
 from aoci_core import pool as _pool  # noqa: E402
@@ -104,6 +105,7 @@ from aoci_core.constants import (  # noqa: E402
     GIT_HOOK_BEGIN,
     GIT_HOOK_END,
     GLOSSARY_FILE,
+    HUBS_FILE,
     IGNORE_FILE,
     IMPORTANCE_TOKEN_BUDGET,
     LINE_SKETCH_K,
@@ -4447,6 +4449,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
         if git_status["is_git"] and not git_status["excluded"]:
             return _fail("Failed to exclude `.aoci/` from Git. Aborting ack.", 2)
 
+    hubs_refreshed: List[str] = []
     lock_ctx: Any = contextlib.nullcontext() if args.dry_run else IndexLock(aoci_dir)
     try:
         with lock_ctx:
@@ -4576,6 +4579,8 @@ def cmd_ack(args: argparse.Namespace) -> int:
                     git_info,
                     [(c, base_files[c], entries[c]) for c in acked if c in entries and c in base_files],
                 )
+                if (aoci_dir / HUBS_FILE).is_file() and not args.dry_run:
+                    hubs_refreshed = _hubs.refresh_hub_spans_for_paths(root, aoci_dir, acked)
     except TimeoutError as exc:
         return _fail(str(exc), 3)
 
@@ -4587,6 +4592,8 @@ def cmd_ack(args: argparse.Namespace) -> int:
             "resized": resized,
             "all_modified": bool(args.all_modified),
         }
+        if hubs_refreshed:
+            ack_payload["hubs_refreshed"] = hubs_refreshed
         if impl_only:
             ack_payload["impl_only"] = True
             ack_payload["skipped_contract_changed"] = skipped_contract_changed
@@ -4597,12 +4604,184 @@ def cmd_ack(args: argparse.Namespace) -> int:
             print(f"  = {p}")
         for r in resized:
             print(f"  [size] {r}")
+        for hr in hubs_refreshed:
+            print(f"  [hubs] {hr}")
         if skipped_contract_changed:
             print(f"[Skipped] {len(skipped_contract_changed)} non-impl-only file(s) require `upsert` review:")
             for sk in skipped_contract_changed[:30]:
                 print(f"  ! {sk['path']} ({sk['change_kind']})")
         if (args.all_modified or impl_only) and acked:
             print("[Note] Automatic selection trusts that every listed entry was verified against its new source.")
+    return 0
+
+
+def cmd_zoom(args: argparse.Namespace) -> int:
+    """Read, scaffold, or upsert symbol-level H-tier sections in `.aoci/aoci.hubs.txt`."""
+    root = resolve_root(args.root)
+    aoci_dir = root / AOCI_DIR_NAME
+    as_json = bool(getattr(args, "json", False))
+
+    def _fail(msg: str, rc: int = 2) -> int:
+        if as_json:
+            print(json.dumps({"ok": False, "error": msg}, indent=2, ensure_ascii=False))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return rc
+
+    is_upsert = bool(args.upsert or args.upsert_file or args.prune_missing)
+    if args.scaffold and is_upsert:
+        return _fail("Cannot combine `--scaffold` with `--upsert`, `--upsert-file`, or `--prune-missing`.", 2)
+    if is_upsert and args.path:
+        return _fail("Do not pass positional `<path>` together with `--upsert`/`--upsert-file`/`--prune-missing`.", 2)
+    if not is_upsert and not args.path:
+        return _fail("Specify a target `<path>` (or pass `--upsert` / `--upsert-file` / `--prune-missing`).", 2)
+
+    if is_upsert:
+        if not aoci_dir.is_dir():
+            return _fail(f"`.aoci/` is not initialized at {root}. Run `init` first.", 2)
+        git_info = detect_git_info(root)
+        if args.dry_run:
+            check_git_exclusion(root, git_info, check_status=False, write_cache=False)
+        else:
+            git_status = ensure_git_exclusion(root, git_info, check_status=False)
+            if git_status["is_git"] and not git_status["excluded"]:
+                return _fail("Failed to exclude `.aoci/` from Git. Aborting zoom upsert.", 2)
+
+        raw_lines: List[str] = []
+        if args.upsert_file:
+            ep = _resolve_cli_file_path(root, args.upsert_file, must_exist=True)
+            try:
+                raw_lines.extend(ep.read_text(encoding="utf-8-sig").splitlines())
+            except OSError as exc:
+                return _fail(f"Cannot read `--upsert-file` `{ep}`: {exc}", 2)
+        if args.upsert:
+            raw_lines.extend(args.upsert)
+
+        try:
+            res = _hubs.upsert_hub_entries(
+                root,
+                aoci_dir,
+                raw_lines,
+                prune_missing=bool(args.prune_missing),
+                dry_run=bool(args.dry_run),
+                lock_cls=IndexLock,
+            )
+        except TimeoutError as exc:
+            return _fail(str(exc), 3)
+
+        if not res.get("ok"):
+            if as_json:
+                print(json.dumps(res, indent=2, ensure_ascii=False))
+            else:
+                errs = res.get("errors") or [res.get("error", "Zoom upsert failed.")]
+                print(f"ERROR: Zoom upsert failed ({len(errs)} issue(s)); no files were modified:", file=sys.stderr)
+                for err in errs:
+                    print(f"  - {err}", file=sys.stderr)
+            return 1
+
+        if as_json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        else:
+            mode_tag = " DRY-RUN" if res.get("dry_run") else ""
+            print(
+                f"[AOCI Zoom Upsert{mode_tag}] OK | Upserted={len(res['upserted'])} | "
+                f"Pruned={len(res['pruned'])} | Total={res['total']}"
+            )
+            for w in res.get("warnings", ()):
+                print(f"  WARN: {w}", file=sys.stderr)
+        return 0
+
+    rel, path_err = _hubs.validate_hub_relpath(str(args.path))
+    if path_err is not None or rel is None:
+        return _fail(path_err or f"Invalid relative path `{args.path}`.", 2)
+
+    full = root / rel
+    if not _is_within_root(root, full):
+        return _fail(f"Path `{rel}` escapes repository root.", 2)
+    try:
+        st = os.lstat(full)
+    except OSError:
+        return _fail(f"Target file `{rel}` does not exist on disk.", 2)
+    if stat.S_ISLNK(st.st_mode):
+        return _fail(f"Refusing symlink target `{rel}`.", 2)
+    if not stat.S_ISREG(st.st_mode):
+        return _fail(f"Target `{rel}` is not a regular file.", 2)
+    if st.st_size > args.max_bytes:
+        return _fail(f"Target `{rel}` exceeds `--max-bytes` ({st.st_size} > {args.max_bytes}).", 2)
+    try:
+        with full.open("rb") as fh:
+            head = fh.read(8192)
+    except OSError as exc:
+        return _fail(f"Cannot read `{rel}`: {exc}", 2)
+    if is_probably_binary_bytes(head):
+        return _fail(f"Target `{rel}` appears to be binary.", 2)
+
+    if args.scaffold:
+        drafts = _hubs.scaffold_hub_entries(root, rel)
+        out_path_str: Optional[str] = None
+        if args.output:
+            out_path = _resolve_cli_file_path(root, args.output, must_exist=False)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            header = (
+                "# AOCI Zoom Scaffold — Read each section and replace <TODO:read-section> before `zoom --upsert`!\n"
+            )
+            write_text_lf(out_path, header + "\n".join(drafts) + ("\n" if drafts else ""))
+            out_path_str = str(out_path)
+        if as_json:
+            scaf_payload: Dict[str, Any] = {
+                "ok": True,
+                "mode": "scaffold",
+                "root": str(root),
+                "path": rel,
+                "count": len(drafts),
+                "output": args.output,
+                "entries": drafts,
+            }
+            if out_path_str is not None:
+                scaf_payload["output_path"] = out_path_str
+            print(json.dumps(scaf_payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"# Scaffolded {len(drafts)} hub section(s) for `{rel}` (replace <TODO:read-section> after reading source):")
+            for ln in drafts:
+                print(ln)
+        return 0
+
+    if not aoci_dir.is_dir():
+        return _fail(f"`.aoci/` is not initialized at {root}. Run `init` first.", 2)
+
+    code_path = aoci_dir / CODE_FILE
+    code_entries, _ = parse_code_volume(code_path) if code_path.is_file() else ({}, [])
+    code_entry = code_entries.get(rel)
+
+    hub_records, _ = _hubs.parse_hubs_volume(aoci_dir / HUBS_FILE)
+    matching_hubs = [r["line"] for r in hub_records if r["relpath"] == rel]
+    symbol_spans = _hubs.extract_symbol_spans(full, rel)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "mode": "read",
+                    "root": str(root),
+                    "path": rel,
+                    "code_entry": code_entry,
+                    "hub_entries": matching_hubs,
+                    "symbol_spans": symbol_spans,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print(f"=== {rel} ===")
+        print(f"  code_entry: {code_entry or '-'}")
+        print(f"  hub_entries ({len(matching_hubs)}):")
+        for ln in matching_hubs:
+            print(f"    {ln}")
+        print(f"  symbol_spans ({len(symbol_spans)}):")
+        for sp in symbol_spans:
+            print(f"    {sp['symbol']} [L{sp['start']}-L{sp['end']}] ({sp['kind']})")
     return 0
 
 
@@ -5991,6 +6170,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_pack.add_argument("--json", action="store_true", help="Output JSON")
     p_pack.set_defaults(func=cmd_pack)
+
+    p_zoom = sub.add_parser(
+        "zoom",
+        help="Read, scaffold, or upsert symbol-level H-tier sections in `.aoci/aoci.hubs.txt`",
+    )
+    p_zoom.add_argument("path", nargs="?", default=None, help="Target relative file path (for read or --scaffold)")
+    p_zoom.add_argument("--root", help="Target codebase root")
+    p_zoom.add_argument("--scaffold", action="store_true", help="Scaffold symbol section skeletons for <path>")
+    p_zoom.add_argument("--output", help="Optional output file path for --scaffold skeletons")
+    p_zoom.add_argument("--upsert", action="append", help="Hub entry line to merge into aoci.hubs.txt (repeatable)")
+    p_zoom.add_argument("--upsert-file", help="Path to a text file containing hub entry lines")
+    p_zoom.add_argument("--prune-missing", action="store_true", help="Prune hub entries whose file or symbol no longer exists")
+    p_zoom.add_argument("--dry-run", action="store_true", help="Validate --upsert changes without writing to disk")
+    p_zoom.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_zoom.add_argument("--json", action="store_true", help="Output JSON")
+    p_zoom.set_defaults(func=cmd_zoom)
 
     return p
 

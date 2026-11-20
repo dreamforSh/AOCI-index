@@ -503,6 +503,37 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "required": ["root", "task"],
         },
     },
+    {
+        "name": "aoci_zoom",
+        "description": (
+            "Read, scaffold, or upsert symbol-level H-tier sections in `.aoci/aoci.hubs.txt` "
+            "(validates line spans on disk and rejects `<TODO>` placeholders)."
+        ),
+        "annotations": _MUTATE_IDEMPOTENT_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["read", "scaffold", "upsert"],
+                    "default": "read",
+                    "description": "Zoom mode: read existing hub/code/spans, scaffold skeletons, or upsert hub entries",
+                },
+                "path": {"type": "string", "description": "Target relative file path (required for `read` and `scaffold`)"},
+                "entries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Hub entry lines (`<relpath>#<symbol>[Lstart-Lend]: F:... | S:...`) for `upsert`",
+                },
+                "entries_file": {"type": "string", "description": "Optional batch file containing hub entry lines for `upsert`"},
+                "output": {"type": "string", "description": "Optional output file path relative to `root` for `scaffold`"},
+                "prune_missing": {"type": "boolean", "default": False, "description": "Remove missing files/symbols during `upsert`"},
+                "dry_run": {"type": "boolean", "default": False, "description": "Validate `upsert` without writing to disk"},
+            },
+            "required": ["root"],
+        },
+    },
 ]
 
 
@@ -526,6 +557,12 @@ RESOURCES_SPEC: List[Dict[str, Any]] = [
         "mimeType": "text/plain",
     },
     {
+        "uri": "aoci://hubs",
+        "name": "AOCI Hubs Volume",
+        "description": "Symbol-level H-tier sub-volume (`.aoci/aoci.hubs.txt`).",
+        "mimeType": "text/plain",
+    },
+    {
         "uri": "aoci://shards/INDEX",
         "name": "AOCI Shard Index",
         "description": "Per-directory shard index (`.aoci/shards/INDEX.txt`) for large repositories.",
@@ -543,7 +580,7 @@ RESOURCE_TEMPLATES_SPEC: List[Dict[str, Any]] = [
     {
         "uriTemplate": "aoci://{volume}?root={root}",
         "name": "AOCI Volume for Specific Root",
-        "description": "Read a specific AOCI volume (`manifest`, `meta`, `code`, `shards/INDEX`, `shards/<shard>`) for an explicit `?root=` path.",
+        "description": "Read a specific AOCI volume (`manifest`, `meta`, `code`, `hubs`, `shards/INDEX`, `shards/<shard>`) for an explicit `?root=` path.",
         "mimeType": "text/plain",
     },
 ]
@@ -1015,6 +1052,43 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
+    if name == "aoci_zoom":
+        raw_mode = args.get("mode")
+        if raw_mode is None:
+            mode = (
+                "upsert"
+                if (args.get("entries") or args.get("entries_file") or args.get("prune_missing"))
+                and not args.get("path")
+                else "read"
+            )
+        else:
+            mode = str(raw_mode).strip().lower()
+        if mode not in ("read", "scaffold", "upsert"):
+            return True, f"ERROR: Unsupported `mode` `{mode}` for `aoci_zoom` (expected `read`, `scaffold`, or `upsert`)."
+        cli_args = ["zoom", "--root", str(root), "--json"]
+        if mode == "read":
+            if not args.get("path"):
+                return True, "ERROR: `path` parameter is required for `aoci_zoom(mode='read')`."
+            cli_args.extend(["--", str(args["path"])])
+        elif mode == "scaffold":
+            if not args.get("path"):
+                return True, "ERROR: `path` parameter is required for `aoci_zoom(mode='scaffold')`."
+            cli_args.append("--scaffold")
+            if args.get("output"):
+                cli_args.append(f"--output={args['output']}")
+            cli_args.extend(["--", str(args["path"])])
+        else:
+            if args.get("entries_file"):
+                cli_args.append(f"--upsert-file={args['entries_file']}")
+            if args.get("prune_missing"):
+                cli_args.append("--prune-missing")
+            if args.get("dry_run"):
+                cli_args.append("--dry-run")
+            for entry in args.get("entries") or []:
+                cli_args.append(f"--upsert={entry}")
+        rc, out = _run_cli_capture(cli_args)
+        return rc != 0, out
+
     return True, f"Unknown tool: `{name}`"
 
 
@@ -1035,6 +1109,8 @@ def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str
         target_path = aoci_dir / aoci_index.META_FILE
     elif resource_key == "code":
         target_path = aoci_dir / aoci_index.CODE_FILE
+    elif resource_key == "hubs":
+        target_path = aoci_dir / aoci_index.HUBS_FILE
     elif resource_key == "shards/INDEX":
         target_path = aoci_dir / aoci_index.SHARDS_DIR / aoci_index.SHARDS_INDEX
     elif resource_key.startswith("shards/"):
