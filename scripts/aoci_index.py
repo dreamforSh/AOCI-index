@@ -211,6 +211,7 @@ from aoci_core.parsers import (  # noqa: E402
     compute_signature_hash,
     compute_signature_hash_from_bytes,
     extract_file_outline,
+    resolve_go_package_imports,
 )
 from aoci_core.pool import (  # noqa: E402
     _SHA256_HEX_RE,
@@ -5173,22 +5174,38 @@ def audit_architecture(
             root, ginfo, ignores, base_files=base_files, fast_mtime=True, max_bytes=max_bytes
         )
         discovered = sorted(fps.keys())
-        static_deps, _, _ = build_static_import_graph(root, discovered, fps=fps, aoci_dir=aoci_dir)
+        static_deps, _, outlines = build_static_import_graph(root, discovered, fps=fps, aoci_dir=aoci_dir)
+        go_imported_dirs_by_file, go_files_by_dir = resolve_go_package_imports(root, outlines, discovered)
         known = set(entries.keys())
 
         static_sets: Dict[str, Set[str]] = {k: set(v) for k, v in static_deps.items()}
         for rel in sorted(entries.keys()):
             s_deps = static_sets.get(rel, set())
             f_deps = fras_deps.get(rel, set())
-            for dep in sorted(s_deps):
-                if dep in entries and dep not in f_deps:
-                    missing_static_deps.append({"from": rel, "to": dep, "code": "missing-static-dep"})
+            rel_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
+            if rel.endswith(".go"):
+                for imp_dir in sorted(go_imported_dirs_by_file.get(rel, ())):
+                    if imp_dir == rel_dir:
+                        continue
+                    pkg_indexed = [f for f in go_files_by_dir.get(imp_dir, ()) if f in entries and f != rel]
+                    if pkg_indexed and not (set(pkg_indexed) & f_deps):
+                        missing_static_deps.append({"from": rel, "to": pkg_indexed[0], "code": "missing-static-dep"})
+            else:
+                for dep in sorted(s_deps):
+                    if dep in entries and dep not in f_deps:
+                        missing_static_deps.append({"from": rel, "to": dep, "code": "missing-static-dep"})
             rel_eco = _static_ecosystem(rel)
             if rel_eco is not None:
                 fields = parse_entry_fields(entries[rel])
                 if fields:
                     for r_dep in extract_path_refs(fields["r"], known):
-                        if r_dep != rel and _static_ecosystem(r_dep) == rel_eco and r_dep not in s_deps:
+                        if r_dep == rel or _static_ecosystem(r_dep) != rel_eco:
+                            continue
+                        if rel.endswith(".go") and r_dep.endswith(".go"):
+                            r_dir = r_dep.rsplit("/", 1)[0] if "/" in r_dep else ""
+                            if r_dir == rel_dir or r_dir in go_imported_dirs_by_file.get(rel, ()):
+                                continue
+                        if r_dep not in s_deps:
                             phantom_fras_deps.append(
                                 {
                                     "from": rel,

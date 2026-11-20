@@ -3105,6 +3105,259 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         self.assertEqual(d2["scores"][0]["path"], "src/limit.py")
         self.assertTrue(any("rate limit -> 限流" in g for g in d2["scores"][0].get("matched_glossary", [])))
 
+    def test_go_package_level_audit_5_file_pkg_no_false_missing_or_phantom(self):
+        self.write("go.mod", "module example.com/demo\n")
+        for i in range(1, 6):
+            self.write(
+                f"pkg/f{i}.go",
+                f"package pkg\n\nfunc Func{i}() int {{ return {i} }}\n",
+            )
+        self.write("pkg/f1_test.go", "package pkg\nimport \"testing\"\nfunc TestF1(t *testing.T) {}\n")
+        self.write(
+            "cmd/app/main.go",
+            'package main\n\nimport (\n\t"fmt"\n\t"example.com/demo/pkg"\n)\n\nfunc main() { fmt.Println(pkg.Func4()) }\n',
+        )
+        self.write(
+            "cmd/app/unlinked.go",
+            'package main\n\nimport "example.com/demo/pkg"\n\nfunc helper() int { return pkg.Func1() }\n',
+        )
+        self.write("other/extra.go", "package other\n\nfunc Extra() int { return 9 }\n")
+        self.init()
+        entries = [
+            "pkg/f1.go[DX3T]: F:implements package part one | R:pkg/f4.go | A:Func1 | S:-",
+            "pkg/f2.go[DX3T]: F:implements package part two | R:- | A:Func2 | S:-",
+            "pkg/f3.go[DX3T]: F:implements package part three | R:- | A:Func3 | S:-",
+            "pkg/f4.go[DX3T]: F:implements package part four | R:- | A:Func4 | S:-",
+            "pkg/f5.go[DX3T]: F:implements package part five | R:- | A:Func5 | S:-",
+            "pkg/f1_test.go[CX2T]: F:tests package func one | R:pkg/f1.go | A:TestF1 | S:-",
+            "cmd/app/main.go[EX4T]: F:runs application entrypoint | R:pkg/f4.go | A:main | S:-",
+            "cmd/app/unlinked.go[EX3T]: F:runs secondary app helper | R:- | A:helper | S:-",
+            "other/extra.go[CX2T]: F:provides unrelated helper | R:- | A:Extra | S:-",
+        ]
+        self.assertEqual(self.upsert(*entries)[0], 0)
+
+        aud = cli_json("audit", "--root", str(self.root))
+        missing_pairs = [(x["from"], x["to"]) for x in aud["missing_static_deps"]]
+        phantom_pairs = [(x["from"], x["to"]) for x in aud["phantom_fras_deps"]]
+
+        # `cmd/app/main.go` cites 4th file `pkg/f4.go` -> satisfies `pkg` import with zero missing/phantom
+        self.assertFalse(any(src == "cmd/app/main.go" for src, _ in missing_pairs), missing_pairs)
+        self.assertFalse(any(src == "cmd/app/main.go" for src, _ in phantom_pairs), phantom_pairs)
+        # Same-package sibling `pkg/f1.go` -> `pkg/f4.go` is NOT flagged as phantom
+        self.assertNotIn(("pkg/f1.go", "pkg/f4.go"), phantom_pairs)
+        # `cmd/app/unlinked.go` omits all files of imported `pkg` -> exactly one missing-static-dep (`pkg/f1.go`)
+        unlinked_missing = [x for x in aud["missing_static_deps"] if x["from"] == "cmd/app/unlinked.go"]
+        self.assertEqual(unlinked_missing, [{"from": "cmd/app/unlinked.go", "to": "pkg/f1.go", "code": "missing-static-dep"}])
+
+        # Citing a `.go` file from an unimported package (`other/extra.go`) still triggers `phantom-fras-dep`
+        self.assertEqual(
+            self.upsert("cmd/app/main.go[EX4T]: F:runs application entrypoint | R:pkg/f4.go,other/extra.go | A:main | S:-")[0],
+            0,
+        )
+        aud2 = cli_json("audit", "--root", str(self.root))
+        self.assertIn(("cmd/app/main.go", "other/extra.go"), [(x["from"], x["to"]) for x in aud2["phantom_fras_deps"]])
+
+    def test_global_claude_hook_spaced_interpreter_and_spaced_home_cmd_c(self):
+        self.write("app.py", "x = 1\n")
+        self.init()
+        self.upsert("app.py[CX2T]: F:defines app constant x | R:- | A:- | S:-")
+
+        tmp_base = Path(self._tmp.name)
+        home = tmp_base / "space home"
+        home.mkdir()
+        py_dir = tmp_base / "py dir"
+        real_py_dir = Path(sys.executable).parent
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(py_dir), str(real_py_dir)], check=True, capture_output=True)
+        else:
+            os.symlink(str(real_py_dir), str(py_dir))
+        try:
+            spaced_py = py_dir / Path(sys.executable).name
+            quoted_py = f'"{spaced_py.as_posix()}"'
+            r = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALL),
+                    "--host",
+                    "claude-code",
+                    "--scope",
+                    "global",
+                    "--home-dir",
+                    str(home),
+                    "--python-cmd",
+                    quoted_py,
+                    "--with-hooks",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+            settings_path = home / ".claude" / "settings.json"
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            start_cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            self.assertTrue(start_cmd.startswith(quoted_py), start_cmd)
+            self.assertIn('-c "import runpy;runpy.run_path(', start_cmd)
+            self.assertIn("aoci_hook.py", start_cmd)
+
+            shell_proc = subprocess.run(
+                start_cmd,
+                shell=True,
+                cwd=str(self.root),
+                input=json.dumps({"cwd": str(self.root), "session_id": "win-sp", "hook_event_name": "SessionStart"}),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(shell_proc.returncode, 0, shell_proc.stderr)
+            parsed = json.loads(shell_proc.stdout)
+            self.assertIn("aoci_index.py", parsed["hookSpecificOutput"]["additionalContext"])
+
+            # Uninstall still matches and removes the `-c` hook cleanly
+            r_un = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALL),
+                    "--host",
+                    "claude-code",
+                    "--scope",
+                    "global",
+                    "--home-dir",
+                    str(home),
+                    "--uninstall",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(r_un.returncode, 0, r_un.stdout + r_un.stderr)
+            after_un = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertNotIn("hooks", after_un)
+
+            # Unquoted `--python-cmd` keeps direct `"<script>"` invocation
+            r_unq = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALL),
+                    "--host",
+                    "claude-code",
+                    "--scope",
+                    "global",
+                    "--home-dir",
+                    str(home),
+                    "--python-cmd",
+                    "python3",
+                    "--with-hooks",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(r_unq.returncode, 0, r_unq.stdout + r_unq.stderr)
+            unq_cmd = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            self.assertTrue(unq_cmd.startswith('python3 "'), unq_cmd)
+        finally:
+            if os.name == "nt" and py_dir.exists():
+                subprocess.run(["cmd", "/c", "rmdir", str(py_dir)], capture_output=True)
+            elif py_dir.is_symlink():
+                py_dir.unlink()
+
+    def test_mcp_resource_templates_list_and_thread_safe_cli_capture(self):
+        import concurrent.futures
+        import io
+        import aoci_mcp
+
+        self.write("app.py", "def run():\n    return 1\n")
+        self.init()
+        self.upsert("app.py[CX2T]: F:runs application entrypoint | R:- | A:run | S:-")
+
+        in_buf = io.BytesIO((json.dumps({"jsonrpc": "2.0", "id": 11, "method": "resources/templates/list"}) + "\n").encode("utf-8"))
+        out_buf = io.BytesIO()
+        aoci_mcp.serve_stdio(in_buf, out_buf)
+        resp = json.loads(out_buf.getvalue().decode("utf-8"))
+        self.assertEqual(resp["id"], 11)
+        templates = resp["result"]["resourceTemplates"]
+        uris = {t["uriTemplate"] for t in templates}
+        self.assertIn("aoci://shards/{shard}", uris)
+        self.assertIn("aoci://{volume}?root={root}", uris)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(aoci_mcp._run_cli_capture, ["verify", "--root", str(self.root), "--json"]) for _ in range(4)]
+            for fut in futs:
+                rc, out = fut.result()
+                self.assertEqual(rc, 0, out)
+                self.assertTrue(json.loads(out)["ok"])
+
+    def test_python_type_checking_try_imports_and_class_annassign_sig_hash(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/types.py", "class Token:\n    pass\n")
+        self.write("pkg/fast.py", "def parse():\n    return 1\n")
+        self.write("pkg/slow.py", "def parse():\n    return 2\n")
+        self.write(
+            "pkg/models.py",
+            "from __future__ import annotations\n"
+            "from dataclasses import dataclass\n"
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from pkg import types\n"
+            "try:\n"
+            "    from pkg import fast\n"
+            "except ImportError:\n"
+            "    from pkg import slow\n\n"
+            "__all__ = ['Item']\n\n"
+            "@dataclass\n"
+            "class Item:\n"
+            "    id: int\n"
+            "    label: str\n"
+            "    _cache: int = 0\n\n"
+            "    def render(self) -> str:\n"
+            "        return self.label\n",
+        )
+        self.init()
+
+        outline = aoci_index.extract_file_outline(self.root / "pkg/models.py", "pkg/models.py")
+        self.assertIn("pkg", outline["imports"])
+        self.assertIn("pkg.types", outline["py_from_members"])
+        self.assertIn("pkg.fast", outline["py_from_members"])
+        self.assertIn("pkg.slow", outline["py_from_members"])
+
+        self.assertEqual(
+            self.upsert(
+                "pkg/__init__.py[CX1T]: F:marks package root | R:- | A:- | S:-",
+                "pkg/types.py[DX2T]: F:defines token type | R:- | A:Token | S:-",
+                "pkg/fast.py[CX2T]: F:provides fast parser | R:- | A:parse | S:-",
+                "pkg/slow.py[CX2T]: F:provides fallback parser | R:- | A:parse | S:-",
+                "pkg/models.py[DX5T]: F:defines item dataclass model | R:pkg/types.py,pkg/fast.py,pkg/slow.py | A:Item | S:-",
+            )[0],
+            0,
+        )
+
+        # Private `_cache` type or method body edit stays `impl_only`
+        base_src = (self.root / "pkg/models.py").read_text(encoding="utf-8")
+        self.write("pkg/models.py", base_src.replace("_cache: int = 0", "_cache: str = ''").replace("return self.label", "return self.label.strip()"))
+        scan1 = cli_json("scan", "--root", str(self.root))["drift"]
+        by_p1 = {it["path"]: it for it in scan1["modified"]}
+        self.assertEqual(by_p1["pkg/models.py"]["change_kind"], "impl_only")
+
+        # Public dataclass `AnnAssign` change triggers `contract_changed`
+        self.write("pkg/models.py", base_src.replace("label: str", "label: int"))
+        scan2 = cli_json("scan", "--root", str(self.root))["drift"]
+        by_p2 = {it["path"]: it for it in scan2["modified"]}
+        self.assertEqual(by_p2["pkg/models.py"]["change_kind"], "contract_changed")
+
+        # `__all__` export list change triggers `contract_changed`
+        self.write("pkg/models.py", base_src.replace("__all__ = ['Item']", "__all__ = ['Item', 'extra']"))
+        scan3 = cli_json("scan", "--root", str(self.root))["drift"]
+        by_p3 = {it["path"]: it for it in scan3["modified"]}
+        self.assertEqual(by_p3["pkg/models.py"]["change_kind"], "contract_changed")
+
+        # `if TYPE_CHECKING:` import change triggers `contract_changed`
+        self.write("pkg/models.py", base_src.replace("from pkg import types", "from pkg import types, extra_types"))
+        scan4 = cli_json("scan", "--root", str(self.root))["drift"]
+        by_p4 = {it["path"]: it for it in scan4["modified"]}
+        self.assertEqual(by_p4["pkg/models.py"]["change_kind"], "contract_changed")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

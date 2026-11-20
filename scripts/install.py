@@ -427,7 +427,10 @@ def upsert_claude_hooks(
         runner = _claude_project_runner(py_cmd)
     else:
         script_posix = (skill_dest / "scripts" / "aoci_hook.py").resolve().as_posix()
-        runner = f'{py_cmd} "{script_posix}"'
+        if py_cmd.startswith('"') and " " in script_posix:
+            runner = f'{py_cmd} -c "import runpy;runpy.run_path({script_posix!r},run_name=\'__main__\')"'
+        else:
+            runner = f'{py_cmd} "{script_posix}"'
 
     desired_events: Dict[str, str] = {
         "SessionStart": f"{runner} --host claude-code --event session-start",

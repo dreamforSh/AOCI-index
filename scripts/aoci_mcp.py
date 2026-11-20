@@ -20,6 +20,7 @@ import io
 import json
 import os
 import sys
+import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -501,6 +502,21 @@ RESOURCES_SPEC: List[Dict[str, Any]] = [
     },
 ]
 
+RESOURCE_TEMPLATES_SPEC: List[Dict[str, Any]] = [
+    {
+        "uriTemplate": "aoci://shards/{shard}",
+        "name": "AOCI Directory Shard",
+        "description": "Per-directory shard file (`.aoci/shards/<shard>.code.txt`).",
+        "mimeType": "text/plain",
+    },
+    {
+        "uriTemplate": "aoci://{volume}?root={root}",
+        "name": "AOCI Volume for Specific Root",
+        "description": "Read a specific AOCI volume (`manifest`, `meta`, `code`, `shards/INDEX`, `shards/<shard>`) for an explicit `?root=` path.",
+        "mimeType": "text/plain",
+    },
+]
+
 
 PROMPTS_SPEC: List[Dict[str, Any]] = [
     {
@@ -528,20 +544,24 @@ PROMPTS_SPEC: List[Dict[str, Any]] = [
 ]
 
 
+_CLI_CAPTURE_LOCK = threading.Lock()
+
+
 def _run_cli_capture(argv: List[str]) -> Tuple[int, str]:
     out_buf = io.StringIO()
     err_buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-            rc = aoci_index.main(argv)
-    except SystemExit as exc:
-        if isinstance(exc.code, int):
-            rc = exc.code
-        elif exc.code is None:
-            rc = 0
-        else:
-            rc = 1
-            err_buf.write(f"\n{exc.code}")
+    with _CLI_CAPTURE_LOCK:
+        try:
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                rc = aoci_index.main(argv)
+        except SystemExit as exc:
+            if isinstance(exc.code, int):
+                rc = exc.code
+            elif exc.code is None:
+                rc = 0
+            else:
+                rc = 1
+                err_buf.write(f"\n{exc.code}")
     combined = (out_buf.getvalue() + ("\n" + err_buf.getvalue() if err_buf.getvalue().strip() else "")).strip()
     return rc, combined
 
@@ -1005,6 +1025,9 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if method == "resources/list":
         return _ok({"resources": RESOURCES_SPEC})
+
+    if method == "resources/templates/list":
+        return _ok({"resourceTemplates": RESOURCE_TEMPLATES_SPEC})
 
     if method == "resources/read":
         uri = str(params.get("uri", ""))

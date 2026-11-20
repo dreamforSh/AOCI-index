@@ -10,7 +10,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from .constants import (
     CACHE_DIR,
@@ -395,6 +395,38 @@ def _py_fn_sig(fn_node: ast.AST) -> str:
     return f"{prefix} {getattr(fn_node, 'name', '')}({','.join(parts)}){ret_str}{route_tag}"
 
 
+def _iter_py_import_nodes(body: Sequence[ast.AST]) -> Iterator[ast.AST]:
+    """Yield top-level Import/ImportFrom nodes plus those directly inside top-level If/Try blocks."""
+    for node in body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        elif isinstance(node, ast.If):
+            for sub in node.body:
+                if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    yield sub
+            cur_else = node.orelse
+            while cur_else:
+                for sub in cur_else:
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        yield sub
+                if len(cur_else) == 1 and isinstance(cur_else[0], ast.If):
+                    elif_node = cur_else[0]
+                    for sub in elif_node.body:
+                        if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                            yield sub
+                    cur_else = elif_node.orelse
+                else:
+                    break
+        elif isinstance(node, ast.Try):
+            sub_lists: List[Sequence[ast.AST]] = [node.body, node.orelse, node.finalbody]
+            for handler in node.handlers:
+                sub_lists.append(handler.body)
+            for stmts in sub_lists:
+                for sub in stmts:
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        yield sub
+
+
 def _extract_outline_from_bytes(
     norm_bytes: bytes,
     ext: str,
@@ -414,7 +446,7 @@ def _extract_outline_from_bytes(
     if ext == ".py":
         try:
             tree = ast.parse(text)
-            for node in tree.body:
+            for node in _iter_py_import_nodes(tree.body):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         imports.append(alias.name)
@@ -428,7 +460,8 @@ def _extract_outline_from_bytes(
                     else:
                         for alias in node.names:
                             imports.append(f"{dots}{alias.name}")
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     args = [a.arg for a in node.args.args]
                     prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
                     route_tag = _py_route_decorator(node)
@@ -532,6 +565,16 @@ def _extract_outline_from_bytes(
     return out_obj
 
 
+def _py_all_sig(value: Optional[ast.AST]) -> str:
+    if value is None:
+        return "__all__:None"
+    try:
+        val = ast.literal_eval(value)
+        return "__all__:" + json.dumps(val, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (ValueError, TypeError):
+        return "__all__:" + ast.dump(value)
+
+
 def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = "") -> Optional[str]:
     """Compute a 16-hex-char fingerprint of a file's public interface & imports."""
     ext_l = ext.lower()
@@ -548,7 +591,7 @@ def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = ""
             return None
         py_imps: List[str] = []
         py_sigs: List[str] = []
-        for node in tree.body:
+        for node in _iter_py_import_nodes(tree.body):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     py_imps.append(f"imp:{alias.name}")
@@ -557,16 +600,28 @@ def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = ""
                 mod = node.module or ""
                 names = ",".join(sorted(a.name for a in node.names))
                 py_imps.append(f"from:{dots}{mod}:{names}")
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 py_sigs.append(_py_fn_sig(node))
             elif isinstance(node, ast.ClassDef):
                 bases = ",".join(_ast_type_str(b) for b in node.bases)
-                methods = sorted(
+                members = [
                     _py_fn_sig(n)
                     for n in node.body
                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
-                )
-                py_sigs.append(f"class {node.name}({bases})[{';'.join(methods)}]")
+                ]
+                for n in node.body:
+                    if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and not n.target.id.startswith("_"):
+                        members.append(f"{n.target.id}:{_ast_type_str(n.annotation)}")
+                members.sort()
+                py_sigs.append(f"class {node.name}({bases})[{';'.join(members)}]")
+            elif isinstance(node, ast.Assign):
+                if any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
+                    py_sigs.append(_py_all_sig(node.value))
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                    ann = _ast_type_str(node.annotation)
+                    py_sigs.append(f"__all__[{ann}]:{_py_all_sig(node.value)}")
         payload = {"i": sorted(set(py_imps)), "s": sorted(py_sigs)}
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]
@@ -755,6 +810,40 @@ def _load_go_module_prefix(root: Path) -> str:
     except OSError:
         pass
     return ""
+
+
+def resolve_go_package_imports(
+    root: Path,
+    outlines: Dict[str, Dict[str, Any]],
+    discovered_files: Sequence[str],
+) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]]]:
+    """
+    Resolve Go package directory imports per `.go` file and map each Go package directory to its
+    non-`_test.go` files using `_load_go_module_prefix(root)`.
+    """
+    go_mod = _load_go_module_prefix(root)
+    go_files_by_dir: Dict[str, List[str]] = {}
+    for f_rel in sorted(discovered_files):
+        if f_rel.endswith(".go") and not f_rel.endswith("_test.go"):
+            parent = f_rel.rsplit("/", 1)[0] if "/" in f_rel else ""
+            go_files_by_dir.setdefault(parent, []).append(f_rel)
+
+    go_imported_dirs_by_file: Dict[str, Set[str]] = {}
+    if go_mod:
+        for rel in discovered_files:
+            if not rel.endswith(".go"):
+                continue
+            out = outlines.get(rel)
+            if not isinstance(out, dict):
+                continue
+            imp_dirs: Set[str] = set()
+            for spec in out.get("imports", ()):
+                if spec == go_mod or spec.startswith(go_mod + "/"):
+                    sub_dir = spec[len(go_mod) :].lstrip("/")
+                    imp_dirs.add(sub_dir)
+            if imp_dirs:
+                go_imported_dirs_by_file[rel] = imp_dirs
+    return go_imported_dirs_by_file, go_files_by_dir
 
 
 def _probe_js_path(cand_stem: str, known_set: Set[str]) -> Optional[str]:
