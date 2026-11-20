@@ -3554,6 +3554,40 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         self.assertEqual(stall_clean["stop_retries"], 0)
         self.assertEqual(stall_clean["last_blocked_count"], 0)
 
+    def test_version_alignment_across_manifests_cli_and_mcp(self):
+        import contextlib
+        import io
+        import re
+
+        import aoci_core
+        import aoci_mcp
+
+        ver = aoci_index.AOCI_VERSION
+        self.assertEqual(ver, "1.4.0")
+        self.assertEqual(aoci_index.__version__, ver)
+        self.assertEqual(aoci_core.__version__, ver)
+        self.assertEqual(aoci_mcp.SERVER_VERSION, ver)
+
+        pyproject_text = (SKILL_DIR / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject_text, re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), ver)
+
+        plugin_data = json.loads((SKILL_DIR / "resources" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(plugin_data.get("version"), ver)
+
+        readme_text = (SKILL_DIR / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"version-{ver}-", readme_text)
+        self.assertNotIn("1.3.0", readme_text)
+        self.assertNotIn("1.2.0", readme_text)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                aoci_index.main(["--version"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn(ver, buf.getvalue())
+
 
 if __name__ == "__main__":
     from test_ext_pack import TaskPackTests  # noqa: E401, F401

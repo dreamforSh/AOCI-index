@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+AOCI_VERSION = "1.4.0"
+
 AOCI_DIR_NAME = ".aoci"
 MANIFEST_FILE = "aoci.txt"
 META_FILE = "aoci.meta.txt"

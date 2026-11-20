@@ -34,7 +34,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import aoci_index  # noqa: E402
 
 SERVER_NAME = "aoci-index"
-SERVER_VERSION = "1.4.0"
+SERVER_VERSION = aoci_index.AOCI_VERSION
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 

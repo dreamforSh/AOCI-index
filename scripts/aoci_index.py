@@ -42,6 +42,15 @@ Subcommands:
                       callers from static analysis (<TODO> F:/S: requires reading code).
   ensure-git-exclude  Idempotently enforce `.aoci/` exclusion in `.git/info/exclude`
                       and synchronize `#Git-Excluded` in `aoci.txt`.
+  audit               Cross-check FRAS graph vs static imports, Tarjan SCC
+                      cycles, and forbidden `#Layer-Rules:` edges.
+  export              Export FRAS dependency graph in Mermaid or Graphviz DOT.
+  pool                Inspect, export, or import `.pool.sqlite3` semantic cache
+                      entries and portable `aoci-semantic-pool-v1` bundles.
+  install-git-hooks   Install or remove idempotent local Git hooks
+                      (`post-checkout`/`post-merge`/`post-rewrite`/`pre-commit`).
+  zoom                Read, scaffold, or upsert symbol-level H-tier sections
+                      in `.aoci/aoci.hubs.txt`.
 
 All index writers serialize through `.aoci/.lock` so parallel agents cannot lose
 updates.
@@ -82,6 +91,7 @@ from aoci_core import test_impact as _test_impact  # noqa: E402
 from aoci_core.constants import (  # noqa: E402
     ALWAYS_SKIP_DIRS,
     AOCI_DIR_NAME,
+    AOCI_VERSION,
     BASELINE_FILE,
     BASELINE_SCHEMA_VERSION,
     BATCH_PLAN_CACHE,
@@ -234,6 +244,8 @@ from aoci_core.pool import (  # noqa: E402
     semantic_pool_path,
 )
 from aoci_core.test_impact import find_impacted_tests  # noqa: E402
+
+__version__ = AOCI_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -5857,6 +5869,7 @@ def cmd_install_git_hooks(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="AOCI Fast Codebase Index Manager")
+    p.add_argument("-V", "--version", action="version", version=f"%(prog)s {AOCI_VERSION}")
     sub = p.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="Initialize `.aoci/` index repository and enforce `.git/info/exclude`")
