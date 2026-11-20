@@ -37,6 +37,7 @@ Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semanti
 ├── aoci.txt        # Root manifest: project name, #Global-Invariants, volume registry, read order
 ├── aoci.meta.txt   # Meta volume: [LDIS] 4-char tag dictionary (Layer/Domain/Importance/Size) & FRAS rules
 ├── aoci.code.txt   # Code volume: object-fras-v2 dense single-line map (one line per managed source file)
+├── aoci.hubs.txt   # Optional H-tier symbol sub-volume (`<relpath>#<sym>[Lstart-Lend]: F:... | S:...`, managed by `zoom`)
 ├── baseline.json   # Compact normalized-LF SHA-256, line count, and mtime baseline for fast drift detection
 ├── .aociignore     # Optional extra ignore globs (full gitignore syntax: `!`, `/`-anchoring, `**`)
 ├── pending/        # Scratch area for batch entry files (never indexed, never committed)
@@ -50,7 +51,7 @@ Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semanti
 ## Workflows
 
 > **Tool Routing Priority (MCP-First, CLI-Fallback)**:
-> - Whenever `aoci_*` MCP tools (`aoci_overview`, `aoci_query`, `aoci_context`, `aoci_diff`, `aoci_scan`, `aoci_outline`, `aoci_scaffold`, `aoci_ack`, `aoci_upsert`, `aoci_migrate_renames`, `aoci_restore`, `aoci_shard`, `aoci_ensure_git_exclude`, `aoci_lint`, `aoci_verify`, `aoci_audit`, `aoci_export`, `aoci_pool`, `aoci_init`) are registered in your toolset, **prefer calling them directly** (always passing `root: "<repo>"`) instead of spawning shell commands — this keeps parsed graphs and BM25 indexes warm in memory, exposes MCP resources (`aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://shards/INDEX`) and prompts (`aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`), marks read-only tools with `readOnlyHint`, and avoids terminal permission prompts.
+> - Whenever `aoci_*` MCP tools (`aoci_overview`, `aoci_query`, `aoci_context`, `aoci_pack`, `aoci_diff`, `aoci_scan`, `aoci_outline`, `aoci_scaffold`, `aoci_ack`, `aoci_upsert`, `aoci_migrate_renames`, `aoci_restore`, `aoci_zoom`, `aoci_shard`, `aoci_ensure_git_exclude`, `aoci_lint`, `aoci_verify`, `aoci_audit`, `aoci_export`, `aoci_pool`, `aoci_init`) are registered in your toolset, **prefer calling them directly** (always passing `root: "<repo>"`) instead of spawning shell commands — this keeps parsed graphs and BM25 indexes warm in memory, exposes MCP resources (`aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://hubs`, `aoci://shards/INDEX`), URI templates (`aoci://shards/{shard}`, `aoci://{volume}?root={root}`), and prompts (`aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`), marks read-only tools with `readOnlyHint`, and avoids terminal permission prompts.
 > - Otherwise, in all commands below, `<SCRIPT>` refers to [scripts/aoci_index.py](./scripts/aoci_index.py) (zero external dependencies; Python 3.8+ standard library only, backed by internal modules in `scripts/aoci_core/`).
 
 ### Workflow A: Initialize & Build a New AOCI Index
@@ -169,13 +170,15 @@ After creating, editing, renaming, or deleting any managed source file — **bef
 | `verify` | Full health gate (Git exclusion + format + domain check + zero drift; lint summary) | `--root`, `--fast`, `--git-fast`, `--json` |
 | `lint` | FRAS quality findings (vague F, token budget, hub `S:-`, dangling refs, duplicates) | `--root`, `--code`, `--strict`, `--limit`, `--json` |
 | `audit` | Cross-check FRAS graph vs static imports, Tarjan SCC dependency cycles, and forbidden layer edges (`#Layer-Rules:` / `--forbid`) | `--root`, `--forbid`, `--no-default-rules`, `--no-static`, `--no-cycles`, `--no-layers`, `--strict`, `--json` |
-| `query` | Filter or BM25-rank entries (`--search` with bilingual `#Glossary:` expansion & match attribution), or list dependents (`--impact`) | `--search`, `--top`, `--layer`, `--domain`, `--min-importance`, `--path`, `--keyword`, `--impact`, `--depth`, `--json` |
-| `context` | Directed subgraph: invariants + target(s) + dependencies + dependents (optional greedy `--budget` token ceiling) | `paths...`, `--root`, `--depth N`, `--budget <tokens>`, `--json` |
+| `query` | Filter or BM25-rank entries (`--search` with bilingual `#Glossary:` expansion & match attribution), list dependents (`--impact`), or derive impacted tests (`--tests-for`) | `--search`, `--top`, `--layer`, `--domain`, `--min-importance`, `--path`, `--keyword`, `--impact`, `--tests-for`, `--depth`, `--json` |
+| `context` | Directed subgraph: invariants + target(s) + dependencies + dependents (optional greedy `--budget` token ceiling and `--with-tests`) | `paths...`, `--root`, `--depth N`, `--budget <tokens>`, `--with-tests`, `--json` |
+| `pack` | Build a task-driven, token-budgeted context packet (BM25 + glossary + path-mention + diff seeds, `R:`/`A:` graph, `S:` constraints, `open_next` symbol anchors) | `--task <desc>`, `--root`, `--no-diff`, `--depth N`, `--budget <tokens>`, `--top-seeds N`, `--max-bytes`, `--json` |
 | `export` | Export filtered or aggregated FRAS dependency graph in Mermaid or Graphviz DOT syntax | `--root`, `--format mermaid\|dot`, `--level file\|dir\|domain`, `--group-by`, `--direction`, `--focus`, `--output`, `--json` |
-| `diff` | Architectural impact briefing (FRAS + `S:` traps + downstream `R:` deps + callers) for diffs | `[rev]`, `--root`, `--staged`, `--depth N`, `--json` |
+| `diff` | Architectural impact briefing (FRAS + `S:` traps + downstream `R:` deps + callers + optional `--with-tests`) for diffs | `[rev]`, `--root`, `--staged`, `--depth N`, `--with-tests`, `--json` |
 | `overview` | Emit compact global digest (manifest, domains, dirs, core files) | `--root`, `--min-importance`, `--max-core`, `--json` |
 | `outline` | Extract static imports and top-level symbols to aid `R:`/`A:` authoring | `paths...`, `--root`, `--max-items`, `--max-bytes`, `--json` |
 | `scaffold` | Pre-fill `[LDIS]`, resolved `R:` imports, and repo-wide `A:` callers (`<TODO>` `F:`/`S:`) | `paths...`, `--unindexed`, `--batch N`, `--batch-size M`, `--max-batch-lines L`, `--reset-batches`, `--output`, `--json` |
+| `zoom` | Read, scaffold, or upsert symbol-level H-tier sections in `.aoci/aoci.hubs.txt` (`<relpath>#<sym>[Lstart-Lend]: F:... \| S:...`) | `[path]`, `--root`, `--scaffold`, `--output`, `--upsert`, `--upsert-file`, `--prune-missing`, `--dry-run`, `--json` |
 | `shard` | Split `aoci.code.txt` into per-directory `.aoci/shards/<dir>.code.txt` slices (10k+ repos) | `--root`, `--depth N`, `--clean`, `--json` |
 | `ensure-git-exclude` | Idempotently repair `.git/info/exclude` (e.g. after late `git init`) | `--root`, `--json` |
 | `install-git-hooks` | Install/remove idempotent local Git hooks (`post-checkout`/`post-merge`/`post-rewrite` auto-restore + optional `pre-commit`) | `--root`, `--python-cmd`, `--with-pre-commit`, `--pre-commit-verify`, `--uninstall`, `--dry-run`, `--json` |
