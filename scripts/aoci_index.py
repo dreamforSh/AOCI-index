@@ -81,12 +81,16 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from aoci_core import cochange as _cochange  # noqa: E402
 from aoci_core import githooks as _githooks  # noqa: E402
 from aoci_core import graph as _graph  # noqa: E402
 from aoci_core import hubs as _hubs  # noqa: E402
+from aoci_core import ignore as _ignore  # noqa: E402
 from aoci_core import pack as _pack  # noqa: E402
 from aoci_core import parsers as _parsers  # noqa: E402
 from aoci_core import pool as _pool  # noqa: E402
+from aoci_core import shards as _shards  # noqa: E402
+from aoci_core import sync_prep as _sync_prep  # noqa: E402
 from aoci_core import test_impact as _test_impact  # noqa: E402
 from aoci_core.constants import (  # noqa: E402
     ALWAYS_SKIP_DIRS,
@@ -186,6 +190,7 @@ from aoci_core.graph import (  # noqa: E402
     find_dependency_cycles,
     lint_entries,
     parse_entries_map,
+    parse_entry,
     parse_entry_fields,
     parse_glossary,
     parse_layer_rules,
@@ -194,7 +199,17 @@ from aoci_core.graph import (  # noqa: E402
     semantic_word_count,
     validate_parsed_entry_tags,
 )
-from aoci_core.pack import build_task_pack  # noqa: E402
+from aoci_core.ignore import (  # noqa: E402
+    IgnoreMatcher,
+    _glob_to_regex,
+    _read_ignore_lines,
+    is_probably_binary_bytes,
+    load_aociignore,
+    load_ignore_matcher,
+    matches_ignore,
+    path_skip_reason,
+)
+from aoci_core.pack import PathMentionIndex, build_task_pack  # noqa: E402
 from aoci_core.parsers import (  # noqa: E402
     _CLEAN_SYM_RE,
     _GO_SYM_RE,
@@ -242,6 +257,16 @@ from aoci_core.pool import (  # noqa: E402
     count_restorable_from_pool,
     load_semantic_pool,
     semantic_pool_path,
+)
+from aoci_core.shards import (  # noqa: E402
+    _WIN_RESERVED_SHARD_NAMES,
+    allocate_shard_ids,
+    render_code_volume,
+    shard_key_for_path,
+    shard_prefix_for_path,
+    sync_shards_if_enabled,
+    write_code_volume,
+    write_shards,
 )
 from aoci_core.test_impact import find_impacted_tests  # noqa: E402
 
@@ -363,146 +388,7 @@ class IndexLock:
                 time.sleep(0.02)
 
 
-# ---------------------------------------------------------------------------
-# gitignore-style matcher for `.aociignore` (and root `.gitignore` in non-Git mode)
-# ---------------------------------------------------------------------------
-
-
-def _glob_to_regex(glob: str) -> str:
-    out: List[str] = []
-    i, n = 0, len(glob)
-    while i < n:
-        c = glob[i]
-        if c == "*":
-            if glob[i : i + 3] == "**/":
-                out.append("(?:.*/)?")
-                i += 3
-                continue
-            if glob[i : i + 2] == "**":
-                out.append(".*")
-                i += 2
-                continue
-            out.append("[^/]*")
-        elif c == "?":
-            out.append("[^/]")
-        elif c == "[":
-            j = glob.find("]", i + 1)
-            if j == -1:
-                out.append(re.escape(c))
-            else:
-                body = glob[i + 1 : j]
-                if body.startswith("!"):
-                    body = "^" + body[1:]
-                out.append(f"[{body}]")
-                i = j
-        elif c == "\\" and i + 1 < n:
-            i += 1
-            out.append(re.escape(glob[i]))
-        else:
-            out.append(re.escape(c))
-        i += 1
-    return "".join(out)
-
-
-class IgnoreMatcher:
-    """
-    Ordered gitignore-like rules: last match wins, `!` re-includes, leading or inner `/`
-    anchors to the root, trailing `/` matches directories only, `**` spans directories,
-    and a file inside an ignored directory cannot be re-included (Git semantics).
-    """
-
-    def __init__(self, patterns: Sequence[str] = ()) -> None:
-        self.patterns: List[str] = []
-        self._rules: List[Tuple[Any, bool, bool]] = []
-        self._dir_cache: Dict[str, bool] = {}
-        self._fast_file_rx: Optional[Any] = None
-        self._fast_dir_rx: Optional[Any] = None
-        self._fast_built: bool = False
-        self._fast_can_use: bool = False
-        for raw in patterns:
-            self.add(raw)
-
-    def add(self, raw: str) -> None:
-        line = raw.rstrip("\r\n")
-        if not line.strip() or line.lstrip().startswith("#"):
-            return
-        line = line.strip()
-        negate = line.startswith("!")
-        if negate:
-            line = line[1:]
-        dir_only = line.endswith("/")
-        body = line.rstrip("/")
-        if not body:
-            return
-        anchored = body.startswith("/") or "/" in body.lstrip("/")
-        body = body.lstrip("/")
-        prefix = "^" if anchored else "^(?:.*/)?"
-        self._rules.append((re.compile(prefix + _glob_to_regex(body) + "$"), negate, dir_only))
-        self.patterns.append(raw.strip())
-        self._dir_cache.clear()
-        self._fast_file_rx = None
-        self._fast_dir_rx = None
-        self._fast_built = False
-        self._fast_can_use = False
-
-    def __bool__(self) -> bool:
-        return bool(self._rules)
-
-    def __iter__(self):  # backward compatibility with list-of-patterns callers
-        return iter(self.patterns)
-
-    def _ensure_fast_regexes(self) -> None:
-        if self._fast_built:
-            return
-        self._fast_built = True
-        if not self._rules or any(neg for _, neg, _ in self._rules):
-            self._fast_can_use = False
-            return
-        file_pats = [rx.pattern for rx, _, dir_only in self._rules if not dir_only]
-        dir_pats = [rx.pattern for rx, _, _ in self._rules]
-        try:
-            self._fast_file_rx = re.compile("(?:" + ")|(?:".join(file_pats) + ")") if file_pats else None
-            self._fast_dir_rx = re.compile("(?:" + ")|(?:".join(dir_pats) + ")") if dir_pats else None
-            self._fast_can_use = True
-        except re.error:
-            self._fast_file_rx = None
-            self._fast_dir_rx = None
-            self._fast_can_use = False
-
-    def _decide(self, subject: str, is_dir: bool) -> bool:
-        self._ensure_fast_regexes()
-        if self._fast_can_use:
-            rx = self._fast_dir_rx if is_dir else self._fast_file_rx
-            return bool(rx is not None and rx.match(subject))
-        result = False
-        for rx, negate, dir_only in self._rules:
-            if dir_only and not is_dir:
-                continue
-            if rx.match(subject):
-                result = not negate
-        return result
-
-    def _dir_ignored(self, dir_rel: str) -> bool:
-        cached = self._dir_cache.get(dir_rel)
-        if cached is not None:
-            return cached
-        parent = dir_rel.rsplit("/", 1)[0] if "/" in dir_rel else ""
-        val = (bool(parent) and self._dir_ignored(parent)) or self._decide(dir_rel, True)
-        self._dir_cache[dir_rel] = val
-        return val
-
-    def is_ignored(self, rel_posix: str, is_dir: bool = False) -> bool:
-        if not self._rules:
-            return False
-        rel = rel_posix.strip("/")
-        if not rel:
-            return False
-        if is_dir:
-            return self._dir_ignored(rel)
-        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        if parent and self._dir_ignored(parent):
-            return True
-        return self._decide(rel, False)
+# `IgnoreMatcher` & `.aociignore` helpers are imported from `aoci_core.ignore`.
 
 
 def run_git(args: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -864,80 +750,16 @@ def parse_declared_domains(aoci_dir: Path) -> Dict[str, str]:
     return domains
 
 
-def _read_ignore_lines(path: Path) -> List[str]:
-    if not path.exists():
-        return []
-    try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-
-
-def load_aociignore(aoci_dir: Path, include_root_gitignore: bool = False) -> IgnoreMatcher:
-    """
-    Build the extra-ignore matcher from `.aoci/.aociignore` (gitignore syntax incl. `!`, `/`, `**`).
-    In non-Git workspaces, the root `.gitignore` is layered underneath as a best-effort filter.
-    """
-    lines: List[str] = []
-    if include_root_gitignore:
-        lines.extend(_read_ignore_lines(aoci_dir.parent / ".gitignore"))
-    lines.extend(_read_ignore_lines(aoci_dir / IGNORE_FILE))
-    return IgnoreMatcher(lines)
-
-
-def load_ignore_matcher(root: Path, git_info: Dict[str, Any]) -> IgnoreMatcher:
-    return load_aociignore(root / AOCI_DIR_NAME, include_root_gitignore=not git_info.get("is_git"))
-
-
-def matches_ignore(rel_posix: str, patterns: Any) -> bool:
-    """Return True if `rel_posix` (trailing `/` = directory) is ignored by an IgnoreMatcher or pattern list."""
-    if not patterns:
-        return False
-    matcher = patterns if isinstance(patterns, IgnoreMatcher) else IgnoreMatcher(list(patterns))
-    if rel_posix.endswith("/"):
-        return matcher.is_ignored(rel_posix.rstrip("/"), is_dir=True)
-    return matcher.is_ignored(rel_posix)
-
-
-def is_probably_binary_bytes(chunk: bytes) -> bool:
-    if not chunk:
-        return False
-    if b"\x00" in chunk:
-        return True
-    try:
-        chunk.decode("utf-8")
-        return False
-    except UnicodeDecodeError:
-        try:
-            chunk[:-4].decode("utf-8")
-            return False
-        except UnicodeDecodeError:
-            pass
-    control_bytes = sum(1 for b in chunk if b < 9 or (13 < b < 32))
-    return (control_bytes / len(chunk)) > 0.15
-
-
-def path_skip_reason(rel_posix: str, extra_ignores: Any) -> Optional[str]:
-    """Cheap pure-string filter run before any filesystem stat/open."""
-    if not rel_posix:
-        return "empty-path"
-    parts = rel_posix.split("/")
-    if AOCI_DIR_NAME in parts or ".git" in parts:
-        return "reserved-dir"
-    if len(parts) > 1 and any(seg in ALWAYS_SKIP_DIRS for seg in parts[:-1]):
-        return "skip-dir"
-    filename = parts[-1]
-    if filename in DEFAULT_SKIP_FILENAMES:
-        return "lock-or-os-file"
-    lower_name = filename.lower()
-    if lower_name.endswith(DEFAULT_SKIP_SUFFIXES):
-        return "minified-asset"
-    dot_idx = lower_name.rfind(".")
-    if dot_idx > 0 and lower_name[dot_idx:] in DEFAULT_SKIP_EXTENSIONS:
-        return "binary-ext"
-    if extra_ignores and matches_ignore(rel_posix, extra_ignores):
-        return "aociignore"
-    return None
+def _matches_nested_gitignore(
+    rel: str,
+    is_dir: bool,
+    nested_ignores: Sequence[Tuple[str, IgnoreMatcher]],
+) -> bool:
+    for scope_prefix, matcher in nested_ignores:
+        sub_rel = rel[len(scope_prefix) + 1 :] if scope_prefix else rel
+        if sub_rel and matcher.is_ignored(sub_rel, is_dir=is_dir):
+            return True
+    return False
 
 
 def _scandir_walk(
@@ -945,8 +767,18 @@ def _scandir_walk(
     rel_prefix: str,
     extra_ignores: Any,
     out: List[Tuple[str, Optional[os.stat_result]]],
+    *,
+    honor_nested_gitignore: bool = False,
+    _nested_ignores: Tuple[Tuple[str, IgnoreMatcher], ...] = (),
 ) -> None:
     """Fast `os.scandir` recursive walker reusing OS-cached `DirEntry.stat()` on Windows."""
+    if honor_nested_gitignore and rel_prefix:
+        gi_path = base_dir / ".gitignore"
+        if gi_path.is_file():
+            gi_lines = _read_ignore_lines(gi_path)
+            if gi_lines:
+                _nested_ignores = (*_nested_ignores, (rel_prefix.rstrip("/"), IgnoreMatcher(gi_lines)))
+
     try:
         with os.scandir(base_dir) as it:
             entries = sorted(it, key=lambda e: e.name)
@@ -962,8 +794,19 @@ def _scandir_walk(
                     continue
                 if extra_ignores and matches_ignore(rel + "/", extra_ignores):
                     continue
-                _scandir_walk(Path(entry.path), f"{rel}/", extra_ignores, out)
+                if _nested_ignores and _matches_nested_gitignore(rel, True, _nested_ignores):
+                    continue
+                _scandir_walk(
+                    Path(entry.path),
+                    f"{rel}/",
+                    extra_ignores,
+                    out,
+                    honor_nested_gitignore=honor_nested_gitignore,
+                    _nested_ignores=_nested_ignores,
+                )
             elif entry.is_file(follow_symlinks=False):
+                if _nested_ignores and _matches_nested_gitignore(rel, False, _nested_ignores):
+                    continue
                 st = entry.stat(follow_symlinks=False)
                 out.append((rel, st))
         except OSError:
@@ -1046,7 +889,7 @@ def discover_candidates(
             git_info = {"is_git": False}
 
     if not git_info.get("is_git"):
-        _scandir_walk(root, "", extra_ignores, raw_candidates)
+        _scandir_walk(root, "", extra_ignores, raw_candidates, honor_nested_gitignore=True)
         raw_candidates.sort(key=lambda pair: pair[0])
 
     filtered: List[Tuple[str, Optional[os.stat_result]]] = []
@@ -2021,225 +1864,7 @@ def parse_code_volume(
     return entries, malformed
 
 
-def render_code_volume(entries: Dict[str, str], updated_at: Optional[str] = None) -> str:
-    """Render `object-fras-v2` volume text deterministically grouped by directory banner."""
-    grouped: Dict[str, List[Tuple[str, str]]] = {}
-    for rel, line in entries.items():
-        parent = rel.rsplit("/", 1)[0] + "/" if "/" in rel else "./"
-        grouped.setdefault(parent, []).append((rel, line))
-
-    out_lines: List[str] = [
-        "#AOCI-CODE-VOLUME: 1",
-        "#Format: object-fras-v2",
-        f"#Updated-At: {updated_at or utc_now_iso()}",
-        f"#Tracked-Files: {len(entries)}",
-        "",
-    ]
-
-    sorted_dirs = sorted(grouped.keys(), key=lambda d: ("" if d == "./" else d))
-    for d in sorted_dirs:
-        out_lines.append(f"==={d}===")
-        for _, line in sorted(grouped[d], key=lambda item: item[0]):
-            out_lines.append(line)
-        out_lines.append("")
-
-    return "\n".join(out_lines)
-
-
-def write_code_volume(code_path: Path, entries: Dict[str, str]) -> str:
-    """Write `aoci.code.txt` deterministically grouped by directory banner and return rendered text."""
-    rendered = render_code_volume(entries)
-    atomic_write_text(code_path, rendered)
-    return rendered
-
-
-_WIN_RESERVED_SHARD_NAMES: Set[str] = {
-    "con",
-    "prn",
-    "aux",
-    "nul",
-    *(f"com{i}" for i in range(1, 10)),
-    *(f"lpt{i}" for i in range(1, 10)),
-}
-
-
-def shard_prefix_for_path(rel: str, depth: int = 1) -> str:
-    """Return the exact directory prefix (`'./'` for root files, `'dir1/.../'` up to `depth`)."""
-    if "/" not in rel:
-        return "./"
-    parts = rel.split("/")[:-1]
-    chosen = parts[: max(1, depth)]
-    return "/".join(chosen) + "/"
-
-
-def _base_shard_slug(prefix: str) -> str:
-    if prefix == "./":
-        return "_root"
-    segs = [s for s in prefix.strip("/").split("/") if s]
-    cleaned_segs: List[str] = []
-    for seg in segs:
-        # Preserve Unicode word characters (ASCII, CJK, etc.), dots, and hyphens; sanitize path punctuation
-        s = re.sub(r"[^\w.-]", "_", seg).strip(" .")
-        if not s or s.lower() in _WIN_RESERVED_SHARD_NAMES:
-            s = f"_{s}" if s else "_"
-        cleaned_segs.append(s)
-    slug = "__".join(cleaned_segs)
-    if not slug.strip("_.") or slug.lower() == "_root" or len(slug) > 100:
-        digest = hashlib.sha256(prefix.encode("utf-8")).hexdigest()[:8]
-        head = slug[:60].strip("_.") or "shard"
-        return f"{head}_{digest}"
-    return slug
-
-
-def allocate_shard_ids(prefixes: Sequence[str]) -> Dict[str, str]:
-    """Assign a unique, case-collision-safe shard filename stem to each distinct directory prefix."""
-    sorted_prefixes = sorted(set(prefixes), key=lambda p: ("" if p == "./" else p))
-    raw_slugs = {p: _base_shard_slug(p) for p in sorted_prefixes}
-    lower_counts: Dict[str, int] = {}
-    for s in raw_slugs.values():
-        low = s.lower()
-        lower_counts[low] = lower_counts.get(low, 0) + 1
-
-    assigned: Dict[str, str] = {}
-    used_lower: Set[str] = set()
-    for p in sorted_prefixes:
-        slug = raw_slugs[p]
-        if p != "./" and (lower_counts[slug.lower()] > 1 or slug.lower() in used_lower):
-            digest = hashlib.sha256(p.encode("utf-8")).hexdigest()[:8]
-            slug = f"{slug}_{digest}"
-        used_lower.add(slug.lower())
-        assigned[p] = slug
-    return assigned
-
-
-def shard_key_for_path(rel: str, depth: int = 1) -> Tuple[str, str]:
-    """Return `(shard_id, dir_prefix)` for directory-sharded code volumes."""
-    prefix = shard_prefix_for_path(rel, depth)
-    return _base_shard_slug(prefix), prefix
-
-
-def write_shards(
-    aoci_dir: Path,
-    entries: Dict[str, str],
-    depth: int = 1,
-    incremental: bool = False,
-    prev_manifest: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Split `aoci.code.txt` into per-directory `.aoci/shards/<id>.code.txt` slices + `INDEX.txt`.
-    Groups strictly by full directory prefix first, then assigns unique shard filenames.
-    When `incremental=True`, only dirty shard files whose entry digest changed are rewritten to disk.
-    """
-    shards_dir = aoci_dir / SHARDS_DIR
-    shards_dir.mkdir(parents=True, exist_ok=True)
-    depth = max(1, int(depth))
-    now_iso = utc_now_iso()
-
-    prev_by_prefix: Dict[str, Dict[str, Any]] = {}
-    if incremental and isinstance(prev_manifest, dict) and prev_manifest.get("depth") == depth:
-        for item in prev_manifest.get("shards", ()):
-            if isinstance(item, dict) and isinstance(item.get("prefix"), str):
-                prev_by_prefix[item["prefix"]] = item
-
-    buckets_by_prefix: Dict[str, Dict[str, str]] = {}
-    for rel, line in entries.items():
-        prefix = shard_prefix_for_path(rel, depth)
-        buckets_by_prefix.setdefault(prefix, {})[rel] = line
-
-    sorted_prefixes = sorted(buckets_by_prefix.keys(), key=lambda p: ("" if p == "./" else p))
-    prefix_to_sid = allocate_shard_ids(sorted_prefixes)
-
-    expected_files: Set[str] = set()
-    shard_meta: List[Dict[str, Any]] = []
-    any_shard_changed = not incremental or (len(buckets_by_prefix) != len(prev_by_prefix))
-    index_lines: List[str] = [
-        "#AOCI-SHARD-INDEX: 1",
-        f"#Depth: {depth}",
-        f"#Updated-At: {now_iso}",
-        f"#Total-Files: {len(entries)}",
-        "",
-    ]
-
-    for prefix in sorted_prefixes:
-        sid = prefix_to_sid[prefix]
-        fname = f"{sid}.code.txt"
-        expected_files.add(fname)
-        shard_entries = buckets_by_prefix[prefix]
-        shard_path = shards_dir / fname
-        digest = hashlib.sha256(
-            "\n".join(f"{k}\t{v}" for k, v in sorted(shard_entries.items())).encode("utf-8")
-        ).hexdigest()[:16]
-        prev_info = prev_by_prefix.get(prefix)
-        if (
-            incremental
-            and prev_info is not None
-            and prev_info.get("id") == sid
-            and prev_info.get("digest") == digest
-            and shard_path.is_file()
-        ):
-            tokens = int(prev_info.get("estimated_tokens", 1))
-            hubs = int(prev_info.get("hubs", 0))
-        else:
-            any_shard_changed = True
-            rendered = render_code_volume(shard_entries, updated_at=now_iso)
-            atomic_write_text(shard_path, rendered)
-            tokens = estimate_tokens(rendered)
-            hubs = sum(
-                1
-                for ln in shard_entries.values()
-                for m in (ENTRY_RE.match(ln),)
-                if m and int(m.group("imp")) >= 8
-            )
-        info = {
-            "id": sid,
-            "prefix": prefix,
-            "file": f"{SHARDS_DIR}/{fname}",
-            "count": len(shard_entries),
-            "hubs": hubs,
-            "estimated_tokens": tokens,
-            "digest": digest,
-        }
-        shard_meta.append(info)
-        index_lines.append(
-            f"{prefix} -> .aoci/{SHARDS_DIR}/{fname} "
-            f"[files={len(shard_entries)}, hubs={hubs}, ~{tokens} tokens]"
-        )
-
-    # Remove stale shard files whose directories disappeared
-    for old in shards_dir.glob("*.code.txt"):
-        if old.name not in expected_files:
-            any_shard_changed = True
-            try:
-                old.unlink()
-            except OSError:
-                pass
-
-    manifest = {
-        "schema_version": 1,
-        "depth": depth,
-        "updated_at": now_iso,
-        "total_files": len(entries),
-        "shards": shard_meta,
-    }
-    if any_shard_changed or not (shards_dir / SHARDS_INDEX).is_file():
-        atomic_write_text(shards_dir / SHARDS_INDEX, "\n".join(index_lines) + "\n")
-        atomic_write_text(shards_dir / SHARDS_MANIFEST, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
-    return manifest
-
-
-def sync_shards_if_enabled(aoci_dir: Path, entries: Dict[str, str]) -> None:
-    manifest_path = aoci_dir / SHARDS_DIR / SHARDS_MANIFEST
-    if not manifest_path.exists():
-        return
-    depth = 1
-    prev_data: Optional[Dict[str, Any]] = None
-    try:
-        prev_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if isinstance(prev_data, dict):
-            depth = max(1, int(prev_data.get("depth", 1)))
-    except (OSError, ValueError):
-        prev_data = None
-    write_shards(aoci_dir, entries, depth=depth, incremental=True, prev_manifest=prev_data)
+# Code volume & directory shard helpers are imported from `aoci_core.shards`.
 
 
 def _resolve_disk_case_single(
@@ -3269,8 +2894,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
         drift["deleted"]
     )
     if changed_paths and drift["_code_entries"]:
-        _, dependents = build_fras_graph(drift["_code_entries"])
-        mentioned_by = build_explicit_mention_index(drift["_code_entries"])
+        code_map = drift["_code_entries"]
+        parsed_map = parse_entries_map(code_map)
+        _, dependents = build_fras_graph(code_map, parsed_entries=parsed_map)
+        mentioned_by = build_explicit_mention_index(code_map, parsed_entries=parsed_map)
         changed_set = set(changed_paths)
         for p in changed_paths:
             nbs = sorted((mentioned_by.get(p, set()) | dependents.get(p, set())) - changed_set)
@@ -3635,28 +3262,33 @@ def _upsert_locked(
         (rel, base_files[rel], entries[rel]) for rel in upserted_paths if rel in entries
     ]
     record_semantic_pool_entries(root, git_info, pool_records)
+    hub_sync = _hubs.sync_hubs_on_upsert(root, aoci_dir, upserted_paths, pruned)
 
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "dry_run": False,
-                    "upserted": upserted_paths,
-                    "pruned": pruned,
-                    "total_indexed": len(entries),
-                    "warnings": warnings,
-                    "dangling_warnings": dangling_warnings,
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+        upsert_payload: Dict[str, Any] = {
+            "ok": True,
+            "dry_run": False,
+            "upserted": upserted_paths,
+            "pruned": pruned,
+            "total_indexed": len(entries),
+            "warnings": warnings,
+            "dangling_warnings": dangling_warnings,
+        }
+        if hub_sync.get("refreshed"):
+            upsert_payload["hubs_refreshed"] = hub_sync["refreshed"]
+        if hub_sync.get("pruned"):
+            upsert_payload["hubs_pruned"] = hub_sync["pruned"]
+        print(json.dumps(upsert_payload, indent=2, ensure_ascii=False))
     else:
         print(
             f"[AOCI Upsert] OK | Upserted={len(upserted_paths)} | Pruned={len(pruned)} | "
             f"TotalIndexed={len(entries)}"
         )
+        if hub_sync.get("refreshed") or hub_sync.get("pruned"):
+            print(
+                f"  [hubs] Refreshed={len(hub_sync.get('refreshed', []))} | "
+                f"Pruned={len(hub_sync.get('pruned', []))}"
+            )
     return 0
 
 
@@ -3817,23 +3449,24 @@ def _migrate_renames_locked(
                 )
                 updated_refs.append(rel)
 
+    migrated_hubs = _hubs.migrate_hubs_renames(
+        root, aoci_dir, rename_map, dry_run=bool(args.dry_run)
+    )
+
     if args.dry_run:
         if as_json:
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "dry_run": True,
-                        "migrated": [{"from": o, "to": n} for o, n in migrated],
-                        "migrated_similar": [
-                            {"from": o, "to": n, "similarity_pct": pct} for o, n, pct in migrated_similar
-                        ],
-                        "rewritten_refs": updated_refs,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
+            dry_mig_payload: Dict[str, Any] = {
+                "ok": True,
+                "dry_run": True,
+                "migrated": [{"from": o, "to": n} for o, n in migrated],
+                "migrated_similar": [
+                    {"from": o, "to": n, "similarity_pct": pct} for o, n, pct in migrated_similar
+                ],
+                "rewritten_refs": updated_refs,
+            }
+            if migrated_hubs:
+                dry_mig_payload["migrated_hubs"] = migrated_hubs
+            print(json.dumps(dry_mig_payload, indent=2, ensure_ascii=False))
         else:
             print(
                 f"[AOCI Migrate-Renames DRY-RUN] WouldMigrate={len(migrated)} | "
@@ -3845,6 +3478,8 @@ def _migrate_renames_locked(
                 print(f"  ~> {old_p} -> {new_p} ({pct}% similar; remains MODIFIED for review)")
             for ref_p in updated_refs:
                 print(f"  ~ ref updated: {ref_p}")
+            for hm in migrated_hubs:
+                print(f"  ~ [hubs] would migrate: {hm}")
         return 0
 
     if malformed and not as_json:
@@ -3861,22 +3496,19 @@ def _migrate_renames_locked(
     )
 
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "dry_run": False,
-                    "migrated": [{"from": o, "to": n} for o, n in migrated],
-                    "migrated_similar": [
-                        {"from": o, "to": n, "similarity_pct": pct} for o, n, pct in migrated_similar
-                    ],
-                    "rewritten_refs": updated_refs,
-                    "dropped_malformed": len(malformed),
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+        mig_payload: Dict[str, Any] = {
+            "ok": True,
+            "dry_run": False,
+            "migrated": [{"from": o, "to": n} for o, n in migrated],
+            "migrated_similar": [
+                {"from": o, "to": n, "similarity_pct": pct} for o, n, pct in migrated_similar
+            ],
+            "rewritten_refs": updated_refs,
+            "dropped_malformed": len(malformed),
+        }
+        if migrated_hubs:
+            mig_payload["migrated_hubs"] = migrated_hubs
+        print(json.dumps(mig_payload, indent=2, ensure_ascii=False))
     else:
         sim_note = f" | MigratedSimilar={len(migrated_similar)} (review & ack/upsert)" if migrated_similar else ""
         print(f"[AOCI Migrate-Renames] OK | Migrated={len(migrated)}{sim_note} | RewrittenRefs={len(updated_refs)}")
@@ -3886,6 +3518,8 @@ def _migrate_renames_locked(
             print(f"  ~> {old_p} -> {new_p} ({pct}% similar; still MODIFIED until `ack` or `upsert`)")
         for ref_p in updated_refs:
             print(f"  ~ ref updated: {ref_p}")
+        for hm in migrated_hubs:
+            print(f"  ~ [hubs] migrated: {hm}")
     return 0
 
 
@@ -3957,6 +3591,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
         issues.append(f"{len(drift['malformed_lines'])} malformed line(s) in `aoci.code.txt`")
     for inv in drift["invalid_entries"]:
         issues.append(inv["message"])
+    hub_verify_issues, _ = _hubs.validate_hubs_volume(
+        root, aoci_dir, drift["_code_entries"], fingerprints=drift.get("_fingerprints")
+    )
+    issues.extend(hub_verify_issues)
 
     for dom, paths in drift["undeclared_domains"].items():
         warnings.append(f"Undeclared Domain `{dom}` in `.aoci/aoci.meta.txt` (used by {len(paths)} file(s))")
@@ -4058,6 +3696,7 @@ def search_entries_bm25(
     candidate_paths: Optional[Set[str]] = None,
     top_k: int = 20,
     glossary: Optional[Sequence[Sequence[str]]] = None,
+    parsed_entries: Optional[Any] = None,
 ) -> List[Tuple[float, str, str]]:
     """Rank FRAS entries with field-weighted Okapi BM25 + Importance centrality prior."""
     return _graph.search_entries_bm25(
@@ -4067,6 +3706,7 @@ def search_entries_bm25(
         top_k=top_k,
         index_cls=BM25Index,
         glossary=glossary,
+        parsed_entries=parsed_entries,
     )
 
 
@@ -4076,6 +3716,7 @@ def search_entries_bm25_detailed(
     candidate_paths: Optional[Set[str]] = None,
     top_k: int = 20,
     glossary: Optional[Sequence[Sequence[str]]] = None,
+    parsed_entries: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Rank FRAS entries with BM25 + project glossary expansion and return per-hit term attribution."""
     return _graph.search_entries_bm25_detailed(
@@ -4085,6 +3726,7 @@ def search_entries_bm25_detailed(
         top_k=top_k,
         index_cls=BM25Index,
         glossary=glossary,
+        parsed_entries=parsed_entries,
     )
 
 
@@ -4102,6 +3744,7 @@ def cmd_query(args: argparse.Namespace) -> int:
         return 2
 
     entries, _ = parse_code_volume(code_path)
+    parsed_map = parse_entries_map(entries)
     impact_target = normalize_relpath(args.impact) if args.impact else None
     raw_tests_for = getattr(args, "tests_for", None)
     tests_for_target = normalize_relpath(raw_tests_for) if raw_tests_for else None
@@ -4118,7 +3761,7 @@ def cmd_query(args: argparse.Namespace) -> int:
     dependents: Optional[Dict[str, Set[str]]] = None
     impact_set: Optional[Set[str]] = None
     if impact_target or tests_for_target:
-        _, dependents = build_fras_graph(entries)
+        _, dependents = build_fras_graph(entries, parsed_entries=parsed_map)
     if impact_target and dependents is not None:
         # Impact = the target plus every entry that (transitively, up to --depth) depends on it
         impact_set = {impact_target} | set(bfs_neighbors(dependents, [impact_target], impact_depth))
@@ -4132,20 +3775,21 @@ def cmd_query(args: argparse.Namespace) -> int:
             dependents,
             [tests_for_target],
             max_depth=tests_depth,
+            parsed_entries=parsed_map,
         )
         impacted_test_paths = {item["path"] for item in impacted_tests}
 
     filtered_paths: Set[str] = set()
     results: List[str] = []
     for rel, line in sorted(entries.items()):
-        m = ENTRY_RE.match(line)
-        if not m:
+        pe = parsed_map.get(rel)
+        if pe is None:
             continue
-        if layer_set and m.group("layer") not in layer_set:
+        if layer_set and pe.layer not in layer_set:
             continue
-        if domain_set and m.group("domain") not in domain_set:
+        if domain_set and pe.domain not in domain_set:
             continue
-        if args.min_importance and int(m.group("imp")) < args.min_importance:
+        if args.min_importance and pe.imp < args.min_importance:
             continue
         if args.path and not fnmatch.fnmatchcase(rel, args.path):
             continue
@@ -4173,6 +3817,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             candidate_paths=filtered_paths,
             top_k=top_k,
             glossary=glossary,
+            parsed_entries=parsed_map,
         )
         results = [h["entry"] for h in hits]
         scores_out = hits
@@ -4232,7 +3877,8 @@ def cmd_context(args: argparse.Namespace) -> int:
         return 2
 
     entries, _ = parse_code_volume(code_path)
-    deps_adj, dependents_adj = build_fras_graph(entries)
+    parsed_map = parse_entries_map(entries)
+    deps_adj, dependents_adj = build_fras_graph(entries, parsed_entries=parsed_map)
     invariants = parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-"
     budget = int(getattr(args, "budget", 0) or 0)
     with_tests = bool(getattr(args, "with_tests", False))
@@ -4245,7 +3891,16 @@ def cmd_context(args: argparse.Namespace) -> int:
         args.paths,
         depth=args.depth,
         budget=budget,
+        parsed_entries=parsed_map,
     )
+    ctx_hub_paths = [
+        normalize_relpath(ln.split("[", 1)[0].strip())
+        for ln in (payload["targets"] + payload["dependencies"])
+        if ln
+    ]
+    hub_secs = _hubs.lookup_hub_sections(aoci_dir, ctx_hub_paths)
+    if hub_secs:
+        payload["hub_sections"] = hub_secs
     if with_tests:
         payload["impacted_tests"] = _test_impact.find_impacted_tests(
             root,
@@ -4253,6 +3908,7 @@ def cmd_context(args: argparse.Namespace) -> int:
             dependents_adj,
             args.paths,
             max_depth=max(3, int(args.depth)),
+            parsed_entries=parsed_map,
         )
 
     if args.json:
@@ -4269,6 +3925,10 @@ def cmd_context(args: argparse.Namespace) -> int:
     print(f"\n## Targets ({len(payload['targets'])})")
     for ln in payload["targets"]:
         print(ln)
+    if hub_secs:
+        print(f"\n## Hub Sections ({len(hub_secs)})")
+        for sec in hub_secs:
+            print(sec["entry"])
     print(f"\n## Dependencies / Read-Along ({len(payload['dependencies'])})")
     for ln in payload["dependencies"]:
         print(ln)
@@ -4358,15 +4018,18 @@ def cmd_overview(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_outline(args: argparse.Namespace) -> int:
-    """Extract lightweight static imports & top-level symbols to speed up R:/A: authoring."""
-    root = resolve_root(args.root)
-    max_bytes = getattr(args, "max_bytes", DEFAULT_MAX_BYTES)
+def compute_outlines(
+    root: Path,
+    raw_paths: Sequence[str],
+    max_items: int = 30,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> Dict[str, Any]:
+    """Validate target paths safely under `root` and extract lightweight static outlines."""
     outlines: List[Dict[str, Any]] = []
     missing: List[str] = []
     rejected: List[Dict[str, str]] = []
 
-    for raw_p in args.paths:
+    for raw_p in raw_paths:
         raw_str = str(raw_p).strip()
         rel = normalize_relpath(raw_str)
         if (
@@ -4405,10 +4068,22 @@ def cmd_outline(args: argparse.Namespace) -> int:
         if is_probably_binary_bytes(head):
             rejected.append({"path": rel, "reason": "binary-content"})
             continue
-        outlines.append(extract_file_outline(full, rel, max_items=args.max_items))
+        outlines.append(extract_file_outline(full, rel, max_items=max_items))
+
+    return {"outlines": outlines, "missing": missing, "rejected": rejected}
+
+
+def cmd_outline(args: argparse.Namespace) -> int:
+    """Extract lightweight static imports & top-level symbols to speed up R:/A: authoring."""
+    root = resolve_root(args.root)
+    max_bytes = getattr(args, "max_bytes", DEFAULT_MAX_BYTES)
+    res = compute_outlines(root, args.paths, max_items=args.max_items, max_bytes=max_bytes)
+    outlines = res["outlines"]
+    missing = res["missing"]
+    rejected = res["rejected"]
 
     if args.json:
-        print(json.dumps({"outlines": outlines, "missing": missing, "rejected": rejected}, indent=2, ensure_ascii=False))
+        print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if (not missing and not rejected) else 1
 
     for o in outlines:
@@ -4627,6 +4302,80 @@ def cmd_ack(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_zoom_target_file(
+    root: Path,
+    raw_path: str,
+    max_bytes: int,
+) -> Tuple[Optional[str], Optional[Path], Optional[str]]:
+    rel, path_err = _hubs.validate_hub_relpath(str(raw_path))
+    if path_err is not None or rel is None:
+        return None, None, (path_err or f"Invalid relative path `{raw_path}`.")
+
+    full = root / rel
+    if not _is_within_root(root, full):
+        return None, None, f"Path `{rel}` escapes repository root."
+    try:
+        st = os.lstat(full)
+    except OSError:
+        return None, None, f"Target file `{rel}` does not exist on disk."
+    if stat.S_ISLNK(st.st_mode):
+        return None, None, f"Refusing symlink target `{rel}`."
+    if not stat.S_ISREG(st.st_mode):
+        return None, None, f"Target `{rel}` is not a regular file."
+    if st.st_size > max_bytes:
+        return None, None, f"Target `{rel}` exceeds `--max-bytes` ({st.st_size} > {max_bytes})."
+    try:
+        with full.open("rb") as fh:
+            head = fh.read(8192)
+    except OSError as exc:
+        return None, None, f"Cannot read `{rel}`: {exc}"
+    if is_probably_binary_bytes(head):
+        return None, None, f"Target `{rel}` appears to be binary."
+    return rel, full, None
+
+
+def compute_zoom_read(
+    root: Path,
+    raw_path: str,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    *,
+    cached_entries: Optional[Dict[str, str]] = None,
+    cached_hub_records: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Read L1 entry, L1.5 hub sections, and live symbol spans for `raw_path` without mutating disk."""
+    rel, full, err = _validate_zoom_target_file(root, raw_path, max_bytes)
+    if err is not None or rel is None or full is None:
+        return {"ok": False, "error": err or f"Invalid path `{raw_path}`.", "exit_code": 2}
+
+    aoci_dir = root / AOCI_DIR_NAME
+    if not aoci_dir.is_dir():
+        return {"ok": False, "error": f"`.aoci/` is not initialized at {root}. Run `init` first.", "exit_code": 2}
+
+    if cached_entries is not None:
+        code_entries = cached_entries
+    else:
+        code_path = aoci_dir / CODE_FILE
+        code_entries, _ = parse_code_volume(code_path) if code_path.is_file() else ({}, [])
+    code_entry = code_entries.get(rel)
+
+    if cached_hub_records is not None:
+        hub_records = cached_hub_records
+    else:
+        hub_records, _ = _hubs.parse_hubs_volume(aoci_dir / HUBS_FILE)
+    matching_hubs = [r["line"] for r in hub_records if r["relpath"] == rel]
+    symbol_spans = _hubs.extract_symbol_spans(full, rel)
+
+    return {
+        "ok": True,
+        "mode": "read",
+        "root": str(root),
+        "path": rel,
+        "code_entry": code_entry,
+        "hub_entries": matching_hubs,
+        "symbol_spans": symbol_spans,
+    }
+
+
 def cmd_zoom(args: argparse.Namespace) -> int:
     """Read, scaffold, or upsert symbol-level H-tier sections in `.aoci/aoci.hubs.txt`."""
     root = resolve_root(args.root)
@@ -4703,32 +4452,10 @@ def cmd_zoom(args: argparse.Namespace) -> int:
                 print(f"  WARN: {w}", file=sys.stderr)
         return 0
 
-    rel, path_err = _hubs.validate_hub_relpath(str(args.path))
-    if path_err is not None or rel is None:
-        return _fail(path_err or f"Invalid relative path `{args.path}`.", 2)
-
-    full = root / rel
-    if not _is_within_root(root, full):
-        return _fail(f"Path `{rel}` escapes repository root.", 2)
-    try:
-        st = os.lstat(full)
-    except OSError:
-        return _fail(f"Target file `{rel}` does not exist on disk.", 2)
-    if stat.S_ISLNK(st.st_mode):
-        return _fail(f"Refusing symlink target `{rel}`.", 2)
-    if not stat.S_ISREG(st.st_mode):
-        return _fail(f"Target `{rel}` is not a regular file.", 2)
-    if st.st_size > args.max_bytes:
-        return _fail(f"Target `{rel}` exceeds `--max-bytes` ({st.st_size} > {args.max_bytes}).", 2)
-    try:
-        with full.open("rb") as fh:
-            head = fh.read(8192)
-    except OSError as exc:
-        return _fail(f"Cannot read `{rel}`: {exc}", 2)
-    if is_probably_binary_bytes(head):
-        return _fail(f"Target `{rel}` appears to be binary.", 2)
-
     if args.scaffold:
+        rel, _, err = _validate_zoom_target_file(root, str(args.path), args.max_bytes)
+        if err is not None or rel is None:
+            return _fail(err or f"Invalid relative path `{args.path}`.", 2)
         drafts = _hubs.scaffold_hub_entries(root, rel)
         out_path_str: Optional[str] = None
         if args.output:
@@ -4758,36 +4485,17 @@ def cmd_zoom(args: argparse.Namespace) -> int:
                 print(ln)
         return 0
 
-    if not aoci_dir.is_dir():
-        return _fail(f"`.aoci/` is not initialized at {root}. Run `init` first.", 2)
-
-    code_path = aoci_dir / CODE_FILE
-    code_entries, _ = parse_code_volume(code_path) if code_path.is_file() else ({}, [])
-    code_entry = code_entries.get(rel)
-
-    hub_records, _ = _hubs.parse_hubs_volume(aoci_dir / HUBS_FILE)
-    matching_hubs = [r["line"] for r in hub_records if r["relpath"] == rel]
-    symbol_spans = _hubs.extract_symbol_spans(full, rel)
+    zoom_res = compute_zoom_read(root, str(args.path), max_bytes=args.max_bytes)
+    if not zoom_res.get("ok"):
+        return _fail(str(zoom_res.get("error", "Zoom read failed.")), int(zoom_res.get("exit_code", 2)))
 
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "mode": "read",
-                    "root": str(root),
-                    "path": rel,
-                    "code_entry": code_entry,
-                    "hub_entries": matching_hubs,
-                    "symbol_spans": symbol_spans,
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+        print(json.dumps(zoom_res, indent=2, ensure_ascii=False))
     else:
-        print(f"=== {rel} ===")
-        print(f"  code_entry: {code_entry or '-'}")
+        print(f"=== {zoom_res['path']} ===")
+        print(f"  code_entry: {zoom_res['code_entry'] or '-'}")
+        matching_hubs = zoom_res["hub_entries"]
+        symbol_spans = zoom_res["symbol_spans"]
         print(f"  hub_entries ({len(matching_hubs)}):")
         for ln in matching_hubs:
             print(f"    {ln}")
@@ -4797,17 +4505,28 @@ def cmd_zoom(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_lint(args: argparse.Namespace) -> int:
-    """FRAS quality gate: vague/short F:, token budget vs Importance, empty S: on hubs, dangling refs, duplicates."""
-    root = resolve_root(args.root)
+def compute_lint(
+    root: Path,
+    *,
+    code_filter: Optional[str] = None,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    cached_entries: Optional[Dict[str, str]] = None,
+    cached_parsed: Optional[Dict[str, ParsedEntry]] = None,
+    cached_malformed: Optional[Sequence[Tuple[int, str]]] = None,
+) -> Dict[str, Any]:
+    """Run FRAS L1 + L1.5 (`aoci.hubs.txt`) quality checks and return structured payload."""
     aoci_dir = root / AOCI_DIR_NAME
     code_path = aoci_dir / CODE_FILE
     if not code_path.exists():
-        print(f"ERROR: `{code_path}` not found. Run `init` first.", file=sys.stderr)
-        return 2
+        return {"ok": False, "error": f"`{code_path}` not found. Run `init` first."}
 
     duplicates: List[str] = []
-    entries, malformed = parse_code_volume(code_path, duplicates=duplicates)
+    if cached_entries is not None and cached_malformed is not None:
+        entries = cached_entries
+        malformed = list(cached_malformed)
+    else:
+        entries, malformed = parse_code_volume(code_path, duplicates=duplicates)
+
     git_info = detect_git_info(root)
     ignores = load_ignore_matcher(root, git_info)
     base_files = load_baseline(aoci_dir).get("files", {})
@@ -4817,32 +4536,53 @@ def cmd_lint(args: argparse.Namespace) -> int:
         ignores,
         base_files=base_files,
         fast_mtime=True,
-        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+        max_bytes=max_bytes,
     )
-    findings = lint_entries(root, entries, parse_declared_domains(aoci_dir), fingerprints=fps)
+    parsed_map = cached_parsed if cached_parsed is not None else parse_entries_map(entries)
+    findings = lint_entries(
+        root,
+        entries,
+        parse_declared_domains(aoci_dir),
+        fingerprints=fps,
+        parsed_entries=parsed_map,
+    )
+    _, hub_lint_findings = _hubs.validate_hubs_volume(root, aoci_dir, entries, fingerprints=fps)
+    findings.extend(hub_lint_findings)
     for rel in sorted(set(duplicates)):
         findings.append({"path": rel, "code": "duplicate", "message": "path appears more than once in aoci.code.txt"})
     for ln, txt in malformed:
         findings.append({"path": f"L{ln}", "code": "malformed", "message": txt[:120]})
-    if args.code:
-        wanted = {c.strip() for c in args.code.split(",") if c.strip()}
+    if code_filter:
+        wanted = {c.strip() for c in code_filter.split(",") if c.strip()}
         findings = [f for f in findings if f["code"] in wanted]
 
     by_code: Dict[str, int] = {}
     for f in findings:
         by_code[f["code"]] = by_code.get(f["code"], 0) + 1
 
+    return {"ok": not findings, "indexed": len(entries), "counts": by_code, "findings": findings}
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    """FRAS quality gate: vague/short F:, token budget vs Importance, empty S: on hubs, dangling refs, duplicates."""
+    root = resolve_root(args.root)
+    res = compute_lint(
+        root,
+        code_filter=args.code,
+        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+    )
+    if res.get("error"):
+        print(f"ERROR: {res['error']}", file=sys.stderr)
+        return 2
+
+    findings = res["findings"]
+    by_code = res["counts"]
+    indexed = res["indexed"]
     if args.json:
-        print(
-            json.dumps(
-                {"ok": not findings, "indexed": len(entries), "counts": by_code, "findings": findings},
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+        print(json.dumps(res, indent=2, ensure_ascii=False))
     else:
         label = "CLEAN" if not findings else f"{len(findings)} finding(s)"
-        print(f"[AOCI Lint] {label} | Indexed={len(entries)}")
+        print(f"[AOCI Lint] {label} | Indexed={indexed}")
         if by_code:
             print("[Counts] " + ", ".join(f"{k}:{v}" for k, v in sorted(by_code.items())))
         for f in findings[: args.limit]:
@@ -4950,6 +4690,8 @@ def compute_diff_briefing(
     cached_dependents: Optional[Dict[str, Set[str]]] = None,
     cached_invariants: Optional[str] = None,
     with_tests: bool = False,
+    cached_parsed: Optional[Any] = None,
+    cached_hub_records: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Build a focused architectural impact packet for Git working-tree or revision diffs:
@@ -5081,6 +4823,7 @@ def compute_diff_briefing(
                     continue
         eligible_changed.append(p)
 
+    parsed_map = cached_parsed if cached_parsed is not None else parse_entries_map(entries)
     indexed_rows: List[Tuple[int, str, str]] = []
     high_risk: List[Dict[str, Any]] = []
     unindexed_changed: List[str] = []
@@ -5089,11 +4832,11 @@ def compute_diff_briefing(
         if line is None:
             unindexed_changed.append(p)
             continue
-        f = parse_entry_fields(line)
-        imp = int(f["imp"]) if f else 5
+        pe = parsed_map.get(p)
+        imp = pe.imp if pe is not None else 5
         indexed_rows.append((imp, p, line))
-        if f and f["s"] not in ("-", ""):
-            high_risk.append({"path": p, "importance": imp, "s": f["s"]})
+        if pe is not None and pe.s not in ("-", ""):
+            high_risk.append({"path": p, "importance": imp, "s": pe.s})
 
     indexed_rows.sort(key=lambda row: (-row[0], row[1]))
     high_risk.sort(key=lambda item: (-int(item["importance"]), str(item["path"])))
@@ -5102,7 +4845,7 @@ def compute_diff_briefing(
     if cached_deps is not None and cached_dependents is not None:
         deps_adj, dependents = cached_deps, cached_dependents
     else:
-        deps_adj, dependents = build_fras_graph(entries)
+        deps_adj, dependents = build_fras_graph(entries, parsed_entries=parsed_map)
     seed_paths = [p for _, p, _ in indexed_rows] + [p for p in sorted(deleted_paths) if p in entries]
     exclude_seeds = set(eligible_changed) | deleted_paths
     neighbor_paths = [nb for nb in bfs_neighbors(dependents, seed_paths, max(1, depth)) if nb not in exclude_seeds]
@@ -5115,10 +4858,16 @@ def compute_diff_briefing(
     ]
     dep_constraints: List[Dict[str, Any]] = []
     for dp in dep_paths:
-        df = parse_entry_fields(entries[dp])
-        if df and df["s"] not in ("-", ""):
-            dep_constraints.append({"path": dp, "importance": int(df["imp"]), "s": df["s"]})
+        dpe = parsed_map.get(dp)
+        if dpe is not None and dpe.s not in ("-", ""):
+            dep_constraints.append({"path": dp, "importance": dpe.imp, "s": dpe.s})
     dep_constraints.sort(key=lambda item: (-int(item["importance"]), str(item["path"])))
+
+    hub_secs = _hubs.lookup_hub_sections(
+        aoci_dir,
+        [p for _, p, _ in indexed_rows],
+        preloaded_records=cached_hub_records,
+    )
 
     brief: Dict[str, Any] = {
         "ok": True,
@@ -5133,6 +4882,8 @@ def compute_diff_briefing(
         "deleted_entries": deleted_indexed,
         "affected_neighbors": neighbor_lines,
     }
+    if hub_secs:
+        brief["hub_sections"] = hub_secs
     if with_tests:
         brief["impacted_tests"] = _test_impact.find_impacted_tests(
             root,
@@ -5140,6 +4891,7 @@ def compute_diff_briefing(
             dependents,
             seed_paths,
             max_depth=max(3, int(depth)),
+            parsed_entries=parsed_map,
         )
     return brief
 
@@ -5175,6 +4927,10 @@ def cmd_diff(args: argparse.Namespace) -> int:
             print(f"  * {item['path']} [I={item['importance']}]: {item['s']}")
     for ln in brief["changed_entries"]:
         print(ln)
+    if brief.get("hub_sections"):
+        print(f"\n## Hub Sections ({len(brief['hub_sections'])})")
+        for sec in brief["hub_sections"]:
+            print(sec["entry"])
     if brief["unindexed_changed"]:
         print(f"\n## Unindexed Changed/New Files ({len(brief['unindexed_changed'])})")
         for p in brief["unindexed_changed"]:
@@ -5204,7 +4960,8 @@ def cmd_pack(args: argparse.Namespace) -> int:
         return 2
 
     entries, _ = parse_code_volume(code_path)
-    deps_adj, dependents_adj = build_fras_graph(entries)
+    parsed_map = parse_entries_map(entries)
+    deps_adj, dependents_adj = build_fras_graph(entries, parsed_entries=parsed_map)
     invariants = parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-"
     domains = parse_declared_domains(aoci_dir)
     glossary = parse_glossary(aoci_dir)
@@ -5219,11 +4976,19 @@ def cmd_pack(args: argparse.Namespace) -> int:
             cached_deps=deps_adj,
             cached_dependents=dependents_adj,
             cached_invariants=invariants,
+            cached_parsed=parsed_map,
         )
         if cand_diff.get("ok"):
             diff_brief = cand_diff
 
-    bm25 = BM25Index(entries) if entries else None
+    if entries:
+        bm25 = (
+            BM25Index(entries, parsed_entries=parsed_map)
+            if BM25Index is _graph.BM25Index
+            else BM25Index(entries)
+        )
+    else:
+        bm25 = None
     pack_obj = _pack.build_task_pack(
         root,
         entries,
@@ -5238,6 +5003,9 @@ def cmd_pack(args: argparse.Namespace) -> int:
         budget=args.budget,
         top_seeds=args.top_seeds,
         bm25_index=bm25,
+        parsed_entries=parsed_map,
+        live_anchors=bool(getattr(args, "live_anchors", False)),
+        with_tests=bool(getattr(args, "with_tests", False)),
     )
 
     if args.json:
@@ -5264,6 +5032,10 @@ def cmd_pack(args: argparse.Namespace) -> int:
     for seed in pack_obj["seeds"]:
         reasons_str = ",".join(seed["reasons"])
         print(f"{seed['entry']}  # [{reasons_str}, score={seed['score']}]")
+    if pack_obj.get("hub_sections"):
+        print(f"\n## Hub Sections ({len(pack_obj['hub_sections'])})")
+        for sec in pack_obj["hub_sections"]:
+            print(sec["entry"])
     print(f"\n## Dependencies / Read-Along ({len(pack_obj['dependencies'])})")
     for ln in pack_obj["dependencies"]:
         print(ln)
@@ -5279,6 +5051,8 @@ def cmd_pack(args: argparse.Namespace) -> int:
         for item in pack_obj["open_next"]:
             syms = f" -> {', '.join(item['symbols'])}" if item.get("symbols") else ""
             print(f"  - {item['path']} ({item['kind']}: {', '.join(item['reasons'])}){syms}")
+    if pack_obj.get("impacted_tests"):
+        _print_impacted_tests(pack_obj["impacted_tests"])
     if pack_obj.get("truncated") and pack_obj.get("omitted_paths"):
         print(f"\n# Omitted under --budget ({pack_obj['omitted_count']}): {', '.join(pack_obj['omitted_paths'])}")
     return 0
@@ -5534,15 +5308,21 @@ def audit_architecture(
     check_static: bool = True,
     check_cycles: bool = True,
     check_layers: bool = True,
+    check_co_change: bool = False,
+    co_change_commits: int = 200,
+    min_co_changes: int = 3,
+    min_co_confidence: float = 0.6,
     forbid_spec: Optional[str] = None,
     use_default_rules: bool = True,
     max_bytes: int = DEFAULT_MAX_BYTES,
     cached_entries: Optional[Dict[str, str]] = None,
     cached_deps: Optional[Dict[str, Set[str]]] = None,
+    cached_dependents: Optional[Dict[str, Set[str]]] = None,
+    cached_parsed: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Cross-check `.aoci/aoci.code.txt` against static imports, strongly connected dependency cycles,
-    and architectural layer redlines (`DEFAULT_FORBIDDEN_LAYER_EDGES` + `#Layer-Rules:` + `--forbid`).
+    architectural layer redlines, and optional Git co-change coupling analysis.
     """
     aoci_dir = root / AOCI_DIR_NAME
     code_path = aoci_dir / CODE_FILE
@@ -5554,15 +5334,19 @@ def audit_architecture(
     else:
         entries, _ = parse_code_volume(code_path)
 
-    if cached_deps is not None:
+    parsed_map = cached_parsed if cached_parsed is not None else parse_entries_map(entries)
+    if cached_deps is not None and (cached_dependents is not None or not check_co_change):
         fras_deps = cached_deps
+        fras_dependents = cached_dependents if cached_dependents is not None else {}
     else:
-        fras_deps, _ = build_fras_graph(entries)
+        fras_deps, fras_dependents = build_fras_graph(entries, parsed_entries=parsed_map)
 
+    ginfo: Optional[Dict[str, Any]] = git_info
     missing_static_deps: List[Dict[str, str]] = []
     phantom_fras_deps: List[Dict[str, str]] = []
     if check_static:
-        ginfo = git_info if git_info is not None else detect_git_info(root)
+        if ginfo is None:
+            ginfo = detect_git_info(root)
         ignores = load_ignore_matcher(root, ginfo)
         base_files = load_baseline(aoci_dir).get("files", {}) if (aoci_dir / BASELINE_FILE).is_file() else {}
         fps, _ = discover_and_fingerprint(
@@ -5591,9 +5375,9 @@ def audit_architecture(
                         missing_static_deps.append({"from": rel, "to": dep, "code": "missing-static-dep"})
             rel_eco = _static_ecosystem(rel)
             if rel_eco is not None:
-                fields = parse_entry_fields(entries[rel])
-                if fields:
-                    for r_dep in extract_path_refs(fields["r"], known):
+                pe = parsed_map.get(rel)
+                if pe is not None:
+                    for r_dep in extract_path_refs(pe.r, known):
                         if r_dep == rel or _static_ecosystem(r_dep) != rel_eco:
                             continue
                         if rel.endswith(".go") and r_dep.endswith(".go"):
@@ -5626,35 +5410,61 @@ def audit_architecture(
         if forbid_spec:
             for src_l, dsts in parse_layer_rules(forbid_spec).items():
                 forbidden.setdefault(src_l, set()).update(dsts)
-        layer_violations = check_layer_violations(entries, fras_deps, forbidden)
+        layer_violations = check_layer_violations(entries, fras_deps, forbidden, parsed_entries=parsed_map)
+
+    co_change_unlinked: Optional[List[Dict[str, Any]]] = None
+    if check_co_change:
+        if ginfo is None:
+            ginfo = detect_git_info(root)
+        co_change_unlinked = _cochange.find_cochange_unlinked_pairs(
+            root,
+            ginfo,
+            entries,
+            fras_deps,
+            fras_dependents,
+            run_git,
+            max_commits=co_change_commits,
+            min_co_changes=min_co_changes,
+            min_confidence=min_co_confidence,
+        )
 
     ok = not (missing_static_deps or cycles or layer_violations)
     rules_used = {k: sorted(v) for k, v in sorted(forbidden.items()) if v}
-    return {
+    summary: Dict[str, Any] = {
+        "indexed": len(entries),
+        "missing_static_deps": len(missing_static_deps),
+        "phantom_fras_deps": len(phantom_fras_deps),
+        "cycles": len(cycles),
+        "layer_violations": len(layer_violations),
+    }
+    res: Dict[str, Any] = {
         "ok": ok,
         "root": str(root),
-        "summary": {
-            "indexed": len(entries),
-            "missing_static_deps": len(missing_static_deps),
-            "phantom_fras_deps": len(phantom_fras_deps),
-            "cycles": len(cycles),
-            "layer_violations": len(layer_violations),
-        },
+        "summary": summary,
         "missing_static_deps": missing_static_deps,
         "phantom_fras_deps": phantom_fras_deps,
         "cycles": cycles,
         "layer_violations": layer_violations,
         "rules_used": rules_used,
     }
+    if co_change_unlinked is not None:
+        summary["co_change_unlinked"] = len(co_change_unlinked)
+        res["co_change_unlinked"] = co_change_unlinked
+    return res
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
     root = resolve_root(args.root)
+    check_co = bool(getattr(args, "co_change", False))
     res = audit_architecture(
         root,
         check_static=not getattr(args, "no_static", False),
         check_cycles=not getattr(args, "no_cycles", False),
         check_layers=not getattr(args, "no_layers", False),
+        check_co_change=check_co,
+        co_change_commits=int(getattr(args, "co_change_commits", 200)),
+        min_co_changes=int(getattr(args, "min_co_changes", 3)),
+        min_co_confidence=float(getattr(args, "min_co_confidence", 0.6)),
         forbid_spec=getattr(args, "forbid", None),
         use_default_rules=not getattr(args, "no_default_rules", False),
         max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
@@ -5671,10 +5481,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
     else:
         sm = res["summary"]
         status = "CLEAN" if res["ok"] else "ISSUES"
+        co_note = f" | CoChangeUnlinked={sm['co_change_unlinked']}" if "co_change_unlinked" in sm else ""
         print(
             f"[AOCI Audit] {status} | Indexed={sm['indexed']} | "
             f"MissingStaticDeps={sm['missing_static_deps']} | PhantomFrasInfo={sm['phantom_fras_deps']} | "
-            f"Cycles={sm['cycles']} | LayerViolations={sm['layer_violations']}"
+            f"Cycles={sm['cycles']} | LayerViolations={sm['layer_violations']}{co_note}"
         )
         if res["missing_static_deps"]:
             print(f"\nMISSING STATIC DEPS IN FRAS R:/A: ({len(res['missing_static_deps'])}):")
@@ -5692,8 +5503,63 @@ def cmd_audit(args: argparse.Namespace) -> int:
             print(f"\nPHANTOM FRAS R: DEPS [info] ({len(res['phantom_fras_deps'])}):")
             for item in res["phantom_fras_deps"][:30]:
                 print(f"  ? {item['from']} -> {item['to']}")
+        if res.get("co_change_unlinked"):
+            print(f"\nCO-CHANGE UNLINKED PAIRS ({len(res['co_change_unlinked'])}):")
+            for item in res["co_change_unlinked"][:30]:
+                print(
+                    f"  ~ {item['file_a']} <-> {item['file_b']} "
+                    f"(co={item['co_changes']}, conf={item['confidence']})"
+                )
 
     return 1 if (getattr(args, "strict", False) and not res["ok"]) else 0
+
+
+def cmd_prepare_sync(args: argparse.Namespace) -> int:
+    """Collect single-pass drift briefing, scaffolds, outlines, diffs, and recommended sync actions."""
+    root = resolve_root(args.root)
+    aoci_dir = root / AOCI_DIR_NAME
+    as_json = bool(getattr(args, "json", False))
+    if not (aoci_dir / CODE_FILE).exists():
+        msg = f"`{aoci_dir / CODE_FILE}` not found. Run `init` first."
+        if as_json:
+            print(json.dumps({"ok": False, "error": msg}, indent=2, ensure_ascii=False))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 2
+
+    git_info = detect_git_info(root)
+    drift = compute_drift(
+        root,
+        git_info,
+        fast_mtime=not bool(getattr(args, "no_fast", False)),
+        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+        allow_heal=False,
+        save_scan_cache=False,
+    )
+    brief = _sync_prep.prepare_sync_briefing(
+        root,
+        git_info,
+        drift,
+        scaffold_fn=scaffold_entries,
+        run_git_fn=run_git,
+        max_diff_lines=int(getattr(args, "max_diff_lines", 40)),
+        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+    )
+
+    if as_json:
+        print(json.dumps(brief, indent=2, ensure_ascii=False))
+    else:
+        c = brief["counts"]
+        status = "DRIFT" if brief["has_drift"] else "CLEAN"
+        print(
+            f"[AOCI Prepare-Sync] {status} | PoolRestorable={c['restorable_from_pool']} | "
+            f"Renames={c['renamed']}+{c['similar_renames']} | "
+            f"ImplOnly={c['impl_only_modified']} | ContractReview={c['contract_or_unknown_modified']} | "
+            f"Added={c['added']} | Deleted={c['deleted']}"
+        )
+        for act in brief["recommended_actions"]:
+            print(f"  -> {act}")
+    return 0
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -5709,7 +5575,8 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 2
 
     entries, _ = parse_code_volume(code_path)
-    deps_adj, dependents_adj = build_fras_graph(entries)
+    parsed_map = parse_entries_map(entries)
+    deps_adj, dependents_adj = build_fras_graph(entries, parsed_entries=parsed_map)
     declared_domains = parse_declared_domains(aoci_dir)
     res = export_dependency_graph(
         entries,
@@ -5726,6 +5593,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         path_glob=args.path,
         focus=args.focus,
         depth=args.depth,
+        parsed_entries=parsed_map,
     )
 
     if args.output:
@@ -6117,14 +5985,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--no-static", action="store_true", help="Skip static import vs FRAS cross-check")
     p_aud.add_argument("--no-cycles", action="store_true", help="Skip dependency cycle detection")
     p_aud.add_argument("--no-layers", action="store_true", help="Skip layer redline validation")
+    p_aud.add_argument("--co-change", action="store_true", help="Mine recent Git commits for unlinked co-changing pairs")
+    p_aud.add_argument("--co-change-commits", type=int, default=200, help="Max recent commits to scan for --co-change (default: 200)")
+    p_aud.add_argument("--min-co-changes", type=int, default=3, help="Minimum co-change commit count (default: 3)")
+    p_aud.add_argument("--min-co-confidence", type=float, default=0.6, help="Minimum co-change confidence in [0,1] (default: 0.6)")
     p_aud.add_argument("--strict", action="store_true", help="Exit 1 when any missing static dep, cycle, or layer violation exists")
     p_aud.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_aud.add_argument("--json", action="store_true", help="Output JSON")
     p_aud.set_defaults(func=cmd_audit)
 
-    p_exp = sub.add_parser("export", help="Export FRAS dependency graph in Mermaid or Graphviz DOT format")
+    p_exp = sub.add_parser("export", help="Export FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML format")
     p_exp.add_argument("--root", help="Target codebase root")
-    p_exp.add_argument("--format", default="mermaid", choices=["mermaid", "dot"], help="Output graph syntax (default: mermaid)")
+    p_exp.add_argument("--format", default="mermaid", choices=["mermaid", "dot", "html"], help="Output format (default: mermaid)")
     p_exp.add_argument("--level", default="file", choices=["file", "dir", "domain"], help="Aggregation level (default: file)")
     p_exp.add_argument("--group-by", default="domain", choices=["domain", "dir", "layer", "none"], help="Subgraph grouping for file level")
     p_exp.add_argument("--direction", default="LR", choices=["LR", "TD", "TB"], help="Graph layout direction (default: LR)")
@@ -6180,9 +6052,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--depth", type=int, default=1, help="Graph expansion hops around seeds (default: 1)")
     p_pack.add_argument("--budget", type=int, default=2500, help="Token budget ceiling (default: 2500; 0 = unlimited)")
     p_pack.add_argument("--top-seeds", type=int, default=8, help="Maximum BM25 seed hits (default: 8)")
+    p_pack.add_argument("--with-tests", action="store_true", help="Attach impacted T-layer test files for packed seeds")
+    p_pack.add_argument("--live-anchors", action="store_true", help="Extract live symbol anchors in memory when outline cache misses")
     p_pack.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_pack.add_argument("--json", action="store_true", help="Output JSON")
     p_pack.set_defaults(func=cmd_pack)
+
+    p_ps = sub.add_parser(
+        "prepare-sync",
+        help="Collect single-pass agent sync briefing (scaffolds, outlines, bounded diffs, neighbors, actions)",
+    )
+    p_ps.add_argument("--root", help="Target codebase root")
+    p_ps.add_argument("--no-fast", action="store_true", help="Force full SHA-256 verification instead of fast mtime mode")
+    p_ps.add_argument("--max-diff-lines", type=int, default=40, help="Max git diff lines per modified file (default: 40)")
+    p_ps.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_ps.add_argument("--json", action="store_true", help="Output JSON")
+    p_ps.set_defaults(func=cmd_prepare_sync)
 
     p_zoom = sub.add_parser(
         "zoom",

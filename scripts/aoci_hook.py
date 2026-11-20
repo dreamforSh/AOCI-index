@@ -36,7 +36,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 # Import sibling module cleanly regardless of process CWD without cluttering __pycache__
 sys.dont_write_bytecode = True
@@ -541,7 +541,7 @@ def _log_failure() -> None:
             pass
 
 
-def main() -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     aoci_index.configure_utf8_streams()
     parser = argparse.ArgumentParser(description="Dual-host lifecycle hook runner (Claude Code & Antigravity)")
     parser.add_argument(
@@ -556,7 +556,7 @@ def main() -> int:
         default="auto",
         help="Hook event type (default: auto-detect from stdin event field)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         raw_stdin = sys.stdin.read()

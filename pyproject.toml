@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aoci-index"
-version = "1.4.0"
+version = "1.5.0"
 description = "Zero-dependency AI-Oriented Codebase Indexer (.aoci/) with BM25/FRAS graph reader, task context packer, symbol zoom, lifecycle hooks, and stdio MCP server."
 readme = "README.md"
 requires-python = ">=3.8"

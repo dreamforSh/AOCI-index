@@ -1,0 +1,35 @@
+name: AOCI CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.8", "3.12"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run full unittest suite (in-process fast runner)
+        run: python -B -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Run real-subprocess smoke suite
+        env:
+          AOCI_TEST_SUBPROCESS: "1"
+        run: python -B -m unittest tests/test_ext_pack.py tests/test_ext_zoom.py tests/test_v15_improvements.py -v
+
+      - name: Verify CLI version
+        run: python -B scripts/aoci_index.py --version

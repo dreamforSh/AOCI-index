@@ -1,6 +1,6 @@
 # AOCI Codebase Fast Index (`aoci-index`)
 
-![Version 1.4.0](https://img.shields.io/badge/version-1.4.0-0ea5e9)
+![Version 1.5.0](https://img.shields.io/badge/version-1.5.0-0ea5e9)
 ![Python 3.8+ Zero Deps](https://img.shields.io/badge/python-3.8%2B%20%7C%20zero--deps-3776ab)
 ![MCP 2024-11-05 · 2025-03-26 · 2025-06-18](https://img.shields.io/badge/MCP-2024--11--05%20%C2%B7%202025--03--26%20%C2%B7%202025--06--18-6366f1)
 ![Hosts: Claude Code · Antigravity](https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity-10b981)
@@ -27,11 +27,12 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
 ## Key Features
 
 - **Single-Pass Codebase Map (`object-fras-v2`)**: Dense one-line-per-file codebase map in `.aoci/aoci.code.txt`, paired with `#Global-Invariants:` (`aoci.txt`), `[LDIS]` coordinates and bilingual `#Glossary:` aliases (`aoci.meta.txt`), and auto-synced directory shards (`shard`) for 10k+ file monorepos.
-- **Task-Driven Context Packing & Test Impact**: `pack` / `aoci_pack` builds token-budgeted context packets from BM25, glossary expansion, explicit path mentions, and working-tree Git diffs (`R:`/`A:` graph neighborhood, `S:` traps, and `open_next` symbol anchors); `--with-tests` and `--tests-for` derive impacted `T`-layer tests via FRAS edges, static outlines, and naming conventions.
-- **H-Tier Symbol Zoom (`aoci.hubs.txt`)**: `zoom` / `aoci_zoom` extracts and verifies `[Lstart-Lend]` symbol-level sections for large (`>= 1000`-line) hub files without bloating `aoci.code.txt`.
-- **Sub-Second Drift, Rename & Branch Sync**: LF-normalized SHA-256 + `(mtime, size)` baseline (`baseline.json`, schema v2), `sig_hash` interface classification (`impl_only` vs `contract_changed`), exact and MinHash moved+edited rename migration (`migrate-renames`), and zero-token `restore` from a cross-worktree SQLite WAL semantic pool (`<git-common-dir>/aoci-cache`).
-- **Warm In-Memory Stdio MCP Server (`aoci_mcp.py`)**: Serves **21 annotated tools**, **5 static resources**, **2 URI templates**, and **3 workflow prompts** over newline-delimited JSON-RPC 2.0 or `Content-Length` framing.
-- **Architectural Audit & Graph Export**: Cross-checks FRAS edges against static imports (Python, JS/TS/Vue/Svelte, Go package-level, Rust), detects Tarjan SCC dependency cycles, enforces `#Layer-Rules:`, and exports Mermaid or Graphviz DOT graphs.
+- **Task-Driven Context Packing & Test Impact**: `pack` / `aoci_pack` builds token-budgeted context packets from BM25, glossary expansion, explicit path mentions (`PathMentionIndex`), L1.5 hub sections, and working-tree Git diffs (`--with-tests` attaches impacted tests; `--live-anchors` extracts symbol anchors on cold cache without mutating disk).
+- **H-Tier Symbol Zoom & Auto-Lifecycle (`aoci.hubs.txt`)**: `zoom` / `aoci_zoom` extracts and verifies `[Lstart-Lend]` symbol-level sections for large (`>= 1000`-line) hub files, automatically registering `hubs` in `aoci.txt`, refreshing/pruning spans during `upsert`, migrating renames in `migrate-renames`, surfacing `hub_sections` in `context`/`diff`/`pack`, and validating spans in `verify`/`lint`.
+- **Single-Pass Sync Briefing (`prepare-sync` / `aoci_prepare_sync`)**: One command aggregates pool restorable counts, renames, `impl_only` vs `contract_changed` splits (with previous entries, outlines, and bounded git diffs), auto-generated scaffolds for added files, affected neighbors, and ordered sync steps.
+- **Sub-Second Drift, Rename & Branch Sync**: LF-normalized SHA-256 + `(mtime, size)` baseline (`baseline.json`, schema v2), multi-language rich `sig_hash` classification (`impl_only` vs `contract_changed` for Python, JS/TS/Vue/Svelte, Go, Rust, JVM/C#, C/C++, Proto/GraphQL/Prisma/SQL), exact and MinHash moved+edited rename migration (`migrate-renames`), and zero-token `restore` from a cross-worktree SQLite WAL semantic pool (`<git-common-dir>/aoci-cache`).
+- **Warm In-Memory Stdio MCP Server (`aoci_mcp.py`)**: Serves **22 annotated tools** (lock-free `contextvars` CLI capture + in-process `aoci_outline`/`aoci_lint`/`aoci_zoom(read)`/`aoci_prepare_sync`), **5 static resources**, **2 URI templates**, and **3 workflow prompts** over newline-delimited JSON-RPC 2.0 or `Content-Length` framing.
+- **Architectural Audit & Interactive Graph Export**: Cross-checks FRAS edges against static imports (including `.proto` & C/C++ includes and monorepo nested `tsconfig.json`/`go.mod`), detects Tarjan SCC dependency cycles, enforces `#Layer-Rules:`, mines Git co-change coupling (`audit --co-change`), and exports Mermaid, Graphviz DOT, or standalone zero-CDN interactive HTML graphs (`export --format html`).
 - **Dual-Host Lifecycle Guardrails & Local Git Exclusion**: `SessionStart`, optional `UserPromptSubmit`/`PreInvocation` turn-start snapshot refresh, and session-scoped convergent `Stop` gate for **Claude Code** and **Antigravity**, keeping `.aoci/` excluded in `.git/info/exclude` without dirtying tracked `.gitignore`.
 
 ## Quick Start
@@ -79,7 +80,7 @@ python scripts/install.py --host both --scope global --with-hooks --with-mcp
 
 ```bash
 pip install -e .
-aoci-index --version   # aoci-index 1.4.0
+aoci-index --version   # aoci-index 1.5.0
 aoci-mcp               # launches the stdio MCP server
 ```
 
@@ -89,17 +90,21 @@ See [references/hooks-and-install.md](./references/hooks-and-install.md) for man
 
 ```text
 scripts/
-├── aoci_index.py        # CLI & core orchestration (22 commands + `status` alias)
-├── aoci_mcp.py          # Stdio JSON-RPC 2.0 MCP server (21 tools, 5 resources, 2 templates, 3 prompts)
+├── aoci_index.py        # CLI & core orchestration (23 commands + `status` alias)
+├── aoci_mcp.py          # Stdio JSON-RPC 2.0 MCP server (22 tools, 5 resources, 2 templates, 3 prompts)
 ├── aoci_hook.py         # Claude Code & Antigravity lifecycle hooks
 ├── install.py           # Cross-host installer / uninstaller & plugin bundler
 └── aoci_core/
     ├── constants.py     # Version constant, tag sets, regexes, path normalization, atomic I/O
-    ├── parsers.py       # Static outlines, sig_hash, import graph & Go package resolution
-    ├── graph.py         # ParsedEntry, FRAS graph, context budgeting, lint, BM25, audit, export
+    ├── parsers.py       # Static outlines, rich sig_hash, import graph & monorepo resolution
+    ├── graph.py         # ParsedEntry, FRAS graph, context budgeting, lint, BM25, audit, HTML/Mermaid/DOT export
     ├── pack.py          # Task-driven token-budgeted context packer (`pack` / `aoci_pack`)
     ├── test_impact.py   # Impacted test derivation (`--with-tests` / `--tests-for`)
-    ├── hubs.py          # H-tier symbol sub-volume `.aoci/aoci.hubs.txt` (`zoom` / `aoci_zoom`)
+    ├── hubs.py          # H-tier symbol sub-volume `.aoci/aoci.hubs.txt` (`zoom` lifecycle sync & validation)
+    ├── ignore.py        # `.aociignore` / `.gitignore` matcher & path/binary skip heuristics
+    ├── shards.py        # Code volume rendering & incremental per-directory shard management
+    ├── sync_prep.py     # Single-pass sync briefing (`prepare-sync` / `aoci_prepare_sync`)
+    ├── cochange.py      # Git history co-change mining (`audit --co-change`)
     ├── pool.py          # SQLite WAL semantic pool cache & portable .json(.gz) export/import
     └── githooks.py      # Idempotent post-checkout/post-merge/post-rewrite/pre-commit hooks
 ```
@@ -126,9 +131,10 @@ scripts/
 | Digest & core hubs | `overview --root <repo>` | `aoci_overview` |
 | Search / impact / tests | `query --root <repo> --search "<terms>"` / `--tests-for <path>` | `aoci_query` (`tests_for`) |
 | Dependency subgraph | `context <path> --root <repo> --depth 1 [--with-tests]` | `aoci_context` (`with_tests`) |
-| Task-driven context pack | `pack --task "<description>" --root <repo> [--budget 2500]` | `aoci_pack` |
+| Task-driven context pack | `pack --task "<description>" --root <repo> [--budget 2500] [--with-tests] [--live-anchors]` | `aoci_pack` |
 | Diff impact briefing | `diff [rev] --root <repo> [--with-tests]` | `aoci_diff` (`with_tests`) |
 | Drift & batch plan | `scan` / `status --root <repo> --batch-size 20` | `aoci_scan` |
+| Single-pass sync briefing | `prepare-sync --root <repo> [--max-diff-lines 40]` | `aoci_prepare_sync` |
 | Static outline | `outline <paths...> --root <repo>` | `aoci_outline` |
 | Pre-filled batch scaffold | `scaffold --root <repo> --batch 1` | `aoci_scaffold` |
 | H-tier symbol sub-volume | `zoom <path> --root <repo>` / `--scaffold` / `--upsert` | `aoci_zoom` |
@@ -138,8 +144,8 @@ scripts/
 | Branch / worktree restore | `restore --root <repo>` | `aoci_restore` |
 | Full health gate | `verify --root <repo>` | `aoci_verify` |
 | FRAS quality lint | `lint --root <repo>` | `aoci_lint` |
-| Architecture & cycle audit | `audit --root <repo>` | `aoci_audit` |
-| Mermaid / DOT graph export | `export --root <repo> --format mermaid\|dot` | `aoci_export` |
+| Architecture & cycle audit | `audit --root <repo> [--co-change]` | `aoci_audit` |
+| Graph export (Mermaid/DOT/HTML) | `export --root <repo> --format mermaid\|dot\|html` | `aoci_export` |
 | Per-directory shards | `shard --root <repo> [--depth 1 \| --clean]` | `aoci_shard` |
 | Semantic pool cache | `pool stats\|export\|import --root <repo>` | `aoci_pool` |
 | Repair Git exclusion | `ensure-git-exclude --root <repo>` | `aoci_ensure_git_exclude` |

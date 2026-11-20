@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import fnmatch
+import html
+import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .constants import (
     AOCI_DIR_NAME,
@@ -111,25 +113,32 @@ def parse_entry_fields(line: str) -> Optional[Dict[str, str]]:
     return {k: (v.strip() if isinstance(v, str) else v) for k, v in m.groupdict().items()}
 
 
+def parse_entry(rel: str, line: str) -> Optional[ParsedEntry]:
+    """Parse one `object-fras-v2` line into a `ParsedEntry`, or `None` if malformed."""
+    m = ENTRY_RE.match(line)
+    if not m:
+        return None
+    return ParsedEntry(
+        rel=rel,
+        layer=m.group("layer"),
+        domain=m.group("domain"),
+        imp=int(m.group("imp")),
+        size=m.group("size"),
+        f=m.group("f").strip(),
+        r=m.group("r").strip(),
+        a=m.group("a").strip(),
+        s=m.group("s").strip(),
+        raw=line,
+    )
+
+
 def parse_entries_map(entries: Dict[str, str]) -> Dict[str, ParsedEntry]:
     """Parse all valid `object-fras-v2` lines in `entries` in a single pass."""
     parsed: Dict[str, ParsedEntry] = {}
     for rel, line in entries.items():
-        m = ENTRY_RE.match(line)
-        if not m:
-            continue
-        parsed[rel] = ParsedEntry(
-            rel=rel,
-            layer=m.group("layer"),
-            domain=m.group("domain"),
-            imp=int(m.group("imp")),
-            size=m.group("size"),
-            f=m.group("f").strip(),
-            r=m.group("r").strip(),
-            a=m.group("a").strip(),
-            s=m.group("s").strip(),
-            raw=line,
-        )
+        pe = parse_entry(rel, line)
+        if pe is not None:
+            parsed[rel] = pe
     return parsed
 
 
@@ -201,7 +210,7 @@ def validate_parsed_entry_tags(
 
 def _build_fras_graph_from_parsed(
     known: Set[str],
-    parsed: Dict[str, ParsedEntry],
+    parsed: Mapping[str, ParsedEntry],
 ) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
     deps: Dict[str, Set[str]] = {rel: set() for rel in known}
     dependents: Dict[str, Set[str]] = {rel: set() for rel in known}
@@ -217,14 +226,18 @@ def _build_fras_graph_from_parsed(
     return deps, dependents
 
 
-def build_fras_graph(entries: Dict[str, str]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+def build_fras_graph(
+    entries: Dict[str, str],
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
     """Build directed edges `X -> Y` (`X` depends on `Y`) and reverse callers in O(total refs)."""
-    return _build_fras_graph_from_parsed(set(entries.keys()), parse_entries_map(entries))
+    parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
+    return _build_fras_graph_from_parsed(set(entries.keys()), parsed)
 
 
 def _build_explicit_mention_index_from_parsed(
     known: Set[str],
-    parsed: Dict[str, ParsedEntry],
+    parsed: Mapping[str, ParsedEntry],
 ) -> Dict[str, Set[str]]:
     mentioned_by: Dict[str, Set[str]] = {rel: set() for rel in known}
     for rel, pe in parsed.items():
@@ -234,9 +247,13 @@ def _build_explicit_mention_index_from_parsed(
     return mentioned_by
 
 
-def build_explicit_mention_index(entries: Dict[str, str]) -> Dict[str, Set[str]]:
+def build_explicit_mention_index(
+    entries: Dict[str, str],
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+) -> Dict[str, Set[str]]:
     """Map each indexed path `P` to every entry whose `R:` or `A:` explicitly mentions `P`."""
-    return _build_explicit_mention_index_from_parsed(set(entries.keys()), parse_entries_map(entries))
+    parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
+    return _build_explicit_mention_index_from_parsed(set(entries.keys()), parsed)
 
 
 def bfs_neighbors_with_distance(adj: Dict[str, Set[str]], starts: Sequence[str], depth: int) -> Dict[str, int]:
@@ -276,6 +293,7 @@ def build_context_subgraph(
     raw_paths: Sequence[str],
     depth: int = 1,
     budget: int = 0,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
 ) -> Dict[str, Any]:
     """Build architectural subgraph payload for `raw_paths` with optional `--budget` token pruning."""
     targets = list(dict.fromkeys(normalize_relpath(str(p)) for p in raw_paths))
@@ -327,9 +345,9 @@ def build_context_subgraph(
             line = entries.get(rel)
             if not line:
                 continue
-            f = parse_entry_fields(line)
-            imp = int(f["imp"]) if f else 0
-            has_s = 0 if (f and f["s"] not in ("-", "")) else 1
+            pe = parsed_entries.get(rel) if parsed_entries is not None else parse_entry(rel, line)
+            imp = pe.imp if pe is not None else 0
+            has_s = 0 if (pe is not None and pe.s not in ("-", "")) else 1
             candidates.append((hop, -imp, has_s, role_rank, rel, role_name))
 
     candidates.sort()
@@ -368,7 +386,7 @@ def build_context_subgraph(
 def _find_dangling_refs_from_parsed(
     root: Path,
     known: Set[str],
-    parsed: Dict[str, ParsedEntry],
+    parsed: Mapping[str, ParsedEntry],
 ) -> Dict[str, List[str]]:
     known_top_dirs = {p.split("/", 1)[0] for p in known if "/" in p}
     dangling: Dict[str, List[str]] = {}
@@ -435,10 +453,11 @@ def lint_entries(
     entries: Dict[str, str],
     declared_domains: Dict[str, str],
     fingerprints: Optional[Dict[str, Dict[str, Any]]] = None,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
 ) -> List[Dict[str, str]]:
     """Return lint findings `{path, code, message}` for FRAS tag/size errors and quality issues."""
     findings: List[Dict[str, str]] = []
-    parsed = parse_entries_map(entries)
+    parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
 
     def add(path: str, code: str, msg: str) -> None:
         findings.append({"path": path, "code": code, "message": msg})
@@ -576,7 +595,7 @@ def find_dependency_cycles(adj: Dict[str, Set[str]]) -> List[List[str]]:
 
 
 def _check_layer_violations_from_parsed(
-    parsed: Dict[str, ParsedEntry],
+    parsed: Mapping[str, ParsedEntry],
     deps_adj: Dict[str, Set[str]],
     forbidden: Dict[str, Set[str]],
 ) -> List[Dict[str, str]]:
@@ -612,11 +631,13 @@ def check_layer_violations(
     entries: Dict[str, str],
     deps_adj: Dict[str, Set[str]],
     forbidden: Dict[str, Set[str]],
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
 ) -> List[Dict[str, str]]:
     """Check every directed dependency edge `(src -> dst)` against forbidden layer transitions."""
     if not forbidden:
         return []
-    return _check_layer_violations_from_parsed(parse_entries_map(entries), deps_adj, forbidden)
+    parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
+    return _check_layer_violations_from_parsed(parsed, deps_adj, forbidden)
 
 
 def _sanitize_graph_label(text: str, fmt: str) -> str:
@@ -625,6 +646,289 @@ def _sanitize_graph_label(text: str, fmt: str) -> str:
     if fmt == "mermaid":
         return cleaned.replace('"', "'")
     return cleaned.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _render_html_dependency_graph(
+    *,
+    level: str,
+    group_by: str,
+    direction: str,
+    sorted_nodes: Sequence[str],
+    node_ids: Mapping[str, str],
+    node_labels: Mapping[str, str],
+    node_groups: Mapping[str, Optional[str]],
+    group_labels: Mapping[str, str],
+    sorted_edges: Sequence[Tuple[Tuple[str, str], int]],
+    parsed_sel: Mapping[str, ParsedEntry],
+    declared_domains: Mapping[str, str],
+) -> str:
+    proj_adj: Dict[str, Set[str]] = {nk: set() for nk in sorted_nodes}
+    for (src, dst), _ in sorted_edges:
+        proj_adj.setdefault(src, set()).add(dst)
+    sccs = find_dependency_cycles(proj_adj)
+    cycle_node_to_idx: Dict[str, int] = {}
+    for c_idx, comp in enumerate(sccs, start=1):
+        for nk in comp:
+            cycle_node_to_idx[nk] = c_idx
+
+    nodes_payload: List[Dict[str, Any]] = []
+    for nk in sorted_nodes:
+        pe = parsed_sel.get(nk) if level == "file" else None
+        gk = node_groups.get(nk)
+        dom_code = pe.domain if pe is not None else (nk if level == "domain" else "")
+        nodes_payload.append(
+            {
+                "id": node_ids[nk],
+                "key": nk,
+                "label": node_labels[nk],
+                "group": gk or "",
+                "groupLabel": group_labels.get(gk, gk or "ungrouped") if gk else "ungrouped",
+                "layer": pe.layer if pe is not None else "",
+                "domain": dom_code,
+                "domainName": declared_domains.get(dom_code, ""),
+                "imp": pe.imp if pe is not None else 5,
+                "size": pe.size if pe is not None else "",
+                "f": pe.f if pe is not None else "",
+                "r": pe.r if pe is not None else "",
+                "a": pe.a if pe is not None else "",
+                "s": pe.s if pe is not None else "",
+                "cycle": cycle_node_to_idx.get(nk, 0),
+            }
+        )
+
+    edges_payload: List[Dict[str, Any]] = []
+    for (src, dst), cnt in sorted_edges:
+        c_src = cycle_node_to_idx.get(src, 0)
+        c_dst = cycle_node_to_idx.get(dst, 0)
+        in_cycle = bool(c_src and c_src == c_dst)
+        edges_payload.append(
+            {
+                "src": node_ids[src],
+                "dst": node_ids[dst],
+                "count": cnt,
+                "inCycle": in_cycle,
+            }
+        )
+
+    graph_json = json.dumps(
+        {
+            "level": level,
+            "groupBy": group_by,
+            "direction": direction,
+            "cycles": sccs,
+            "nodes": nodes_payload,
+            "edges": edges_payload,
+        },
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+
+    title_txt = html.escape(f"AOCI Dependency Graph ({level}, {len(nodes_payload)} nodes)")
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title_txt}</title>
+<style>
+  :root {{ --bg:#0f172a; --panel:#1e293b; --border:#334155; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --danger:#f43f5e; --warn:#f59e0b; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); display:flex; flex-direction:column; height:100vh; }}
+  header {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--border); }}
+  header input, header select, header button {{ background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:13px; }}
+  header label {{ font-size:13px; color:var(--muted); display:flex; align-items:center; gap:5px; }}
+  .stats {{ margin-left:auto; font-size:12px; color:var(--muted); }}
+  main {{ flex:1; display:flex; min-height:0; }}
+  #canvas-wrap {{ flex:1; position:relative; overflow:auto; background:radial-gradient(circle at top left,#172554 0%,var(--bg) 55%); }}
+  svg {{ display:block; min-width:100%; min-height:100%; cursor:grab; }}
+  #drawer {{ width:340px; max-width:40vw; background:var(--panel); border-left:1px solid var(--border); padding:14px; overflow:auto; font-size:13px; line-height:1.45; }}
+  .kv {{ margin:8px 0; }}
+  .kv .k {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }}
+  .kv .v {{ white-space:pre-wrap; word-break:break-word; }}
+  .badge {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:11px; background:#0c4a6e; color:var(--accent); margin-right:4px; }}
+  .badge.risk {{ background:#451a03; color:var(--warn); }}
+  .badge.cycle {{ background:#4c0519; color:var(--danger); }}
+  .node-box {{ cursor:pointer; transition:opacity .15s; }}
+  .node-box rect {{ fill:#1e293b; stroke:#475569; stroke-width:1.4; rx:6; }}
+  .node-box.selected rect {{ stroke:var(--accent); stroke-width:2.4; fill:#0f2942; }}
+  .node-box.cycle rect {{ stroke:var(--danger); stroke-width:2; }}
+  .node-box text {{ fill:var(--text); font-size:11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
+  .edge {{ fill:none; stroke:#475569; stroke-width:1.25; opacity:0.65; }}
+  .edge.hi {{ stroke:var(--accent); stroke-width:2.2; opacity:1; }}
+  .edge.cycle {{ stroke:var(--danger); stroke-width:1.9; opacity:0.9; }}
+</style>
+</head>
+<body>
+<header>
+  <strong style="font-size:14px;">AOCI Graph</strong>
+  <input id="q" type="search" placeholder="Search path, F:, S:...">
+  <select id="layer"><option value="">All Layers</option></select>
+  <select id="domain"><option value="">All Domains</option></select>
+  <select id="minImp">
+    <option value="0">Imp >= 0</option>
+    <option value="5">Imp >= 5</option>
+    <option value="7">Imp >= 7</option>
+    <option value="9">Imp >= 9</option>
+  </select>
+  <label><input id="cyclesOnly" type="checkbox"> Cycles Only</label>
+  <button id="resetBtn" type="button">Reset</button>
+  <span class="stats" id="stats"></span>
+</header>
+<main>
+  <div id="canvas-wrap"><svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <aside id="drawer"><p style="color:var(--muted)">Click any node to inspect FRAS metadata, R:/A: links, S: risk notes, and cycle membership.</p></aside>
+</main>
+<script type="application/json" id="aoci-graph-data">{graph_json}</script>
+<script>
+(function() {{
+  const data = JSON.parse(document.getElementById("aoci-graph-data").textContent);
+  const svg = document.getElementById("svg");
+  const drawer = document.getElementById("drawer");
+  const qEl = document.getElementById("q");
+  const layerEl = document.getElementById("layer");
+  const domainEl = document.getElementById("domain");
+  const minImpEl = document.getElementById("minImp");
+  const cyclesEl = document.getElementById("cyclesOnly");
+  const statsEl = document.getElementById("stats");
+  const ns = "http://www.w3.org/2000/svg";
+  const layers = Array.from(new Set(data.nodes.map(n => n.layer).filter(Boolean))).sort();
+  const domains = Array.from(new Set(data.nodes.map(n => n.domain).filter(Boolean))).sort();
+  layers.forEach(l => {{ const o = document.createElement("option"); o.value = l; o.textContent = "Layer " + l; layerEl.appendChild(o); }});
+  domains.forEach(d => {{ const o = document.createElement("option"); o.value = d; o.textContent = "Domain " + d; domainEl.appendChild(o); }});
+  let selectedId = null;
+
+  function addField(parent, k, v) {{
+    if (!v || v === "-") return;
+    const wrap = document.createElement("div"); wrap.className = "kv";
+    const kl = document.createElement("div"); kl.className = "k"; kl.textContent = k;
+    const vl = document.createElement("div"); vl.className = "v"; vl.textContent = v;
+    wrap.appendChild(kl); wrap.appendChild(vl); parent.appendChild(wrap);
+  }}
+
+  function showDetails(n) {{
+    drawer.textContent = "";
+    const h = document.createElement("h3"); h.style.margin = "0 0 8px"; h.style.fontSize = "14px";
+    h.textContent = n.key; drawer.appendChild(h);
+    const b1 = document.createElement("span"); b1.className = "badge";
+    b1.textContent = n.layer ? (n.layer + n.domain + n.imp + " " + n.size) : n.groupLabel;
+    drawer.appendChild(b1);
+    if (n.cycle) {{
+      const bc = document.createElement("span"); bc.className = "badge cycle";
+      bc.textContent = "SCC Cycle #" + n.cycle; drawer.appendChild(bc);
+    }}
+    if (n.s && n.s !== "-") {{
+      const br = document.createElement("span"); br.className = "badge risk";
+      br.textContent = "Has S: risk/invariant"; drawer.appendChild(br);
+    }}
+    addField(drawer, "Group", n.groupLabel);
+    addField(drawer, "Function (F:)", n.f);
+    addField(drawer, "Requires (R:)", n.r);
+    addField(drawer, "API / Exports (A:)", n.a);
+    addField(drawer, "Risk / Side-effects (S:)", n.s);
+  }}
+
+  function render() {{
+    const q = qEl.value.trim().toLowerCase();
+    const lf = layerEl.value;
+    const df = domainEl.value;
+    const mi = parseInt(minImpEl.value || "0", 10);
+    const cyc = cyclesEl.checked;
+    const visible = data.nodes.filter(n => {{
+      if (lf && n.layer !== lf) return false;
+      if (df && n.domain !== df) return false;
+      if (n.imp < mi) return false;
+      if (cyc && !n.cycle) return false;
+      if (q && !(n.key + " " + n.f + " " + n.s + " " + n.a).toLowerCase().includes(q)) return false;
+      return true;
+    }});
+    const visSet = new Set(visible.map(n => n.id));
+    const visEdges = data.edges.filter(e => visSet.has(e.src) && visSet.has(e.dst));
+    statsEl.textContent = visible.length + " nodes | " + visEdges.length + " edges | " + data.cycles.length + " cycle(s)";
+
+    const groups = new Map();
+    visible.forEach(n => {{
+      const g = n.group || "ungrouped";
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(n);
+    }});
+    const pos = {{}};
+    const colW = 280, rowH = 52, pad = 28;
+    let maxW = 900, maxH = 520, gx = 0;
+    const sortedGroups = Array.from(groups.keys()).sort();
+    sortedGroups.forEach(g => {{
+      const items = groups.get(g);
+      items.forEach((n, idx) => {{
+        const x = pad + gx * colW;
+        const y = pad + 26 + idx * rowH;
+        pos[n.id] = {{ x, y, w: 236, h: 36 }};
+        maxW = Math.max(maxW, x + 280);
+        maxH = Math.max(maxH, y + 70);
+      }});
+      gx += 1;
+    }});
+    svg.setAttribute("width", String(maxW));
+    svg.setAttribute("height", String(maxH));
+    svg.textContent = "";
+
+    const defs = document.createElementNS(ns, "defs");
+    const marker = document.createElementNS(ns, "marker");
+    marker.setAttribute("id", "arrow"); marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "9"); marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "6"); marker.setAttribute("markerHeight", "6");
+    marker.setAttribute("orient", "auto-start-reverse");
+    const mp = document.createElementNS(ns, "path");
+    mp.setAttribute("d", "M 0 1 L 10 5 L 0 9 z"); mp.setAttribute("fill", "#64748b");
+    marker.appendChild(mp); defs.appendChild(marker); svg.appendChild(defs);
+
+    visEdges.forEach(e => {{
+      const a = pos[e.src], b = pos[e.dst];
+      if (!a || !b) return;
+      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
+      const mx = (x1 + x2) / 2;
+      const p = document.createElementNS(ns, "path");
+      p.setAttribute("d", `M ${{x1}} ${{y1}} C ${{mx}} ${{y1}}, ${{mx}} ${{y2}}, ${{x2}} ${{y2}}`);
+      p.setAttribute("marker-end", "url(#arrow)");
+      const hi = selectedId && (e.src === selectedId || e.dst === selectedId);
+      p.setAttribute("class", "edge" + (e.inCycle ? " cycle" : "") + (hi ? " hi" : ""));
+      svg.appendChild(p);
+    }});
+
+    sortedGroups.forEach((g, gi) => {{
+      const lbl = document.createElementNS(ns, "text");
+      lbl.setAttribute("x", String(pad + gi * colW)); lbl.setAttribute("y", "18");
+      lbl.setAttribute("fill", "#94a3b8"); lbl.setAttribute("font-size", "12");
+      lbl.textContent = (groups.get(g)[0] && groups.get(g)[0].groupLabel) || g;
+      svg.appendChild(lbl);
+    }});
+
+    visible.forEach(n => {{
+      const p = pos[n.id];
+      const g = document.createElementNS(ns, "g");
+      g.setAttribute("class", "node-box" + (n.cycle ? " cycle" : "") + (n.id === selectedId ? " selected" : ""));
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", String(p.x)); rect.setAttribute("y", String(p.y));
+      rect.setAttribute("width", String(p.w)); rect.setAttribute("height", String(p.h));
+      const txt = document.createElementNS(ns, "text");
+      txt.setAttribute("x", String(p.x + 8)); txt.setAttribute("y", String(p.y + 22));
+      const shortLbl = n.label.length > 34 ? ("..." + n.label.slice(-31)) : n.label;
+      txt.textContent = shortLbl;
+      const title = document.createElementNS(ns, "title");
+      title.textContent = n.label;
+      g.appendChild(rect); g.appendChild(txt); g.appendChild(title);
+      g.addEventListener("click", () => {{ selectedId = n.id; showDetails(n); render(); }});
+      svg.appendChild(g);
+    }});
+  }}
+
+  [qEl, layerEl, domainEl, minImpEl, cyclesEl].forEach(el => el.addEventListener("input", render));
+  document.getElementById("resetBtn").addEventListener("click", () => {{
+    qEl.value = ""; layerEl.value = ""; domainEl.value = ""; minImpEl.value = "0"; cyclesEl.checked = false; selectedId = null; render();
+  }});
+  render();
+}})();
+</script>
+</body>
+</html>
+"""
 
 
 def export_dependency_graph(
@@ -643,11 +947,12 @@ def export_dependency_graph(
     path_glob: Optional[str] = None,
     focus: Optional[str] = None,
     depth: int = 1,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
 ) -> Dict[str, Any]:
-    """Export filtered or aggregated FRAS dependency graph in Mermaid flowchart or Graphviz DOT syntax."""
+    """Export filtered or aggregated FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML."""
     fmt_l = fmt.lower().strip()
-    if fmt_l not in ("mermaid", "dot"):
-        raise ValueError(f"Unsupported export format `{fmt}` (expected `mermaid` or `dot`).")
+    if fmt_l not in ("mermaid", "dot", "html"):
+        raise ValueError(f"Unsupported export format `{fmt}` (expected `mermaid`, `dot`, or `html`).")
     level_l = level.lower().strip()
     if level_l not in ("file", "dir", "domain"):
         raise ValueError(f"Unsupported export level `{level}` (expected `file`, `dir`, or `domain`).")
@@ -668,22 +973,22 @@ def export_dependency_graph(
             focus_set.update(bfs_neighbors(deps_adj, [focus_rel], max(1, depth)))
             focus_set.update(bfs_neighbors(dependents_adj, [focus_rel], max(1, depth)))
 
-    parsed_sel: Dict[str, Dict[str, str]] = {}
+    parsed_sel: Dict[str, ParsedEntry] = {}
     for rel in sorted(entries.keys()):
         if focus_set is not None and rel not in focus_set:
             continue
-        f = parse_entry_fields(entries[rel])
-        if not f:
+        pe = parsed_entries.get(rel) if parsed_entries is not None else parse_entry(rel, entries[rel])
+        if pe is None:
             continue
-        if layer_set and f["layer"] not in layer_set:
+        if layer_set and pe.layer not in layer_set:
             continue
-        if domain_set and f["domain"] not in domain_set:
+        if domain_set and pe.domain not in domain_set:
             continue
-        if min_importance and int(f["imp"]) < min_importance:
+        if min_importance and pe.imp < min_importance:
             continue
         if path_glob and not fnmatch.fnmatchcase(rel, path_glob):
             continue
-        parsed_sel[rel] = f
+        parsed_sel[rel] = pe
 
     node_labels: Dict[str, str] = {}
     node_groups: Dict[str, Optional[str]] = {}
@@ -693,17 +998,17 @@ def export_dependency_graph(
     actual_group_by = group_l if level_l == "file" else "none"
 
     if level_l == "file":
-        for rel, f in parsed_sel.items():
-            node_labels[rel] = f"{rel} [{f['layer']}{f['domain']}{f['imp']}]"
+        for rel, pe in parsed_sel.items():
+            node_labels[rel] = f"{rel} [{pe.layer}{pe.domain}{pe.imp}]"
             if group_l == "none":
                 node_groups[rel] = None
             elif group_l == "domain":
-                gk = f["domain"]
+                gk = pe.domain
                 node_groups[rel] = gk
                 dom_name = declared_domains.get(gk)
                 group_labels[gk] = f"{gk}: {dom_name}" if dom_name else f"Domain {gk}"
             elif group_l == "layer":
-                gk = f["layer"]
+                gk = pe.layer
                 node_groups[rel] = gk
                 group_labels[gk] = f"Layer {gk}"
             else:
@@ -732,8 +1037,8 @@ def export_dependency_graph(
     else:
         file_to_dom: Dict[str, str] = {}
         dom_counts: Dict[str, int] = {}
-        for rel, f in parsed_sel.items():
-            dk = f["domain"]
+        for rel, pe in parsed_sel.items():
+            dk = pe.domain
             file_to_dom[rel] = dk
             dom_counts[dk] = dom_counts.get(dk, 0) + 1
         for dk, cnt in dom_counts.items():
@@ -753,10 +1058,25 @@ def export_dependency_graph(
     group_ids = {g: f"sg_{idx}" for idx, g in enumerate(sorted_groups)}
     sorted_edges = sorted(edge_counts.items(), key=lambda kv: kv[0])
 
-    lines_out: List[str] = []
-    if fmt_l == "mermaid":
+    rendered: str
+    if fmt_l == "html":
+        out_dir = "TD" if dir_u in ("TD", "TB") else "LR"
+        rendered = _render_html_dependency_graph(
+            level=level_l,
+            group_by=actual_group_by,
+            direction=out_dir,
+            sorted_nodes=sorted_nodes,
+            node_ids=node_ids,
+            node_labels=node_labels,
+            node_groups=node_groups,
+            group_labels=group_labels,
+            sorted_edges=sorted_edges,
+            parsed_sel=parsed_sel,
+            declared_domains=declared_domains,
+        )
+    elif fmt_l == "mermaid":
         m_dir = "TD" if dir_u in ("TD", "TB") else "LR"
-        lines_out.append(f"flowchart {m_dir}")
+        lines_out: List[str] = [f"flowchart {m_dir}"]
         for gk in sorted_groups:
             gid = group_ids[gk]
             glbl = _sanitize_graph_label(group_labels[gk], "mermaid")
@@ -776,11 +1096,10 @@ def export_dependency_graph(
             else:
                 lines_out.append(f"  {node_ids[src]} --> {node_ids[dst]}")
         out_dir = m_dir
+        rendered = "\n".join(lines_out) + "\n"
     else:
         d_dir = "TB" if dir_u in ("TD", "TB") else "LR"
-        lines_out.append("digraph aoci {")
-        lines_out.append(f"  rankdir={d_dir};")
-        lines_out.append('  node [shape=box];')
+        lines_out = ["digraph aoci {", f"  rankdir={d_dir};", "  node [shape=box];"]
         for gk in sorted_groups:
             gid = f"cluster_{group_ids[gk]}"
             glbl = _sanitize_graph_label(group_labels[gk], "dot")
@@ -802,8 +1121,8 @@ def export_dependency_graph(
                 lines_out.append(f"  {node_ids[src]} -> {node_ids[dst]};")
         lines_out.append("}")
         out_dir = d_dir
+        rendered = "\n".join(lines_out) + "\n"
 
-    rendered = "\n".join(lines_out) + "\n"
     return {
         "ok": True,
         "format": fmt_l,
@@ -988,40 +1307,36 @@ def expand_query_with_glossary(
 class BM25Index:
     """Pre-tokenized field-weighted Okapi BM25 + Importance inverted index."""
 
-    def __init__(self, entries: Dict[str, str]) -> None:
-        self.parsed: Dict[str, Dict[str, Any]] = {}
+    def __init__(
+        self,
+        entries: Dict[str, str],
+        parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+    ) -> None:
+        self.parsed: Dict[str, ParsedEntry] = {}
         self.postings: Dict[str, List[Tuple[int, float]]] = {}
         self.df: Dict[str, int] = {}
         self.doc_meta: List[Tuple[str, str, int, float]] = []
 
         for rel, line in sorted(entries.items()):
-            f = parse_entry_fields(line)
-            if not f:
+            pe = parsed_entries.get(rel) if parsed_entries is not None else None
+            if pe is None:
+                pe = parse_entry(rel, line)
+            if pe is None:
                 continue
-            imp = int(f["imp"])
-            self.parsed[rel] = {
-                "rel": rel,
-                "line": line,
-                "layer": f["layer"],
-                "domain": f["domain"],
-                "imp": imp,
-                "size": f["size"],
-                "f": f["f"],
-                "r": f["r"],
-                "a": f["a"],
-                "s": f["s"],
-            }
-            a_lhs_parts = [chunk.split("<-", 1)[0] for chunk in re.split(r"[,;]", f["a"])]
-            a_rhs_parts = [chunk.split("<-", 1)[1] for chunk in re.split(r"[,;]", f["a"]) if "<-" in chunk]
+            imp = pe.imp
+            self.parsed[rel] = pe
+            a_chunks = re.split(r"[,;]", pe.a)
+            a_lhs_parts = [chunk.split("<-", 1)[0] for chunk in a_chunks]
+            a_rhs_parts = [chunk.split("<-", 1)[1] for chunk in a_chunks if "<-" in chunk]
 
             tf: Dict[str, float] = {}
             doc_len = 0.0
             zones = (
                 (rel, 2.5),
                 (" ".join(a_lhs_parts), 2.2),
-                (f["f"], 2.0),
-                (f["s"], 1.5),
-                (f["r"] + " " + " ".join(a_rhs_parts), 1.0),
+                (pe.f, 2.0),
+                (pe.s, 1.5),
+                (pe.r + " " + " ".join(a_rhs_parts), 1.0),
             )
             for z_txt, weight in zones:
                 if not z_txt or z_txt.strip() == "-":
@@ -1145,6 +1460,7 @@ def search_entries_bm25(
     top_k: int = 20,
     index_cls: Any = None,
     glossary: Optional[Sequence[Sequence[str]]] = None,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
 ) -> List[Tuple[float, str, str]]:
     """Rank FRAS entries with field-weighted Okapi BM25 + Importance centrality prior."""
     if not entries or (candidate_paths is not None and not candidate_paths):
@@ -1153,7 +1469,8 @@ def search_entries_bm25(
     if not sub:
         return []
     cls = index_cls or BM25Index
-    return cls(sub).search(query_text, top_k=top_k, glossary=glossary)
+    idx = cls(sub, parsed_entries=parsed_entries) if cls is BM25Index else cls(sub)
+    return idx.search(query_text, top_k=top_k, glossary=glossary)
 
 
 def search_entries_bm25_detailed(
@@ -1163,6 +1480,7 @@ def search_entries_bm25_detailed(
     top_k: int = 20,
     index_cls: Any = None,
     glossary: Optional[Sequence[Sequence[str]]] = None,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Rank FRAS entries with BM25 + glossary expansion and return per-hit term attribution."""
     if not entries or (candidate_paths is not None and not candidate_paths):
@@ -1171,7 +1489,7 @@ def search_entries_bm25_detailed(
     if not sub:
         return [], []
     cls = index_cls or BM25Index
-    idx = cls(sub)
+    idx = cls(sub, parsed_entries=parsed_entries) if cls is BM25Index else cls(sub)
     if hasattr(idx, "search_detailed"):
         return idx.search_detailed(query_text, top_k=top_k, glossary=glossary)
     ranked = idx.search(query_text, top_k=top_k)

@@ -1,7 +1,7 @@
 {
   "name": "aoci-index",
   "displayName": "AOCI Codebase Index",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Fast AI-Oriented Code Indexing (.aoci/) builder, BM25/FRAS graph reader, task context packer, symbol zoom, branch-resilient cache restorer, MCP server, and drift guard.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

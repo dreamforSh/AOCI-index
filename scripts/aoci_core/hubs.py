@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from .constants import (
     AOCI_DIR_NAME,
     HUBS_FILE,
+    MANIFEST_FILE,
     _is_within_root,
     atomic_write_text,
     normalize_relpath,
@@ -44,6 +45,17 @@ _OUTLINE_SPAN_EXTS: Set[str] = {
     ".kt",
     ".kts",
     ".cs",
+    ".proto",
+    ".graphql",
+    ".gql",
+    ".prisma",
+    ".sql",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cxx",
 }
 
 
@@ -335,11 +347,10 @@ def _check_regular_target_within_root(root: Path, rel: str) -> Tuple[Optional[Pa
     return full, _count_norm_lines(norm_bytes), None
 
 
-def _extract_live_symbol_set_for_prune(full_path: Path, rel: str) -> Tuple[Optional[Set[str]], bool]:
-    """
-    Return `(symbol_names, supported_and_clean)` for `--prune-missing`.
-    Returns `(None, False)` for unsupported extensions or `.py` files with SyntaxError so they aren't pruned.
-    """
+def _extract_live_symbol_span_map(
+    full_path: Path,
+    rel: str,
+) -> Tuple[Optional[Dict[str, Tuple[int, int]]], bool]:
     ext = full_path.suffix.lower()
     if ext == ".py":
         norm_bytes = _read_norm_bytes(full_path)
@@ -348,11 +359,25 @@ def _extract_live_symbol_set_for_prune(full_path: Path, rel: str) -> Tuple[Optio
         spans, parsed_ok = _extract_python_spans(norm_bytes, rel)
         if not parsed_ok:
             return None, False
-        return {sp["symbol"] for sp in spans}, True
-    if ext in _OUTLINE_SPAN_EXTS:
+    elif ext in _OUTLINE_SPAN_EXTS:
         spans = _extract_outline_spans(full_path, rel, ext)
-        return {sp["symbol"] for sp in spans}, True
-    return None, False
+    else:
+        return None, False
+    span_map: Dict[str, Tuple[int, int]] = {}
+    for sp in spans:
+        span_map.setdefault(str(sp["symbol"]), (int(sp["start"]), int(sp["end"])))
+    return span_map, True
+
+
+def _extract_live_symbol_set_for_prune(full_path: Path, rel: str) -> Tuple[Optional[Set[str]], bool]:
+    """
+    Return `(symbol_names, supported_and_clean)` for `--prune-missing`.
+    Returns `(None, False)` for unsupported extensions or `.py` files with SyntaxError so they aren't pruned.
+    """
+    span_map, clean_parse = _extract_live_symbol_span_map(full_path, rel)
+    if not clean_parse or span_map is None:
+        return None, False
+    return set(span_map.keys()), True
 
 
 def upsert_hub_entries(
@@ -548,6 +573,7 @@ def upsert_hub_entries(
         ordered = sorted(merged.values(), key=_record_sort_key)
         if not dry_run and (upserted or pruned):
             write_hubs_volume(hubs_path, ordered)
+            sync_manifest_hubs_volume(aoci_path)
 
     return {
         "ok": True,
@@ -561,25 +587,45 @@ def upsert_hub_entries(
     }
 
 
-def refresh_hub_spans_for_paths(root: Path, aoci_dir: Path, paths: Sequence[str]) -> List[str]:
-    """
-    Refresh `[Lstart-Lend]` spans in `.aoci/aoci.hubs.txt` for matching `<relpath>#<symbol>` entries
-    whenever symbol line numbers shift on disk. Caller must hold any index lock if applicable.
-    """
-    hubs_path = Path(aoci_dir) / HUBS_FILE
-    if not hubs_path.is_file() or not paths:
-        return []
+_HUBS_VOLUME_LINE = "#Volume: id=hubs kind=hubs path=aoci.hubs.txt format=symbol-hubs-v1 depends=code state=enabled"
 
-    records, malformed = parse_hubs_volume(hubs_path)
-    if not records or malformed:
-        return []
 
-    target_set = {normalize_relpath(str(p)) for p in paths if str(p).strip()}
-    relevant_paths = {rec["relpath"] for rec in records} & target_set
+def sync_manifest_hubs_volume(aoci_dir: Path) -> None:
+    """Idempotently register or unregister `aoci.hubs.txt` in `.aoci/aoci.txt`."""
+    manifest_path = Path(aoci_dir) / MANIFEST_FILE
+    if not manifest_path.is_file():
+        return
+    hubs_exists = (Path(aoci_dir) / HUBS_FILE).is_file()
+    try:
+        raw = manifest_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    lines = raw.splitlines()
+    has_hub_vol = any(ln.strip().startswith("#Volume:") and "id=hubs" in ln for ln in lines)
+    if hubs_exists and not has_hub_vol:
+        new_lines: List[str] = []
+        inserted = False
+        for ln in lines:
+            new_lines.append(ln)
+            if not inserted and ln.strip().startswith("#Volume:") and "id=code" in ln:
+                new_lines.append(_HUBS_VOLUME_LINE)
+                inserted = True
+        if not inserted:
+            new_lines.append(_HUBS_VOLUME_LINE)
+        atomic_write_text(manifest_path, "\n".join(new_lines) + "\n")
+    elif not hubs_exists and has_hub_vol:
+        new_lines = [ln for ln in lines if not (ln.strip().startswith("#Volume:") and "id=hubs" in ln)]
+        atomic_write_text(manifest_path, "\n".join(new_lines) + "\n")
+
+
+def _refresh_spans_in_records(
+    root_res: Path,
+    records: List[Dict[str, Any]],
+    target_paths: Set[str],
+) -> List[str]:
+    relevant_paths = {rec["relpath"] for rec in records} & target_paths
     if not relevant_paths:
         return []
-
-    root_res = Path(root).resolve()
     span_lookup: Dict[str, Dict[str, Tuple[int, int]]] = {}
     for rel in sorted(relevant_paths):
         full = root_res / rel
@@ -594,10 +640,8 @@ def refresh_hub_spans_for_paths(root: Path, aoci_dir: Path, paths: Sequence[str]
         spans = extract_symbol_spans(full, rel)
         if spans:
             span_lookup[rel] = {sp["symbol"]: (int(sp["start"]), int(sp["end"])) for sp in spans}
-
     if not span_lookup:
         return []
-
     refreshed: List[str] = []
     for rec in records:
         rel = rec["relpath"]
@@ -614,7 +658,241 @@ def refresh_hub_spans_for_paths(root: Path, aoci_dir: Path, paths: Sequence[str]
             rec["end"] = new_end
             rec["line"] = format_hub_entry(rel, rec["symbol"], new_start, new_end, rec["f"], rec["s"])
             refreshed.append(f"{rel}#{rec['symbol']} [L{old_start}-L{old_end}]->[L{new_start}-L{new_end}]")
+    return refreshed
 
+
+def refresh_hub_spans_for_paths(root: Path, aoci_dir: Path, paths: Sequence[str]) -> List[str]:
+    """
+    Refresh `[Lstart-Lend]` spans in `.aoci/aoci.hubs.txt` for matching `<relpath>#<symbol>` entries
+    whenever symbol line numbers shift on disk. Caller must hold any index lock if applicable.
+    """
+    hubs_path = Path(aoci_dir) / HUBS_FILE
+    if not hubs_path.is_file() or not paths:
+        return []
+    records, malformed = parse_hubs_volume(hubs_path)
+    if not records or malformed:
+        return []
+    target_set = {normalize_relpath(str(p)) for p in paths if str(p).strip()}
+    refreshed = _refresh_spans_in_records(Path(root).resolve(), records, target_set)
     if refreshed:
         write_hubs_volume(hubs_path, records)
     return refreshed
+
+
+def sync_hubs_on_upsert(
+    root: Path,
+    aoci_dir: Path,
+    upserted_paths: Sequence[str],
+    pruned_paths: Sequence[str],
+) -> Dict[str, List[str]]:
+    """
+    Keep `.aoci/aoci.hubs.txt` aligned during `upsert`: drop entries for pruned files and
+    refresh `[Lstart-Lend]` spans for upserted files. Caller must hold `.aoci/.lock`.
+    """
+    hubs_path = Path(aoci_dir) / HUBS_FILE
+    if not hubs_path.is_file() or (not upserted_paths and not pruned_paths):
+        return {"refreshed": [], "pruned": []}
+    records, malformed = parse_hubs_volume(hubs_path)
+    if not records or malformed:
+        return {"refreshed": [], "pruned": []}
+
+    pruned_set = {normalize_relpath(str(p)) for p in pruned_paths if str(p).strip()}
+    kept: List[Dict[str, Any]] = []
+    pruned_labels: List[str] = []
+    for rec in records:
+        if rec["relpath"] in pruned_set:
+            pruned_labels.append(f"{rec['relpath']}#{rec['symbol']}")
+        else:
+            kept.append(rec)
+
+    upserted_set = {normalize_relpath(str(p)) for p in upserted_paths if str(p).strip()} - pruned_set
+    refreshed = _refresh_spans_in_records(Path(root).resolve(), kept, upserted_set) if upserted_set else []
+
+    if pruned_labels or refreshed:
+        write_hubs_volume(hubs_path, kept)
+        sync_manifest_hubs_volume(aoci_dir)
+    return {"refreshed": refreshed, "pruned": pruned_labels}
+
+
+def migrate_hubs_renames(
+    root: Path,
+    aoci_dir: Path,
+    rename_map: Mapping[str, str],
+    dry_run: bool = False,
+) -> List[str]:
+    """
+    Migrate `<old_rel>#<sym>` entries in `.aoci/aoci.hubs.txt` after `migrate-renames` and
+    refresh `[Lstart-Lend]` spans for moved+edited targets.
+    """
+    hubs_path = Path(aoci_dir) / HUBS_FILE
+    if not rename_map or not hubs_path.is_file():
+        return []
+    records, malformed = parse_hubs_volume(hubs_path)
+    if not records or malformed:
+        return []
+
+    migrated: List[str] = []
+    new_paths: Set[str] = set()
+    updated_records: List[Dict[str, Any]] = []
+    for rec in records:
+        old_rel = rec["relpath"]
+        if old_rel in rename_map:
+            new_rel = normalize_relpath(str(rename_map[old_rel]))
+            new_rec = dict(rec)
+            new_rec["relpath"] = new_rel
+            new_rec["line"] = format_hub_entry(new_rel, rec["symbol"], rec["start"], rec["end"], rec["f"], rec["s"])
+            updated_records.append(new_rec)
+            new_paths.add(new_rel)
+            migrated.append(f"{old_rel}#{rec['symbol']}->{new_rel}#{rec['symbol']}")
+        else:
+            updated_records.append(rec)
+
+    if not migrated:
+        return []
+
+    if not dry_run:
+        _refresh_spans_in_records(Path(root).resolve(), updated_records, new_paths)
+        write_hubs_volume(hubs_path, updated_records)
+        sync_manifest_hubs_volume(aoci_dir)
+    return migrated
+
+
+def validate_hubs_volume(
+    root: Path,
+    aoci_dir: Path,
+    code_entries: Mapping[str, str],
+    fingerprints: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """
+    Validate `.aoci/aoci.hubs.txt` for `verify` and `lint`.
+    Returns `(verify_issues, lint_findings)`.
+    """
+    hubs_path = Path(aoci_dir) / HUBS_FILE
+    if not hubs_path.is_file():
+        return [], []
+    records, malformed = parse_hubs_volume(hubs_path)
+    verify_issues: List[str] = []
+    lint_findings: List[Dict[str, str]] = []
+
+    for ln, txt in malformed:
+        msg = f"`{HUBS_FILE}` L{ln} is malformed: {txt[:100]}"
+        verify_issues.append(msg)
+        lint_findings.append({"path": f"{HUBS_FILE}:L{ln}", "code": "hub-malformed", "message": txt[:120]})
+
+    root_res = Path(root).resolve()
+    line_count_cache: Dict[str, Optional[int]] = {}
+    live_sym_cache: Dict[str, Tuple[Optional[Dict[str, Tuple[int, int]]], bool]] = {}
+
+    for rec in records:
+        rel = rec["relpath"]
+        sym = rec["symbol"]
+        hub_id = f"{rel}#{sym}"
+        start = int(rec["start"])
+        end = int(rec["end"])
+        f_val = rec["f"]
+        s_val = rec["s"]
+
+        if "<todo" in rec["line"].lower():
+            msg = f"Unfilled `<TODO:...>` placeholder in `{HUBS_FILE}` for `{hub_id}`."
+            verify_issues.append(msg)
+            lint_findings.append({"path": hub_id, "code": "hub-todo", "message": msg})
+        if not f_val or f_val == "-":
+            msg = f"Field `F:` cannot be `-` or empty in `{HUBS_FILE}` for `{hub_id}`."
+            verify_issues.append(msg)
+            lint_findings.append({"path": hub_id, "code": "hub-F-empty", "message": msg})
+        if not s_val:
+            msg = f"Field `S:` cannot be empty in `{HUBS_FILE}` for `{hub_id}`."
+            verify_issues.append(msg)
+            lint_findings.append({"path": hub_id, "code": "hub-S-empty", "message": msg})
+
+        if rel not in code_entries:
+            lint_findings.append(
+                {
+                    "path": hub_id,
+                    "code": "hub-unindexed-file",
+                    "message": f"Hub parent file `{rel}` is not indexed in `aoci.code.txt`.",
+                }
+            )
+
+        if rel not in line_count_cache:
+            fp_meta = fingerprints.get(rel) if fingerprints is not None else None
+            if fp_meta is not None and "lines" in fp_meta:
+                line_count_cache[rel] = int(fp_meta["lines"])
+            else:
+                _, actual_l, err_s = _check_regular_target_within_root(root_res, rel)
+                line_count_cache[rel] = actual_l if err_s is None else None
+                if err_s is not None:
+                    verify_issues.append(f"`{HUBS_FILE}` `{hub_id}`: {err_s}")
+                    lint_findings.append({"path": hub_id, "code": "hub-file-missing", "message": err_s})
+
+        actual_lines = line_count_cache[rel]
+        if actual_lines is not None:
+            if start < 1 or start > end or end > actual_lines:
+                msg = (
+                    f"`{HUBS_FILE}` line span `[L{start}-L{end}]` is out of bounds for `{rel}` "
+                    f"({actual_lines} lines) in `{hub_id}`."
+                )
+                verify_issues.append(msg)
+                lint_findings.append({"path": hub_id, "code": "hub-span-oob", "message": msg})
+
+            full_k = root_res / rel
+            if rel not in live_sym_cache and full_k.is_file():
+                live_sym_cache[rel] = _extract_live_symbol_span_map(full_k, rel)
+            live_spans, clean_parse = live_sym_cache.get(rel, (None, False))
+            if clean_parse and live_spans is not None:
+                if sym not in live_spans:
+                    lint_findings.append(
+                        {
+                            "path": hub_id,
+                            "code": "hub-symbol-missing",
+                            "message": f"Symbol `{sym}` was not found in `{rel}`; update or run `zoom --prune-missing`.",
+                        }
+                    )
+                else:
+                    live_s, live_e = live_spans[sym]
+                    if (live_s, live_e) != (start, end):
+                        lint_findings.append(
+                            {
+                                "path": hub_id,
+                                "code": "hub-span-outdated",
+                                "message": (
+                                    f"Span `[L{start}-L{end}]` for `{hub_id}` differs from live span "
+                                    f"`[L{live_s}-L{live_e}]`; run `ack` or `upsert` to refresh."
+                                ),
+                            }
+                        )
+
+    return verify_issues, lint_findings
+
+
+def lookup_hub_sections(
+    aoci_dir: Path,
+    target_paths: Iterable[str],
+    preloaded_records: Optional[Sequence[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Return matching `.aoci/aoci.hubs.txt` sections for `target_paths`."""
+    wanted = {normalize_relpath(str(p)) for p in target_paths if str(p).strip()}
+    if not wanted:
+        return []
+    if preloaded_records is not None:
+        records = preloaded_records
+    else:
+        hubs_path = Path(aoci_dir) / HUBS_FILE
+        if not hubs_path.is_file():
+            return []
+        records, _ = parse_hubs_volume(hubs_path)
+    out: List[Dict[str, Any]] = []
+    for rec in records:
+        if rec["relpath"] in wanted:
+            out.append(
+                {
+                    "path": rec["relpath"],
+                    "symbol": rec["symbol"],
+                    "start": int(rec["start"]),
+                    "end": int(rec["end"]),
+                    "f": rec["f"],
+                    "s": rec["s"],
+                    "entry": rec["line"],
+                }
+            )
+    return out

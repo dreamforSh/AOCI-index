@@ -20,7 +20,7 @@ Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semanti
 1. **Mandatory Git Exclusion**:
    - Whenever Git is present, `.aoci/` MUST be excluded locally via `.git/info/exclude` (resolved through `git rev-parse --git-path info/exclude` so standard repos, worktrees, and submodules all work without dirtying `.gitignore`).
    - Never run `git add` or commit `.aoci/`. If `.aoci/` was ever accidentally tracked, untrack it immediately with `git rm -r --cached .aoci`.
-   - File discovery automatically excludes `.git/`, `.aoci/`, `.gitignore` patterns (all levels in Git repos; root `.gitignore` only in non-Git workspaces), dependency/build caches, binaries, lockfiles, and files over `--max-bytes`.
+   - File discovery automatically excludes `.git/`, `.aoci/`, `.gitignore` patterns (all levels in Git repos; root and nested directory `.gitignore` files in non-Git workspaces), dependency/build caches, binaries, lockfiles, and files over `--max-bytes`.
 2. **Read-Whole-First**:
    - Whenever `<repo>/.aoci/aoci.code.txt` exists, read the index repository (`aoci.txt` -> `aoci.meta.txt` -> `aoci.code.txt`) **before** grepping, reading, debugging, or modifying source files.
    - Immediately after building a new index, read the completed index to establish global context before starting implementation work.
@@ -51,7 +51,7 @@ Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semanti
 ## Workflows
 
 > **Tool Routing Priority (MCP-First, CLI-Fallback)**:
-> - Whenever `aoci_*` MCP tools (`aoci_overview`, `aoci_query`, `aoci_context`, `aoci_pack`, `aoci_diff`, `aoci_scan`, `aoci_outline`, `aoci_scaffold`, `aoci_ack`, `aoci_upsert`, `aoci_migrate_renames`, `aoci_restore`, `aoci_zoom`, `aoci_shard`, `aoci_ensure_git_exclude`, `aoci_lint`, `aoci_verify`, `aoci_audit`, `aoci_export`, `aoci_pool`, `aoci_init`) are registered in your toolset, **prefer calling them directly** (always passing `root: "<repo>"`) instead of spawning shell commands — this keeps parsed graphs and BM25 indexes warm in memory, exposes MCP resources (`aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://hubs`, `aoci://shards/INDEX`), URI templates (`aoci://shards/{shard}`, `aoci://{volume}?root={root}`), and prompts (`aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`), marks read-only tools with `readOnlyHint`, and avoids terminal permission prompts.
+> - Whenever `aoci_*` MCP tools (`aoci_overview`, `aoci_query`, `aoci_context`, `aoci_pack`, `aoci_diff`, `aoci_scan`, `aoci_prepare_sync`, `aoci_outline`, `aoci_scaffold`, `aoci_ack`, `aoci_upsert`, `aoci_migrate_renames`, `aoci_restore`, `aoci_zoom`, `aoci_shard`, `aoci_ensure_git_exclude`, `aoci_lint`, `aoci_verify`, `aoci_audit`, `aoci_export`, `aoci_pool`, `aoci_init`) are registered in your toolset, **prefer calling them directly** (always passing `root: "<repo>"`) instead of spawning shell commands — this keeps parsed graphs and BM25 indexes warm in memory, exposes MCP resources (`aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://hubs`, `aoci://shards/INDEX`), URI templates (`aoci://shards/{shard}`, `aoci://{volume}?root={root}`), and prompts (`aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`), marks read-only tools with `readOnlyHint`, and avoids terminal permission prompts.
 > - Otherwise, in all commands below, `<SCRIPT>` refers to [scripts/aoci_index.py](./scripts/aoci_index.py) (zero external dependencies; Python 3.8+ standard library only, backed by internal modules in `scripts/aoci_core/`).
 
 ### Workflow A: Initialize & Build a New AOCI Index
@@ -119,9 +119,11 @@ Before exploring, searching, or modifying source files in an indexed repository:
 
 After creating, editing, renaming, or deleting any managed source file — **before concluding the task**:
 
-1. **Detect exact drift (including exact-content renames)**:
+1. **Detect exact drift or fetch a single-pass sync briefing**:
    ```bash
    python <SCRIPT> scan --root <repo>
+   # Or collect scaffolds, outlines, bounded diffs, neighbors & recommended actions in one call:
+   python <SCRIPT> prepare-sync --root <repo> --json
    ```
 2. **Migrate exact-content renames automatically (if any)**:
    ```bash
@@ -162,18 +164,19 @@ After creating, editing, renaming, or deleting any managed source file — **bef
 | :--- | :--- | :--- |
 | `init` | Scaffold `.aoci/` and write `/.aoci/` into `.git/info/exclude` | `--root`, `--project`, `--locale`, `--force`, `--json` |
 | `scan` / `status` | Detect SHA-256 drift (with `sig_hash` `impl-only` / `contract-changed` classification), renames, explicit-mention affected neighbors; build stable batches | `--root`, `--batch-size N` (alias `--batches N`), `--max-batch-lines L`, `--reset-batches`, `--fast`, `--git-fast`, `--auto-restore`, `--check-only`, `--fail-on-drift`, `--json` |
-| `upsert` | Validate against the discovered file set & atomically merge FRAS entries (locked; warns on stale `A:` mentions) | `--root`, `--entries-file`, `--entry`, `--stdin`, `--prune-only`, `--no-prune`, `--strict-size`, `--drop-malformed`, `--max-bytes`, `--dry-run`, `--json` |
+| `prepare-sync` | Single-pass sync briefing: pool restorable count, renames, `impl-only` vs contract-changed files (+ outlines & bounded diffs), scaffolds, neighbors & actions | `--root`, `--no-fast`, `--max-diff-lines N`, `--max-bytes`, `--json` |
+| `upsert` | Validate against the discovered file set & atomically merge FRAS entries (locked; auto-refreshes/prunes `aoci.hubs.txt`; warns on stale `A:` mentions) | `--root`, `--entries-file`, `--entry`, `--stdin`, `--prune-only`, `--no-prune`, `--strict-size`, `--drop-malformed`, `--max-bytes`, `--dry-run`, `--json` |
 | `ack` | Re-baseline modified files whose entries are still accurate (auto Size tier; `--impl-only` selects unchanged `sig_hash` files) | `paths...`, `--root`, `--all-modified --reviewed`, `--impl-only --reviewed`, `--dry-run`, `--json` |
-| `migrate-renames` | Migrate unambiguous exact (and moved+edited) renames and rewrite `R:`/`A:` refs | `--root`, `--exact-only`, `--no-rewrite-refs`, `--drop-malformed`, `--dry-run`, `--json` |
+| `migrate-renames` | Migrate unambiguous exact (and moved+edited) renames and rewrite `R:`/`A:` refs (migrates `aoci.hubs.txt` too) | `--root`, `--exact-only`, `--no-rewrite-refs`, `--drop-malformed`, `--dry-run`, `--json` |
 | `restore` | Zero-token exact `(path, sha256)` restore from `<git-common-dir>/aoci-cache` SQLite WAL pool (cross-path matches surfaced as `sha_candidates`) | `--root`, `--allow-sha-fallback`, `--exact-path-only`, `--no-prune`, `--dry-run`, `--json` |
 | `pool` | Inspect SQLite WAL semantic cache stats or export/import portable `aoci-semantic-pool-v1` bundles | `stats`, `export --output <file[.gz]>`, `import --input <file[.gz]> [--dry-run]`, `--root`, `--json` |
-| `verify` | Full health gate (Git exclusion + format + domain check + zero drift; lint summary) | `--root`, `--fast`, `--git-fast`, `--json` |
-| `lint` | FRAS quality findings (vague F, token budget, hub `S:-`, dangling refs, duplicates) | `--root`, `--code`, `--strict`, `--limit`, `--json` |
-| `audit` | Cross-check FRAS graph vs static imports, Tarjan SCC dependency cycles, and forbidden layer edges (`#Layer-Rules:` / `--forbid`) | `--root`, `--forbid`, `--no-default-rules`, `--no-static`, `--no-cycles`, `--no-layers`, `--strict`, `--json` |
+| `verify` | Full health gate (Git exclusion + format + domain check + zero drift + `aoci.hubs.txt` consistency) | `--root`, `--fast`, `--git-fast`, `--json` |
+| `lint` | FRAS quality findings (vague F, token budget, hub `S:-`, dangling refs, duplicates, `aoci.hubs.txt` spans/symbols) | `--root`, `--code`, `--strict`, `--limit`, `--json` |
+| `audit` | Cross-check FRAS graph vs static imports, Tarjan SCC dependency cycles, forbidden layer edges (`#Layer-Rules:` / `--forbid`), and optional Git co-change mining (`--co-change`) | `--root`, `--forbid`, `--no-default-rules`, `--no-static`, `--no-cycles`, `--no-layers`, `--co-change`, `--co-change-commits`, `--min-co-changes`, `--min-co-confidence`, `--strict`, `--json` |
 | `query` | Filter or BM25-rank entries (`--search` with bilingual `#Glossary:` expansion & match attribution), list dependents (`--impact`), or derive impacted tests (`--tests-for`) | `--search`, `--top`, `--layer`, `--domain`, `--min-importance`, `--path`, `--keyword`, `--impact`, `--tests-for`, `--depth`, `--json` |
-| `context` | Directed subgraph: invariants + target(s) + dependencies + dependents (optional greedy `--budget` token ceiling and `--with-tests`) | `paths...`, `--root`, `--depth N`, `--budget <tokens>`, `--with-tests`, `--json` |
-| `pack` | Build a task-driven, token-budgeted context packet (BM25 + glossary + path-mention + diff seeds, `R:`/`A:` graph, `S:` constraints, `open_next` symbol anchors) | `--task <desc>`, `--root`, `--no-diff`, `--depth N`, `--budget <tokens>`, `--top-seeds N`, `--max-bytes`, `--json` |
-| `export` | Export filtered or aggregated FRAS dependency graph in Mermaid or Graphviz DOT syntax | `--root`, `--format mermaid\|dot`, `--level file\|dir\|domain`, `--group-by`, `--direction`, `--focus`, `--output`, `--json` |
+| `context` | Directed subgraph: invariants + target(s) + hub sections + dependencies + dependents (optional greedy `--budget` token ceiling and `--with-tests`) | `paths...`, `--root`, `--depth N`, `--budget <tokens>`, `--with-tests`, `--json` |
+| `pack` | Build a task-driven, token-budgeted context packet (BM25 + glossary + path-mention + diff seeds, `R:`/`A:` graph, `S:` constraints, `hub_sections`, `open_next` symbol anchors, optional `--with-tests`/`--live-anchors`) | `--task <desc>`, `--root`, `--no-diff`, `--depth N`, `--budget <tokens>`, `--top-seeds N`, `--with-tests`, `--live-anchors`, `--max-bytes`, `--json` |
+| `export` | Export filtered or aggregated FRAS dependency graph in Mermaid, Graphviz DOT, or standalone interactive HTML format | `--root`, `--format mermaid\|dot\|html`, `--level file\|dir\|domain`, `--group-by`, `--direction`, `--focus`, `--output`, `--json` |
 | `diff` | Architectural impact briefing (FRAS + `S:` traps + downstream `R:` deps + callers + optional `--with-tests`) for diffs | `[rev]`, `--root`, `--staged`, `--depth N`, `--with-tests`, `--json` |
 | `overview` | Emit compact global digest (manifest, domains, dirs, core files) | `--root`, `--min-importance`, `--max-core`, `--json` |
 | `outline` | Extract static imports and top-level symbols to aid `R:`/`A:` authoring | `paths...`, `--root`, `--max-items`, `--max-bytes`, `--json` |

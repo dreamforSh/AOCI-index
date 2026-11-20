@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import ast
 import atexit
+import contextlib
 import gzip
+import io
 import json
 import os
 import shutil
@@ -31,42 +33,89 @@ HOOK = SKILL_DIR / "scripts" / "aoci_hook.py"
 INSTALL = SKILL_DIR / "scripts" / "install.py"
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
+import aoci_hook  # noqa: E402
 import aoci_index  # noqa: E402
 
 HAS_GIT = shutil.which("git") is not None
 
 
+def _use_subprocess_runner() -> bool:
+    return os.environ.get("AOCI_TEST_SUBPROCESS") == "1"
+
+
+def _cli_in_process(*args: str, stdin: Optional[str] = None):
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(stdin if stdin is not None else "")
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            try:
+                rc = int(aoci_index.main([str(a) for a in args]))
+            except SystemExit as exc:
+                if isinstance(exc.code, int):
+                    rc = exc.code
+                elif exc.code is None:
+                    rc = 0
+                else:
+                    rc = 1
+                    err_buf.write(f"\n{exc.code}")
+    finally:
+        sys.stdin = old_stdin
+    return rc, out_buf.getvalue(), err_buf.getvalue()
+
+
 def cli(*args: str, stdin: str = None):
-    r = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        input=stdin,
-    )
-    return r.returncode, r.stdout + r.stderr
+    if _use_subprocess_runner():
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            input=stdin,
+        )
+        return r.returncode, r.stdout + r.stderr
+    rc, out, err = _cli_in_process(*args, stdin=stdin)
+    return rc, out + err
 
 
 def cli_json(*args: str) -> dict:
     """Run a `--json` command and parse stdout only (stderr may carry interpreter/launcher noise)."""
-    r = subprocess.run(
-        [sys.executable, str(SCRIPT), *args, "--json"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    return json.loads(r.stdout)
+    if _use_subprocess_runner():
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), *args, "--json"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return json.loads(r.stdout)
+    _, out, _ = _cli_in_process(*args, "--json")
+    return json.loads(out)
 
 
 def hook(event: str, payload: dict, host: str = "claude-code") -> dict:
-    r = subprocess.run(
-        [sys.executable, str(HOOK), "--host", host, "--event", event],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    return json.loads(r.stdout or "{}")
+    if _use_subprocess_runner():
+        r = subprocess.run(
+            [sys.executable, str(HOOK), "--host", host, "--event", event],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return json.loads(r.stdout or "{}")
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(json.dumps(payload))
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            try:
+                aoci_hook.main(["--host", host, "--event", event])
+            except SystemExit:
+                pass
+    finally:
+        sys.stdin = old_stdin
+    return json.loads(out_buf.getvalue() or "{}")
 
 
 def age_file(path: Path, seconds: int = 60) -> None:
@@ -1842,6 +1891,7 @@ class Phase1FixesTests(RepoTestCase):
                 "aoci_pool",
                 "aoci_pack",
                 "aoci_zoom",
+                "aoci_prepare_sync",
             },
         )
         for t_name, t_spec in tools.items():
@@ -3563,7 +3613,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         import aoci_mcp
 
         ver = aoci_index.AOCI_VERSION
-        self.assertEqual(ver, "1.4.0")
+        self.assertEqual(ver, "1.5.0")
         self.assertEqual(aoci_index.__version__, ver)
         self.assertEqual(aoci_core.__version__, ver)
         self.assertEqual(aoci_mcp.SERVER_VERSION, ver)
@@ -3578,6 +3628,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
         readme_text = (SKILL_DIR / "README.md").read_text(encoding="utf-8")
         self.assertIn(f"version-{ver}-", readme_text)
+        self.assertNotIn("1.4.0", readme_text)
         self.assertNotIn("1.3.0", readme_text)
         self.assertNotIn("1.2.0", readme_text)
 

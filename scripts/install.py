@@ -621,7 +621,7 @@ def install_antigravity_plugin_bundle(
                 pdata = load_json_dict(manifest_file)
             except (OSError, ValueError):
                 pdata = {}
-            if pdata.get("name") != SKILL_NAME:
+            if pdata.get("name") not in (SKILL_NAME, f"{SKILL_NAME}-project-mcp"):
                 print(
                     f"  [abort] {plugin_dir} belongs to another plugin (`{pdata.get('name', 'unknown')}`). "
                     "Re-run with --force to overwrite.",
@@ -709,7 +709,7 @@ def uninstall_antigravity_plugin_bundle(
             pdata = load_json_dict(manifest_file)
         except (OSError, ValueError):
             pdata = {}
-        if pdata.get("name") != SKILL_NAME:
+        if pdata.get("name") not in (SKILL_NAME, f"{SKILL_NAME}-project-mcp"):
             print(f"  [keep] preserved non-AOCI plugin directory: {plugin_dir}")
             return
 
@@ -754,7 +754,12 @@ def _upsert_antigravity_project_mcp_plugin(plugin_dir: Path, py_cmd: str, dry_ru
         return
     plugin_dir.mkdir(parents=True, exist_ok=True)
     if not (plugin_dir / "plugin.json").exists():
-        shutil.copy2(SOURCE_DIR / "resources" / "plugin.json", plugin_dir / "plugin.json")
+        try:
+            pdata = load_json_dict(SOURCE_DIR / "resources" / "plugin.json")
+        except (OSError, ValueError):
+            pdata = {}
+        pdata["name"] = f"{SKILL_NAME}-project-mcp"
+        write_text_lf(plugin_dir / "plugin.json", json.dumps(pdata, indent=2, ensure_ascii=False) + "\n")
     logo_src = SOURCE_DIR / "assets" / "logo.svg"
     if logo_src.is_file() and not (plugin_dir / "assets" / "logo.svg").exists():
         (plugin_dir / "assets").mkdir(exist_ok=True)

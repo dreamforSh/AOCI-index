@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .constants import AOCI_DIR_NAME, CACHE_DIR, OUTLINE_CACHE, normalize_relpath
 from .graph import ParsedEntry, parse_entries_map
 from .parsers import (
     _expand_rust_use_tree,
-    _load_go_module_prefix,
-    _load_tsconfig_aliases,
     _norm_join_posix,
+    _resolve_gomod_for_dir,
+    _resolve_tsconfig_for_dir,
     _static_ecosystem,
 )
 
@@ -372,7 +372,7 @@ def _test_imports_match_target(
         for spec in imports:
             if go_mod and (spec == go_mod or spec.startswith(go_mod + "/")):
                 sub_dir = spec[len(go_mod) :].lstrip("/")
-                if sub_dir == t_dir:
+                if sub_dir == t_dir or t_dir.endswith("/" + sub_dir):
                     return True
             elif t_dir and (spec == t_dir or spec.endswith("/" + t_dir)):
                 return True
@@ -446,6 +446,9 @@ def find_impacted_tests(
     dependents_adj: Dict[str, Set[str]],
     target_paths: Sequence[str],
     max_depth: int = 3,
+    *,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+    preloaded_outline_files: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Derive impacted `T`-layer tests for `target_paths` by combining:
@@ -457,7 +460,7 @@ def find_impacted_tests(
     if not targets or not entries:
         return []
 
-    parsed = parse_entries_map(entries)
+    parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
     test_entries: Dict[str, ParsedEntry] = {rel: pe for rel, pe in parsed.items() if pe.layer == "T"}
     if not test_entries:
         return []
@@ -501,28 +504,33 @@ def find_impacted_tests(
     target_infos = [_build_target_info(t) for t in targets]
 
     # 2) Warm Outline Static Import Fallback (zero source-disk scan)
-    cache_files = _load_outline_cache(root)
+    cache_files = preloaded_outline_files if preloaded_outline_files is not None else _load_outline_cache(root)
     if cache_files:
-        go_mod: Optional[str] = None
-        ts_cfg: Optional[Tuple[str, List[Tuple[str, List[str]]]]] = None
+        go_cache: Dict[str, Tuple[str, str]] = {}
+        ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
         for test_rel in sorted(test_entries.keys()):
             imports, py_members = _extract_cached_imports(cache_files.get(test_rel))
             if not imports and not py_members:
                 continue
             eco = _static_ecosystem(test_rel)
-            if eco == "go" and go_mod is None:
-                go_mod = _load_go_module_prefix(root)
-            if eco == "js" and ts_cfg is None:
-                ts_cfg = _load_tsconfig_aliases(root)
+            test_dir = test_rel.rsplit("/", 1)[0] if "/" in test_rel else ""
+            go_mod_str = ""
+            ts_base, ts_aliases = "", ()
+            if eco == "go":
+                mod_root, go_mod_str = _resolve_gomod_for_dir(root, test_dir, go_cache)
+                _ = mod_root
+            elif eco == "js":
+                ts_base, ts_aliases_list = _resolve_tsconfig_for_dir(root, test_dir, ts_cache)
+                ts_aliases = ts_aliases_list
             for t_info in target_infos:
                 if _test_imports_match_target(
                     test_rel,
                     imports,
                     py_members,
                     t_info,
-                    go_mod or "",
-                    ts_cfg[0] if ts_cfg else "",
-                    ts_cfg[1] if ts_cfg else (),
+                    go_mod_str,
+                    ts_base,
+                    ts_aliases,
                 ):
                     _record(test_rel, "static-import", 1, t_info["rel"])
 

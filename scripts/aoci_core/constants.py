@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-AOCI_VERSION = "1.4.0"
+AOCI_VERSION = "1.5.0"
 
 AOCI_DIR_NAME = ".aoci"
 MANIFEST_FILE = "aoci.txt"
@@ -207,7 +207,19 @@ SIG_HASH_EXTS: Set[str] = {
     ".rs",
     ".java",
     ".kt",
+    ".kts",
     ".cs",
+    ".proto",
+    ".graphql",
+    ".gql",
+    ".prisma",
+    ".sql",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cxx",
 }
 
 GIT_HOOK_BEGIN = "# >>> aoci-index git-hook (managed - do not edit)"

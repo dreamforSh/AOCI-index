@@ -14,7 +14,7 @@ spawning shell commands or triggering terminal permission prompts.
 from __future__ import annotations
 
 from collections import OrderedDict
-import contextlib
+import contextvars
 import fnmatch
 import io
 import json
@@ -40,16 +40,25 @@ SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 
 
 class _MemoryIndexCache:
-    """LRU-bounded, mtime-keyed in-memory cache of parsed `aoci.code.txt`, FRAS graph, and BM25 index."""
+    """LRU-bounded, mtime-keyed in-memory cache of parsed FRAS volumes, outlines, hubs, and BM25."""
 
     def __init__(self, max_slots: int = 16) -> None:
         self._max_slots = max(1, max_slots)
         self._slots: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._outline_slots: "OrderedDict[str, Tuple[Any, Dict[str, Any]]]" = OrderedDict()
+        self._hub_slots: "OrderedDict[str, Tuple[Any, List[Dict[str, Any]]]]" = OrderedDict()
+
+    def invalidate(self, root: Path) -> None:
+        root_key = str(root)
+        self._slots.pop(root_key, None)
+        self._outline_slots.pop(root_key, None)
+        self._hub_slots.pop(root_key, None)
 
     def get(self, root: Path) -> Optional[Dict[str, Any]]:
         aoci_dir = root / aoci_index.AOCI_DIR_NAME
         code_path = aoci_dir / aoci_index.CODE_FILE
         if not code_path.is_file():
+            self.invalidate(root)
             return None
         key = (
             aoci_index._stat_key(code_path),
@@ -64,24 +73,10 @@ class _MemoryIndexCache:
             return cached
 
         entries, malformed = aoci_index.parse_code_volume(code_path)
-        parsed: Dict[str, Dict[str, Any]] = {}
-        for rel, line in entries.items():
-            f = aoci_index.parse_entry_fields(line)
-            if f:
-                parsed[rel] = {
-                    "rel": rel,
-                    "line": line,
-                    "layer": f["layer"],
-                    "domain": f["domain"],
-                    "imp": int(f["imp"]),
-                    "size": f["size"],
-                    "f": f["f"],
-                    "r": f["r"],
-                    "a": f["a"],
-                    "s": f["s"],
-                }
-        deps, dependents = aoci_index.build_fras_graph(entries)
-        code_text = code_path.read_text(encoding="utf-8", errors="replace")
+        parsed = aoci_index.parse_entries_map(entries)
+        deps, dependents = aoci_index.build_fras_graph(entries, parsed_entries=parsed)
+        mention_index = aoci_index.PathMentionIndex(sorted(entries.keys()))
+        estimated_tokens = max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
         slot: Dict[str, Any] = {
             "key": key,
             "entries": entries,
@@ -89,13 +84,14 @@ class _MemoryIndexCache:
             "malformed": malformed,
             "deps": deps,
             "dependents": dependents,
+            "mention_index": mention_index,
             "bm25": None,
             "glossary": aoci_index.parse_glossary(aoci_dir),
             "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or root.name,
             "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
             "git_hdr": aoci_index.parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown",
             "domains": aoci_index.parse_declared_domains(aoci_dir),
-            "estimated_tokens": aoci_index.estimate_tokens(code_text),
+            "estimated_tokens": estimated_tokens,
         }
         self._slots[root_key] = slot
         self._slots.move_to_end(root_key)
@@ -106,9 +102,63 @@ class _MemoryIndexCache:
     def get_bm25(self, slot: Dict[str, Any]) -> aoci_index.BM25Index:
         idx = slot.get("bm25")
         if idx is None:
-            idx = aoci_index.BM25Index(slot["entries"])
+            if aoci_index.BM25Index is aoci_index._graph.BM25Index:
+                idx = aoci_index.BM25Index(slot["entries"], parsed_entries=slot["parsed"])
+            else:
+                idx = aoci_index.BM25Index(slot["entries"])
             slot["bm25"] = idx
         return idx
+
+    def get_outline_files(self, root: Path) -> Optional[Dict[str, Any]]:
+        cache_path = root / aoci_index.AOCI_DIR_NAME / aoci_index.CACHE_DIR / aoci_index.OUTLINE_CACHE
+        if not cache_path.is_file():
+            self._outline_slots.pop(str(root), None)
+            return None
+        key = aoci_index._stat_key(cache_path)
+        root_key = str(root)
+        cached = self._outline_slots.get(root_key)
+        if cached is not None and cached[0] == key:
+            self._outline_slots.move_to_end(root_key)
+            return cached[1]
+        try:
+            loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(loaded, dict):
+            return None
+        sv = loaded.get("schema_version")
+        if sv is not None:
+            try:
+                if int(sv) != 2:
+                    return None
+            except (ValueError, TypeError):
+                return None
+        files_obj = loaded.get("files") if isinstance(loaded.get("files"), dict) else loaded
+        if not isinstance(files_obj, dict):
+            return None
+        self._outline_slots[root_key] = (key, files_obj)
+        self._outline_slots.move_to_end(root_key)
+        while len(self._outline_slots) > self._max_slots:
+            self._outline_slots.popitem(last=False)
+        return files_obj
+
+    def get_hub_records(self, root: Path) -> Optional[List[Dict[str, Any]]]:
+        hubs_path = root / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
+        if not hubs_path.is_file():
+            self._hub_slots.pop(str(root), None)
+            return None
+        key = aoci_index._stat_key(hubs_path)
+        root_key = str(root)
+        cached = self._hub_slots.get(root_key)
+        if cached is not None and cached[0] == key:
+            self._hub_slots.move_to_end(root_key)
+            return cached[1]
+        records, _ = aoci_index._hubs.parse_hubs_volume(hubs_path)
+        self._hub_slots[root_key] = (key, records)
+        self._hub_slots.move_to_end(root_key)
+        while len(self._hub_slots) > self._max_slots:
+            self._hub_slots.popitem(last=False)
+        return records
 
 
 _CACHE = _MemoryIndexCache()
@@ -421,7 +471,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
         "name": "aoci_audit",
         "description": (
             "Audit `.aoci/aoci.code.txt` against static imports (missing-static-dep / phantom-fras-dep), "
-            "dependency cycles (Tarjan SCC), and forbidden layer redlines."
+            "dependency cycles (Tarjan SCC), forbidden layer redlines, and optional Git co-change coupling."
         ),
         "annotations": _READ_ONLY_ANNOTATIONS,
         "inputSchema": {
@@ -433,19 +483,23 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "check_static": {"type": "boolean", "default": True, "description": "Cross-check static imports vs FRAS"},
                 "check_cycles": {"type": "boolean", "default": True, "description": "Detect dependency cycles"},
                 "check_layers": {"type": "boolean", "default": True, "description": "Check forbidden layer transitions"},
+                "check_co_change": {"type": "boolean", "default": False, "description": "Mine Git history for unlinked co-changing pairs"},
+                "co_change_commits": {"type": "integer", "default": 200, "description": "Max commits scanned when check_co_change=true"},
+                "min_co_changes": {"type": "integer", "default": 3, "description": "Minimum co-change commit threshold"},
+                "min_co_confidence": {"type": "number", "default": 0.6, "description": "Minimum co-change confidence in [0,1]"},
             },
             "required": ["root"],
         },
     },
     {
         "name": "aoci_export",
-        "description": "Export filtered or aggregated FRAS dependency graph in Mermaid flowchart or Graphviz DOT syntax.",
+        "description": "Export filtered or aggregated FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML format.",
         "annotations": _READ_ONLY_ANNOTATIONS,
         "inputSchema": {
             "type": "object",
             "properties": {
                 "root": {"type": "string", "description": "Target repository root path"},
-                "format": {"type": "string", "enum": ["mermaid", "dot"], "default": "mermaid", "description": "Graph output format"},
+                "format": {"type": "string", "enum": ["mermaid", "dot", "html"], "default": "mermaid", "description": "Graph output format"},
                 "level": {"type": "string", "enum": ["file", "dir", "domain"], "default": "file", "description": "Node aggregation level"},
                 "group_by": {"type": "string", "enum": ["domain", "dir", "layer", "none"], "default": "domain", "description": "Subgraph grouping when level=file"},
                 "direction": {"type": "string", "enum": ["LR", "TD"], "default": "LR", "description": "Layout direction"},
@@ -499,6 +553,16 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                     "description": "Token budget ceiling (0 = unlimited)",
                 },
                 "top_seeds": {"type": "integer", "default": 8, "description": "Maximum BM25 seed hits"},
+                "with_tests": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Attach impacted T-layer test files for packed seeds",
+                },
+                "live_anchors": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Extract live symbol anchors in memory when outline cache misses",
+                },
             },
             "required": ["root", "task"],
         },
@@ -530,6 +594,32 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "output": {"type": "string", "description": "Optional output file path relative to `root` for `scaffold`"},
                 "prune_missing": {"type": "boolean", "default": False, "description": "Remove missing files/symbols during `upsert`"},
                 "dry_run": {"type": "boolean", "default": False, "description": "Validate `upsert` without writing to disk"},
+            },
+            "required": ["root"],
+        },
+    },
+    {
+        "name": "aoci_prepare_sync",
+        "description": (
+            "Collect a single-pass drift synchronization briefing: pool restorable count, auto-generated scaffolds "
+            "for added files, previous entries + outlines + bounded git diffs for contract/unknown modifications, "
+            "1-hop affected neighbors, and ordered recommended actions."
+        ),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "fast": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Use mtime_ns/size cache for unchanged files",
+                },
+                "max_diff_lines": {
+                    "type": "integer",
+                    "default": 40,
+                    "description": "Maximum git diff lines attached per contract/unknown modified file",
+                },
             },
             "required": ["root"],
         },
@@ -612,16 +702,72 @@ PROMPTS_SPEC: List[Dict[str, Any]] = [
 ]
 
 
-_CLI_CAPTURE_LOCK = threading.Lock()
+_STDOUT_BUF_VAR: "contextvars.ContextVar[Optional[io.StringIO]]" = contextvars.ContextVar(
+    "aoci_mcp_stdout_buf", default=None
+)
+_STDERR_BUF_VAR: "contextvars.ContextVar[Optional[io.StringIO]]" = contextvars.ContextVar(
+    "aoci_mcp_stderr_buf", default=None
+)
+_ROUTER_INIT_LOCK = threading.Lock()
+
+
+class _StreamRouter:
+    """Thread-safe stream proxy routing writes to per-call ContextVar StringIO buffers when active."""
+
+    def __init__(
+        self,
+        var: "contextvars.ContextVar[Optional[io.StringIO]]",
+        fallback: Any,
+    ) -> None:
+        self._var = var
+        self._fallback = fallback
+
+    def _target(self) -> Any:
+        buf = self._var.get()
+        return buf if buf is not None else self._fallback
+
+    def write(self, s: str) -> int:
+        return self._target().write(s)
+
+    def writelines(self, lines: Any) -> None:
+        self._target().writelines(lines)
+
+    def flush(self) -> None:
+        self._target().flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._target(), "isatty", lambda: False)())
+
+    def reconfigure(self, *args: Any, **kwargs: Any) -> None:
+        if self._var.get() is not None:
+            return
+        fn = getattr(self._fallback, "reconfigure", None)
+        if callable(fn):
+            fn(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._fallback, name)
+
+
+def _ensure_stream_routers() -> None:
+    if isinstance(sys.stdout, _StreamRouter) and isinstance(sys.stderr, _StreamRouter):
+        return
+    with _ROUTER_INIT_LOCK:
+        if not isinstance(sys.stdout, _StreamRouter):
+            sys.stdout = _StreamRouter(_STDOUT_BUF_VAR, sys.stdout)  # type: ignore[assignment]
+        if not isinstance(sys.stderr, _StreamRouter):
+            sys.stderr = _StreamRouter(_STDERR_BUF_VAR, sys.stderr)  # type: ignore[assignment]
 
 
 def _run_cli_capture(argv: List[str]) -> Tuple[int, str]:
+    _ensure_stream_routers()
     out_buf = io.StringIO()
     err_buf = io.StringIO()
-    with _CLI_CAPTURE_LOCK:
+    tok_out = _STDOUT_BUF_VAR.set(out_buf)
+    tok_err = _STDERR_BUF_VAR.set(err_buf)
+    try:
         try:
-            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-                rc = aoci_index.main(argv)
+            rc = aoci_index.main(argv)
         except SystemExit as exc:
             if isinstance(exc.code, int):
                 rc = exc.code
@@ -630,6 +776,9 @@ def _run_cli_capture(argv: List[str]) -> Tuple[int, str]:
             else:
                 rc = 1
                 err_buf.write(f"\n{exc.code}")
+    finally:
+        _STDOUT_BUF_VAR.reset(tok_out)
+        _STDERR_BUF_VAR.reset(tok_err)
     combined = (out_buf.getvalue() + ("\n" + err_buf.getvalue() if err_buf.getvalue().strip() else "")).strip()
     return rc, combined
 
@@ -647,6 +796,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if args.get("force"):
             cli_args.append("--force")
         rc, out = _run_cli_capture(cli_args)
+        _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_overview":
@@ -655,17 +805,17 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             return True, f"ERROR: `.aoci/aoci.code.txt` not found at {root}. Run `init` first."
         min_imp = int(args.get("min_importance", 7))
         max_core = int(args.get("max_core", 50))
-        parsed_map: Dict[str, Dict[str, Any]] = slot["parsed"]
+        parsed_map: Dict[str, Any] = slot["parsed"]
         dir_counts: Dict[str, int] = {}
         layer_counts: Dict[str, int] = {}
         core: List[Tuple[int, str, str]] = []
         for rel, item in sorted(parsed_map.items()):
             top_d = rel.split("/", 1)[0] if "/" in rel else "."
             dir_counts[top_d] = dir_counts.get(top_d, 0) + 1
-            layer_counts[item["layer"]] = layer_counts.get(item["layer"], 0) + 1
-            imp = int(item["imp"])
+            layer_counts[item.layer] = layer_counts.get(item.layer, 0) + 1
+            imp = item.imp
             if imp >= min_imp:
-                core.append((imp, rel, item["line"]))
+                core.append((imp, rel, item.raw))
         core.sort(key=lambda item: (-item[0], item[1]))
         payload = {
             "root": str(root),
@@ -711,6 +861,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 slot["dependents"],
                 [tests_target],
                 max_depth=tests_depth,
+                parsed_entries=parsed_map,
+                preloaded_outline_files=_CACHE.get_outline_files(root),
             )
             tests_for_set = {item["path"] for item in impacted_tests}
 
@@ -722,22 +874,22 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if has_filters or not search_q:
             cand_paths = set()
             for rel, item in sorted(parsed_map.items()):
-                if layer_set and item["layer"] not in layer_set:
+                if layer_set and item.layer not in layer_set:
                     continue
-                if domain_set and item["domain"] not in domain_set:
+                if domain_set and item.domain not in domain_set:
                     continue
-                if min_imp and int(item["imp"]) < min_imp:
+                if min_imp and item.imp < min_imp:
                     continue
                 if path_glob and not fnmatch.fnmatchcase(rel, str(path_glob)):
                     continue
-                if keyword and keyword not in item["line"].lower():
+                if keyword and keyword not in item.raw.lower():
                     continue
                 if impact_set is not None and rel not in impact_set:
                     continue
                 if tests_for_set is not None and rel not in tests_for_set:
                     continue
                 cand_paths.add(rel)
-                matched_lines.append(item["line"])
+                matched_lines.append(item.raw)
 
         if impacted_tests is not None:
             impacted_tests = [item for item in impacted_tests if cand_paths is None or item["path"] in cand_paths]
@@ -795,7 +947,20 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             [str(p) for p in raw_paths],
             depth=depth,
             budget=budget,
+            parsed_entries=slot["parsed"],
         )
+        ctx_hub_paths = [
+            aoci_index.normalize_relpath(ln.split("[", 1)[0].strip())
+            for ln in (payload["targets"] + payload["dependencies"])
+            if ln
+        ]
+        hub_secs = aoci_index._hubs.lookup_hub_sections(
+            root / aoci_index.AOCI_DIR_NAME,
+            ctx_hub_paths,
+            preloaded_records=_CACHE.get_hub_records(root),
+        )
+        if hub_secs:
+            payload["hub_sections"] = hub_secs
         if with_tests:
             payload["impacted_tests"] = aoci_index.find_impacted_tests(
                 root,
@@ -803,6 +968,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 slot["dependents"],
                 [str(p) for p in raw_paths],
                 max_depth=max(3, depth),
+                parsed_entries=slot["parsed"],
+                preloaded_outline_files=_CACHE.get_outline_files(root),
             )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -819,6 +986,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cached_deps=slot["deps"] if slot is not None else None,
             cached_dependents=slot["dependents"] if slot is not None else None,
             cached_invariants=slot["invariants"] if slot is not None else None,
+            cached_parsed=slot["parsed"] if slot is not None else None,
+            cached_hub_records=_CACHE.get_hub_records(root),
         )
         return (not brief.get("ok")), json.dumps(brief, indent=2, ensure_ascii=False)
 
@@ -839,13 +1008,16 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if args.get("reset_batches"):
             cli_args.append("--reset-batches")
         rc, out = _run_cli_capture(cli_args)
+        if args.get("auto_restore") and not args.get("check_only"):
+            _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_outline":
         paths = [str(p) for p in (args.get("paths") or [])]
         max_items = int(args.get("max_items", 30))
-        rc, out = _run_cli_capture(["outline", "--root", str(root), "--max-items", str(max_items), "--json", "--", *paths])
-        return rc != 0, out
+        res = aoci_index.compute_outlines(root, paths, max_items=max_items)
+        is_err = bool(res["missing"] or res["rejected"])
+        return is_err, json.dumps(res, indent=2, ensure_ascii=False)
 
     if name == "aoci_scaffold":
         cli_args = ["scaffold", "--root", str(root), "--json"]
@@ -879,6 +1051,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if paths:
             cli_args.extend(["--", *paths])
         rc, out = _run_cli_capture(cli_args)
+        if not args.get("dry_run"):
+            _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_upsert":
@@ -898,6 +1072,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         for entry in args.get("entries") or []:
             cli_args.append(f"--entry={entry}")
         rc, out = _run_cli_capture(cli_args)
+        if not args.get("dry_run"):
+            _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_migrate_renames":
@@ -911,6 +1087,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if args.get("dry_run"):
             cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
+        if not args.get("dry_run"):
+            _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_restore":
@@ -924,6 +1102,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if args.get("dry_run"):
             cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
+        if not args.get("dry_run"):
+            _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_shard":
@@ -933,6 +1113,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         elif args.get("depth") is not None:
             cli_args.extend(["--depth", str(int(args["depth"]))])
         rc, out = _run_cli_capture(cli_args)
+        _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_ensure_git_exclude":
@@ -940,15 +1121,14 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         return rc != 0, out
 
     if name == "aoci_lint":
-        cli_args = ["lint", "--root", str(root), "--json"]
-        if args.get("code"):
-            cli_args.append(f"--code={args['code']}")
-        if args.get("strict"):
-            cli_args.append("--strict")
-        if args.get("limit"):
-            cli_args.extend(["--limit", str(int(args["limit"]))])
-        rc, out = _run_cli_capture(cli_args)
-        return rc != 0, out
+        res = aoci_index.compute_lint(
+            root,
+            code_filter=args.get("code"),
+        )
+        if res.get("error"):
+            return True, f"ERROR: {res['error']}"
+        is_err = bool(res["findings"] and args.get("strict"))
+        return is_err, json.dumps(res, indent=2, ensure_ascii=False)
 
     if name == "aoci_verify":
         cli_args = ["verify", "--root", str(root), "--json"]
@@ -964,10 +1144,16 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             check_static=bool(args.get("check_static", True)),
             check_cycles=bool(args.get("check_cycles", True)),
             check_layers=bool(args.get("check_layers", True)),
+            check_co_change=bool(args.get("check_co_change", False)),
+            co_change_commits=int(args.get("co_change_commits", 200)),
+            min_co_changes=int(args.get("min_co_changes", 3)),
+            min_co_confidence=float(args.get("min_co_confidence", 0.6)),
             forbid_spec=args.get("forbid"),
             use_default_rules=bool(args.get("use_default_rules", True)),
             cached_entries=slot["entries"] if slot is not None else None,
             cached_deps=slot["deps"] if slot is not None else None,
+            cached_dependents=slot["dependents"] if slot is not None else None,
+            cached_parsed=slot["parsed"] if slot is not None else None,
         )
         return bool(res.get("error")), json.dumps(res, indent=2, ensure_ascii=False)
 
@@ -990,6 +1176,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             path_glob=args.get("path"),
             focus=args.get("focus"),
             depth=int(args.get("depth", 1)),
+            parsed_entries=slot["parsed"],
         )
         return False, json.dumps(res, indent=2, ensure_ascii=False)
 
@@ -1009,6 +1196,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             if args.get("dry_run"):
                 cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
+        if action == "import" and not args.get("dry_run"):
+            _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_pack":
@@ -1018,6 +1207,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         task_q = args.get("task")
         if task_q is None or not str(task_q).strip():
             return True, "ERROR: `task` parameter is required for `aoci_pack`."
+        outline_files = _CACHE.get_outline_files(root)
+        hub_records = _CACHE.get_hub_records(root)
         include_diff = bool(args.get("include_diff", True))
         diff_brief: Optional[Dict[str, Any]] = None
         if include_diff:
@@ -1028,6 +1219,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 cached_deps=slot["deps"],
                 cached_dependents=slot["dependents"],
                 cached_invariants=slot["invariants"],
+                cached_parsed=slot["parsed"],
+                cached_hub_records=hub_records,
             )
             if cand_diff.get("ok"):
                 diff_brief = cand_diff
@@ -1049,6 +1242,12 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             budget=budget_val,
             top_seeds=top_seeds_val,
             bm25_index=bm25,
+            parsed_entries=slot["parsed"],
+            mention_index=slot["mention_index"],
+            preloaded_outline_files=outline_files,
+            hub_records=hub_records,
+            live_anchors=bool(args.get("live_anchors", False)),
+            with_tests=bool(args.get("with_tests", False)),
         )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -1065,12 +1264,22 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             mode = str(raw_mode).strip().lower()
         if mode not in ("read", "scaffold", "upsert"):
             return True, f"ERROR: Unsupported `mode` `{mode}` for `aoci_zoom` (expected `read`, `scaffold`, or `upsert`)."
-        cli_args = ["zoom", "--root", str(root), "--json"]
         if mode == "read":
             if not args.get("path"):
                 return True, "ERROR: `path` parameter is required for `aoci_zoom(mode='read')`."
-            cli_args.extend(["--", str(args["path"])])
-        elif mode == "scaffold":
+            slot = _CACHE.get(root)
+            res = aoci_index.compute_zoom_read(
+                root,
+                str(args["path"]),
+                cached_entries=slot["entries"] if slot is not None else None,
+                cached_hub_records=_CACHE.get_hub_records(root),
+            )
+            if not res.get("ok"):
+                err_out = {"ok": False, "error": res.get("error", "Zoom read failed.")}
+                return True, json.dumps(err_out, indent=2, ensure_ascii=False)
+            return False, json.dumps(res, indent=2, ensure_ascii=False)
+        cli_args = ["zoom", "--root", str(root), "--json"]
+        if mode == "scaffold":
             if not args.get("path"):
                 return True, "ERROR: `path` parameter is required for `aoci_zoom(mode='scaffold')`."
             cli_args.append("--scaffold")
@@ -1087,7 +1296,36 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             for entry in args.get("entries") or []:
                 cli_args.append(f"--upsert={entry}")
         rc, out = _run_cli_capture(cli_args)
+        if mode == "upsert" and not args.get("dry_run"):
+            _CACHE.invalidate(root)
         return rc != 0, out
+
+    if name == "aoci_prepare_sync":
+        aoci_dir = root / aoci_index.AOCI_DIR_NAME
+        code_path = aoci_dir / aoci_index.CODE_FILE
+        if not code_path.is_file():
+            return True, json.dumps(
+                {"ok": False, "error": f"`{code_path}` not found. Run `init` first."},
+                indent=2,
+                ensure_ascii=False,
+            )
+        git_info = aoci_index.detect_git_info(root)
+        drift = aoci_index.compute_drift(
+            root,
+            git_info,
+            fast_mtime=bool(args.get("fast", True)),
+            allow_heal=False,
+            save_scan_cache=False,
+        )
+        brief = aoci_index._sync_prep.prepare_sync_briefing(
+            root,
+            git_info,
+            drift,
+            scaffold_fn=aoci_index.scaffold_entries,
+            run_git_fn=aoci_index.run_git,
+            max_diff_lines=int(args.get("max_diff_lines", 40)),
+        )
+        return False, json.dumps(brief, indent=2, ensure_ascii=False)
 
     return True, f"Unknown tool: `{name}`"
 

@@ -70,8 +70,31 @@ _JS_RESOLVE_EXTS: Tuple[str, ...] = (
 
 _CLEAN_SYM_RE = re.compile(
     r"^(?:async\s+def|def|class|export|function|interface|type|const|enum|fn|struct|trait|mod|fun|record|object|"
-    r"func(?:\s*\([^)]*\))?)\s+([A-Za-z_$][\w$]*)"
+    r"func(?:\s*\([^)]*\))?|service|rpc|message|model|input|union|scalar|namespace|table|view|procedure|index)\s+"
+    r"([A-Za-z_$][\w$:]*)"
 )
+
+_PROTO_IMPORT_RE = re.compile(r'^\s*import\s+(?:public\s+|weak\s+)?"([^"]+)"\s*;')
+_PROTO_ITEM_RE = re.compile(r"^\s*(service|message|enum)\s+([A-Za-z_]\w*)")
+_PROTO_RPC_RE = re.compile(r"^\s*rpc\s+([A-Za-z_]\w*)\s*\(")
+_GRAPHQL_ITEM_RE = re.compile(r"^\s*(?:extend\s+)?(type|input|interface|enum|union|scalar)\s+([A-Za-z_]\w*)")
+_PRISMA_ITEM_RE = re.compile(r"^\s*(model|enum|type|view)\s+([A-Za-z_]\w*)")
+_SQL_CREATE_RE = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:MATERIALIZED\s+)?"
+    r"(TABLE|VIEW|FUNCTION|PROCEDURE|INDEX|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r'(?:[`"\[]?[A-Za-z_]\w*[`"\]]?\.)?[`"\[]?([A-Za-z_][\w$]*)',
+    re.IGNORECASE,
+)
+_C_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+[<"]([^>"]+)[>"]')
+_CPP_TYPE_RE = re.compile(
+    r"^\s*(?:template\s*<[^>]*>\s*)?(namespace|class|struct|enum(?:\s+class)?|union)\s+([A-Za-z_]\w*)"
+)
+_CPP_FN_RE = re.compile(
+    r"^\s*(?:(?:static|inline|extern|virtual|constexpr|consteval|explicit|friend)\s+)*"
+    r"(?:[A-Za-z_~][\w:*&<>,\s]*?\s+)?([A-Za-z_~][\w:]*(?:::[A-Za-z_~]\w*)?)\s*\([^;{}]*\)"
+    r"(?:\s*(?:const|noexcept(?:\([^)]*\))?|override|final))*\s*(?:\{|;|$)"
+)
+_CPP_SKIP_KEYWORDS: Set[str] = {"if", "for", "while", "switch", "catch", "return", "sizeof", "alignof", "decltype"}
 
 
 def _strip_js_comments(src: str) -> str:
@@ -427,11 +450,951 @@ def _iter_py_import_nodes(body: Sequence[ast.AST]) -> Iterator[ast.AST]:
                         yield sub
 
 
+def _collapse_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def _strip_hash_comments(src: str) -> str:
+    """Blank `#` line comments while preserving single/double/triple-quoted strings and exact line breaks."""
+    out: List[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '"':
+            if src[i : i + 3] == '"""':
+                out.append('"""')
+                i += 3
+                while i < n:
+                    if src[i : i + 3] == '"""':
+                        out.append('"""')
+                        i += 3
+                        break
+                    ch = src[i]
+                    out.append(ch)
+                    i += 1
+                    if ch == "\\" and i < n:
+                        out.append(src[i])
+                        i += 1
+            else:
+                out.append(c)
+                i += 1
+                while i < n and src[i] != "\n":
+                    ch = src[i]
+                    out.append(ch)
+                    i += 1
+                    if ch == "\\" and i < n and src[i] != "\n":
+                        out.append(src[i])
+                        i += 1
+                        continue
+                    if ch == '"':
+                        break
+        elif c == "#":
+            while i < n and src[i] != "\n":
+                out.append(" ")
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _strip_sql_comments(src: str) -> str:
+    """Blank `--` and `/* */` comments while preserving `'...'` and `"..."` literals and line breaks."""
+    out: List[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c in ("'", '"'):
+            q = c
+            out.append(c)
+            i += 1
+            while i < n:
+                ch = src[i]
+                out.append(ch)
+                i += 1
+                if ch == q:
+                    if i < n and src[i] == q:
+                        out.append(src[i])
+                        i += 1
+                        continue
+                    break
+                if ch == "\\" and i < n:
+                    out.append(src[i])
+                    i += 1
+        elif c == "-" and i + 1 < n and src[i + 1] == "-":
+            out.append("  ")
+            i += 2
+            while i < n and src[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif c == "/" and i + 1 < n and src[i + 1] == "*":
+            out.append("  ")
+            i += 2
+            while i < n:
+                if src[i] == "*" and i + 1 < n and src[i + 1] == "/":
+                    out.append("  ")
+                    i += 2
+                    break
+                out.append("\n" if src[i] == "\n" else " ")
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _skip_string_literal(src: str, i: int, allow_backtick: bool = True, single_quote_char_only: bool = False) -> int:
+    n = len(src)
+    c = src[i]
+    if c == '"' or (allow_backtick and c == "`"):
+        i += 1
+        while i < n:
+            ch = src[i]
+            i += 1
+            if ch == "\\" and c != "`" and i < n:
+                i += 1
+                continue
+            if ch == c:
+                break
+        return i
+    if c == "'":
+        if single_quote_char_only:
+            j = i + 1
+            limit = min(n, i + 18)
+            while j < limit and src[j] != "\n":
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == "'":
+                    return j + 1
+                j += 1
+            return i + 1
+        i += 1
+        while i < n and src[i] != "\n":
+            ch = src[i]
+            i += 1
+            if ch == "\\" and i < n and src[i] != "\n":
+                i += 1
+                continue
+            if ch == "'":
+                break
+        return i
+    return i + 1
+
+
+def _skip_js_regex(src: str, i: int) -> int:
+    n = len(src)
+    i += 1
+    in_class = False
+    while i < n and src[i] != "\n":
+        ch = src[i]
+        i += 1
+        if ch == "\\" and i < n and src[i] != "\n":
+            i += 1
+            continue
+        if ch == "[":
+            in_class = True
+        elif ch == "]":
+            in_class = False
+        elif ch == "/" and not in_class:
+            while i < n and src[i].isalpha():
+                i += 1
+            break
+    return i
+
+
+def _find_matching_delim(
+    src: str,
+    start: int,
+    open_ch: str,
+    close_ch: str,
+    allow_backtick: bool = True,
+    single_quote_char_only: bool = False,
+    js_mode: bool = False,
+) -> int:
+    n = len(src)
+    if start < 0 or start >= n or src[start] != open_ch:
+        return start
+    depth = 1
+    i = start + 1
+    prev_tok = open_ch
+    while i < n and depth > 0:
+        c = src[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        if c in ('"', "'") or (allow_backtick and c == "`"):
+            nxt_i = _skip_string_literal(src, i, allow_backtick=allow_backtick, single_quote_char_only=single_quote_char_only)
+            prev_tok = c if nxt_i > i + 1 or not single_quote_char_only else "'"
+            i = nxt_i
+            continue
+        if js_mode and c == "/":
+            if not prev_tok or prev_tok in _JS_REGEX_PREV_CHARS or prev_tok in _JS_REGEX_PREV_KW:
+                i = _skip_js_regex(src, i)
+                prev_tok = "/"
+                continue
+            prev_tok = "/"
+            i += 1
+            continue
+        if c == open_ch:
+            depth += 1
+            prev_tok = c
+            i += 1
+            continue
+        if c == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+            prev_tok = c
+            i += 1
+            continue
+        if js_mode and (c.isalpha() or c in "_$"):
+            j = i + 1
+            while j < n and (src[j].isalnum() or src[j] in "_$"):
+                j += 1
+            prev_tok = src[i:j]
+            i = j
+            continue
+        if js_mode and c in "+-" and i + 1 < n and src[i + 1] == c:
+            prev_tok = c * 2
+            i += 2
+            continue
+        prev_tok = c
+        i += 1
+    return n - 1
+
+
+def _extract_js_ts_class_members(body: str, cls_name: str, sigs_out: List[str]) -> None:
+    """Extract non-private member signatures from a JS/TS class body."""
+    n = len(body)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    prev_tok = ""
+
+    def _emit_member(raw_hdr: str) -> None:
+        hdr = _collapse_ws(raw_hdr)
+        if not hdr or hdr.startswith(("private ", "#")):
+            return
+        if re.match(r"^(?:static\s+)?$", hdr):
+            return
+        if "(" not in hdr and "=" in hdr:
+            hdr = _collapse_ws(hdr.split("=", 1)[0])
+        if hdr and not hdr.startswith(("private ", "#")):
+            sigs_out.append(f"{cls_name}::{hdr}")
+
+    while i < n:
+        c = body[i]
+        if c in ('"', "'", "`"):
+            i = _skip_string_literal(body, i, allow_backtick=True)
+            prev_tok = c
+            continue
+        if c == "/":
+            if not prev_tok or prev_tok in _JS_REGEX_PREV_CHARS or prev_tok in _JS_REGEX_PREV_KW:
+                i = _skip_js_regex(body, i)
+                prev_tok = "/"
+                continue
+            prev_tok = "/"
+            i += 1
+            continue
+        if c in "([":
+            if c == "(":
+                paren_depth += 1
+            else:
+                bracket_depth += 1
+            prev_tok = c
+            i += 1
+            continue
+        if c == ")":
+            paren_depth = max(0, paren_depth - 1)
+            prev_tok = c
+            i += 1
+            continue
+        if c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            prev_tok = c
+            i += 1
+            continue
+        if c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr_part = _collapse_ws(body[stmt_start:i])
+            close_b = _find_matching_delim(body, i, "{", "}", allow_backtick=True, js_mode=True)
+            while hdr_part.endswith((":", "|", "&")):
+                hdr_part = _collapse_ws(hdr_part + " " + body[i : close_b + 1])
+                j = close_b + 1
+                while j < n and body[j] in " \t\r\n":
+                    j += 1
+                if j < n and body[j] == "{":
+                    i = j
+                    close_b = _find_matching_delim(body, i, "{", "}", allow_backtick=True, js_mode=True)
+                else:
+                    break
+            _emit_member(hdr_part)
+            i = close_b + 1
+            stmt_start = i
+            prev_tok = "}"
+            continue
+        if c == ";" and paren_depth == 0 and bracket_depth == 0:
+            _emit_member(body[stmt_start:i])
+            i += 1
+            stmt_start = i
+            prev_tok = ";"
+            continue
+        if c == "\n" and paren_depth == 0 and bracket_depth == 0:
+            cur_s = _collapse_ws(body[stmt_start:i])
+            if cur_s and not cur_s.endswith(("=", ":", "|", "&", ",", "(", "<")):
+                j = i + 1
+                while j < n and body[j] in " \t\r\n":
+                    j += 1
+                if j >= n or body[j] not in ("|", "&", "?", ":", "="):
+                    _emit_member(cur_s)
+                    stmt_start = i + 1
+                    prev_tok = ""
+                    i += 1
+                    continue
+        if c.isalpha() or c in "_$":
+            j = i + 1
+            while j < n and (body[j].isalnum() or body[j] in "_$"):
+                j += 1
+            prev_tok = body[i:j]
+            i = j
+            continue
+        if not c.isspace():
+            prev_tok = c
+        i += 1
+    tail = _collapse_ws(body[stmt_start:])
+    if tail:
+        _emit_member(tail)
+
+
+def _extract_js_ts_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
+    """Extract imports + full JS/TS function/class/interface/type/enum/export signatures."""
+    clean = _strip_js_comments(src)
+    for m in _JS_STATIC_IMPORT_RE.finditer(clean):
+        spec = m.group(1) or m.group(2)
+        if spec:
+            imports_out.append(spec)
+    reexport_syms: List[Tuple[int, str]] = []
+    for m in _JS_REEXPORT_RE.finditer(clean):
+        ns_alias, brace_body, spec = m.group(1), m.group(2), m.group(3)
+        if spec:
+            imports_out.append(spec)
+        if ns_alias:
+            sigs_out.append(f"export * as {ns_alias}")
+        elif brace_body:
+            _parse_js_export_brace(brace_body, 1, reexport_syms)
+    for m in _JS_LOCAL_EXPORT_RE.finditer(clean):
+        _parse_js_export_brace(m.group(1), 1, reexport_syms)
+    for m in _JS_CALL_IMPORT_RE.finditer(clean):
+        imports_out.append(m.group(1))
+    for _, lbl in reexport_syms:
+        sigs_out.append(re.sub(r"\s*\[L\d+\]\s*$", "", lbl).strip())
+
+    n = len(clean)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    prev_tok = ""
+
+    def _emit_stmt_no_brace(raw_stmt: str) -> None:
+        stmt = _collapse_ws(raw_stmt)
+        if not stmt:
+            return
+        if re.match(r"^(?:export\s+(?:default\s+)?)?(?:declare\s+)?type\s+[A-Za-z_$][\w$]*", stmt):
+            sigs_out.append(stmt)
+        elif re.match(r"^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:async\s+)?function\b", stmt):
+            sigs_out.append(stmt)
+        elif re.match(r"^export\s+(?:const|let|var)\b", stmt):
+            if "=>" in stmt:
+                sigs_out.append(_collapse_ws(stmt.split("=>", 1)[0]) + " =>")
+            else:
+                sigs_out.append(_collapse_ws(stmt.split("=", 1)[0]))
+        elif re.match(r"^export\s+default\b", stmt):
+            sigs_out.append(stmt[:120])
+        else:
+            mc = _JS_CJS_EXPORT_RE.match(stmt)
+            if mc:
+                sigs_out.append(f"cjs:{mc.group(1)}")
+
+    while i < n:
+        c = clean[i]
+        if c in ('"', "'", "`"):
+            i = _skip_string_literal(clean, i, allow_backtick=True)
+            prev_tok = c
+            continue
+        if c == "/":
+            if not prev_tok or prev_tok in _JS_REGEX_PREV_CHARS or prev_tok in _JS_REGEX_PREV_KW:
+                i = _skip_js_regex(clean, i)
+                prev_tok = "/"
+                continue
+            prev_tok = "/"
+            i += 1
+            continue
+        if c in "([":
+            if c == "(":
+                paren_depth += 1
+            else:
+                bracket_depth += 1
+            prev_tok = c
+            i += 1
+            continue
+        if c == ")":
+            paren_depth = max(0, paren_depth - 1)
+            prev_tok = c
+            i += 1
+            continue
+        if c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            prev_tok = c
+            i += 1
+            continue
+        if c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr = _collapse_ws(clean[stmt_start:i])
+            close_b = _find_matching_delim(clean, i, "{", "}", allow_backtick=True, js_mode=True)
+            if re.match(r"^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:interface|enum)\b", hdr):
+                sigs_out.append(_collapse_ws(clean[stmt_start : close_b + 1]))
+            elif re.match(r"^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:abstract\s+)?class\b", hdr):
+                sigs_out.append(hdr)
+                m_cls = re.search(r"\bclass\s+([A-Za-z_$][\w$]*)", hdr)
+                cls_name = m_cls.group(1) if m_cls else "class"
+                _extract_js_ts_class_members(clean[i + 1 : close_b], cls_name, sigs_out)
+            elif re.match(r"^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:async\s+)?function\b", hdr) or (
+                re.match(r"^export\b", hdr) and "=>" in hdr
+            ):
+                while hdr.endswith((":", "|", "&")):
+                    hdr = _collapse_ws(hdr + " " + clean[i : close_b + 1])
+                    j = close_b + 1
+                    while j < n and clean[j] in " \t\r\n":
+                        j += 1
+                    if j < n and clean[j] == "{":
+                        i = j
+                        close_b = _find_matching_delim(clean, i, "{", "}", allow_backtick=True, js_mode=True)
+                    else:
+                        break
+                sigs_out.append(hdr)
+            elif re.match(r"^export\s+(?:const|let|var)\b", hdr):
+                sigs_out.append(_collapse_ws(hdr.split("=", 1)[0]))
+            elif re.match(r"^export\s+default\b", hdr):
+                sigs_out.append(hdr)
+            i = close_b + 1
+            stmt_start = i
+            prev_tok = "}"
+            continue
+        if c == ";" and paren_depth == 0 and bracket_depth == 0:
+            _emit_stmt_no_brace(clean[stmt_start:i])
+            i += 1
+            stmt_start = i
+            prev_tok = ";"
+            continue
+        if c == "\n" and paren_depth == 0 and bracket_depth == 0:
+            cur_s = _collapse_ws(clean[stmt_start:i])
+            if cur_s and not cur_s.endswith(("=", ":", "|", "&", ",", "(", "<", "=>")):
+                j = i + 1
+                while j < n and clean[j] in " \t\r\n":
+                    j += 1
+                if j >= n or clean[j] not in ("|", "&", "?", ":", "="):
+                    _emit_stmt_no_brace(cur_s)
+                    stmt_start = i + 1
+                    prev_tok = ""
+                    i += 1
+                    continue
+        if c.isalpha() or c in "_$":
+            j = i + 1
+            while j < n and (clean[j].isalnum() or clean[j] in "_$"):
+                j += 1
+            prev_tok = clean[i:j]
+            i = j
+            continue
+        if not c.isspace():
+            prev_tok = c
+        i += 1
+    _emit_stmt_no_brace(clean[stmt_start:])
+
+
+def _extract_go_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
+    clean = _strip_c_comments(src, allow_backtick=True)
+    go_lines = clean[:-1].split("\n") if clean.endswith("\n") else (clean.split("\n") if clean else [])
+    in_imp = False
+    for ln in go_lines:
+        s = ln.strip()
+        if s.startswith("import ("):
+            in_imp = True
+            continue
+        if in_imp:
+            if s.startswith(")"):
+                in_imp = False
+            elif '"' in s:
+                m = re.search(r'"([^"]+)"', s)
+                if m:
+                    imports_out.append(m.group(1))
+            continue
+        if s.startswith("import "):
+            m = re.search(r'"([^"]+)"', s)
+            if m:
+                imports_out.append(m.group(1))
+
+    n = len(clean)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    while i < n:
+        c = clean[i]
+        if c in ('"', "'", "`"):
+            i = _skip_string_literal(clean, i, allow_backtick=True)
+            continue
+        if c == "(":
+            if paren_depth == 0 and bracket_depth == 0:
+                hdr_p = _collapse_ws(clean[stmt_start:i])
+                if hdr_p in ("type", "const", "var"):
+                    close_p = _find_matching_delim(clean, i, "(", ")", allow_backtick=True)
+                    inner = clean[i + 1 : close_p]
+                    if hdr_p == "type":
+                        sigs_out.append(_collapse_ws(clean[stmt_start : close_p + 1]))
+                    else:
+                        for sub_ln in inner.splitlines():
+                            sub_s = _collapse_ws(sub_ln)
+                            m_ev = re.match(r"^([A-Z]\w*)\b(.*)", sub_s)
+                            if m_ev:
+                                lhs = _collapse_ws(sub_s.split("=", 1)[0])
+                                sigs_out.append(f"{hdr_p} {lhs}")
+                    i = close_p + 1
+                    stmt_start = i
+                    continue
+            paren_depth += 1
+            i += 1
+            continue
+        if c == ")":
+            paren_depth = max(0, paren_depth - 1)
+            i += 1
+            continue
+        if c == "[":
+            bracket_depth += 1
+            i += 1
+            continue
+        if c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            i += 1
+            continue
+        if c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr = _collapse_ws(clean[stmt_start:i])
+            close_b = _find_matching_delim(clean, i, "{", "}", allow_backtick=True)
+            if hdr.startswith("func"):
+                while re.search(r"\b(?:interface|struct)$", hdr):
+                    hdr = _collapse_ws(hdr + clean[i : close_b + 1])
+                    j = close_b + 1
+                    while j < n and clean[j] in " \t":
+                        j += 1
+                    if j < n and clean[j] == "{":
+                        i = j
+                        close_b = _find_matching_delim(clean, i, "{", "}", allow_backtick=True)
+                    else:
+                        break
+                sigs_out.append(hdr)
+            elif hdr.startswith("type "):
+                sigs_out.append(_collapse_ws(clean[stmt_start : close_b + 1]))
+            i = close_b + 1
+            stmt_start = i
+            continue
+        if c in "\n;" and paren_depth == 0 and bracket_depth == 0:
+            stmt = _collapse_ws(clean[stmt_start:i])
+            if stmt.startswith("type "):
+                sigs_out.append(stmt)
+            elif stmt.startswith(("const ", "var ")):
+                kind_kw, rest = stmt.split(None, 1)
+                lhs = _collapse_ws(rest.split("=", 1)[0])
+                if re.match(r"^[A-Z]\w*\b", lhs):
+                    sigs_out.append(f"{kind_kw} {lhs}")
+            stmt_start = i + 1
+        i += 1
+    tail = _collapse_ws(clean[stmt_start:])
+    if tail.startswith("type "):
+        sigs_out.append(tail)
+
+
+def _extract_rust_impl_methods(body: str, impl_hdr: str, sigs_out: List[str]) -> None:
+    n = len(body)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    fn_pat = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|unsafe\s+|const\s+|extern\s+(?:\"[^\"]*\"\s+)?)?fn\b")
+    while i < n:
+        c = body[i]
+        if c in ('"', "'"):
+            i = _skip_string_literal(body, i, allow_backtick=False, single_quote_char_only=True)
+            continue
+        if c == "(":
+            paren_depth += 1
+        elif c == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif c == "[":
+            bracket_depth += 1
+        elif c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr = _collapse_ws(body[stmt_start:i])
+            close_b = _find_matching_delim(body, i, "{", "}", allow_backtick=False, single_quote_char_only=True)
+            if fn_pat.match(hdr):
+                sigs_out.append(f"{impl_hdr}::{hdr}")
+            i = close_b + 1
+            stmt_start = i
+            continue
+        elif c == ";" and paren_depth == 0 and bracket_depth == 0:
+            stmt = _collapse_ws(body[stmt_start:i])
+            if fn_pat.match(stmt) or re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:type|const)\b", stmt):
+                sigs_out.append(f"{impl_hdr}::{_collapse_ws(stmt.split('=', 1)[0])}")
+            stmt_start = i + 1
+        i += 1
+
+
+def _extract_rust_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
+    clean = _strip_c_comments(src, single_quote_char_only=True)
+    rs_lines = clean[:-1].split("\n") if clean.endswith("\n") else (clean.split("\n") if clean else [])
+    use_buf: Optional[List[str]] = None
+    for ln in rs_lines:
+        s = ln.strip()
+        if use_buf is not None:
+            if s:
+                use_buf.append(s)
+            if ";" in s:
+                joined = " ".join(use_buf)
+                imports_out.append(joined[4 : joined.index(";")].strip())
+                use_buf = None
+            continue
+        if s.startswith("use ") or s.startswith("pub use "):
+            body = s[4:] if s.startswith("use ") else s[8:]
+            if ";" in body:
+                imports_out.append(body[: body.index(";")].strip())
+            else:
+                use_buf = [f"use {body}"]
+
+    n = len(clean)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    fn_re = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+|const\s+|async\s+|extern\s+(?:\"[^\"]*\"\s+)?)?fn\b")
+    type_blk_re = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|union)\b")
+    impl_re = re.compile(r"^(?:unsafe\s+)?impl\b")
+    while i < n:
+        c = clean[i]
+        if c in ('"', "'"):
+            i = _skip_string_literal(clean, i, allow_backtick=False, single_quote_char_only=True)
+            continue
+        if c == "(":
+            paren_depth += 1
+        elif c == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif c == "[":
+            bracket_depth += 1
+        elif c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr = _collapse_ws(clean[stmt_start:i])
+            close_b = _find_matching_delim(clean, i, "{", "}", allow_backtick=False, single_quote_char_only=True)
+            if fn_re.match(hdr):
+                sigs_out.append(hdr)
+            elif type_blk_re.match(hdr):
+                sigs_out.append(_collapse_ws(clean[stmt_start : close_b + 1]))
+            elif impl_re.match(hdr):
+                sigs_out.append(hdr)
+                _extract_rust_impl_methods(clean[i + 1 : close_b], hdr, sigs_out)
+            elif re.match(r"^(?:pub(?:\([^)]*\))?\s+)?mod\b", hdr):
+                sigs_out.append(hdr)
+            i = close_b + 1
+            stmt_start = i
+            continue
+        elif c == ";" and paren_depth == 0 and bracket_depth == 0:
+            stmt = _collapse_ws(clean[stmt_start:i])
+            if fn_re.match(stmt) or type_blk_re.match(stmt) or re.match(
+                r"^(?:pub(?:\([^)]*\))?\s+)?(?:type|mod)\b", stmt
+            ):
+                sigs_out.append(stmt)
+            elif re.match(r"^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\b", stmt):
+                sigs_out.append(_collapse_ws(stmt.split("=", 1)[0]))
+            stmt_start = i + 1
+        i += 1
+
+
+_JVM_TYPE_HDR_RE = re.compile(
+    r"\b(class|interface|enum|record|object|struct|namespace)\s+([A-Za-z_]\w*)"
+)
+_JVM_SKIP_CTRL_RE = re.compile(r"^(?:if|for|while|switch|catch|try|else|finally|synchronized|static|init)\b")
+
+
+def _extract_jvm_cs_block(src: str, owner: str, sigs_out: List[str]) -> None:
+    n = len(src)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+
+    def _emit_decl(raw_s: str, has_body: bool) -> None:
+        s = _collapse_ws(raw_s)
+        if not s or s.startswith(("import ", "using ", "package ")):
+            return
+        if re.match(r"^private\b", s) or _JVM_SKIP_CTRL_RE.match(s):
+            return
+        if not has_body and "=" in s and "(" not in s.split("=", 1)[0]:
+            s = _collapse_ws(s.split("=", 1)[0])
+        elif "=" in s and "=>" not in s:
+            lhs = _collapse_ws(s.split("=", 1)[0])
+            if "(" in lhs:
+                s = lhs
+        if "=>" in s:
+            s = _collapse_ws(s.split("=>", 1)[0])
+        if s and not re.match(r"^private\b", s):
+            sigs_out.append(f"{owner}::{s}" if owner else s)
+
+    while i < n:
+        c = src[i]
+        if c in ('"', "'"):
+            i = _skip_string_literal(src, i, allow_backtick=False)
+            continue
+        if c == "(":
+            paren_depth += 1
+        elif c == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif c == "[":
+            bracket_depth += 1
+        elif c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr = _collapse_ws(src[stmt_start:i])
+            close_b = _find_matching_delim(src, i, "{", "}", allow_backtick=False)
+            m_t = _JVM_TYPE_HDR_RE.search(hdr)
+            if m_t:
+                t_name = m_t.group(2)
+                full_owner = f"{owner}.{t_name}" if owner else t_name
+                if m_t.group(1) != "namespace":
+                    sigs_out.append(hdr)
+                _extract_jvm_cs_block(src[i + 1 : close_b], full_owner, sigs_out)
+            else:
+                _emit_decl(hdr, True)
+            i = close_b + 1
+            stmt_start = i
+            continue
+        elif c == ";" and paren_depth == 0 and bracket_depth == 0:
+            _emit_decl(src[stmt_start:i], False)
+            stmt_start = i + 1
+        elif c == "\n" and paren_depth == 0 and bracket_depth == 0:
+            cur_s = _collapse_ws(src[stmt_start:i])
+            if cur_s.startswith(("import ", "using ", "package ")):
+                stmt_start = i + 1
+            elif cur_s and not cur_s.endswith(("=", "=>", ":", ",", "(", "<", "{")):
+                if _JVM_TYPE_HDR_RE.search(cur_s) or re.match(
+                    r"^(?:(?:public|protected|internal|override|open|abstract|suspend|inline|operator|infix|static|virtual|async)\s+)*fun\b",
+                    cur_s,
+                ):
+                    _emit_decl(cur_s, False)
+                    stmt_start = i + 1
+        i += 1
+    tail = _collapse_ws(src[stmt_start:])
+    if tail:
+        _emit_decl(tail, False)
+
+
+def _extract_jvm_cs_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
+    clean = _strip_c_comments(src)
+    for ln in clean.splitlines():
+        s = ln.strip()
+        if s.startswith(("import ", "using ")):
+            imports_out.append(s.rstrip(";"))
+        elif s.startswith("package "):
+            sigs_out.append(s.rstrip(";"))
+    _extract_jvm_cs_block(clean, "", sigs_out)
+
+
+def _strip_cpp_ctor_init(hdr: str) -> str:
+    last_paren = hdr.rfind(")")
+    if last_paren == -1:
+        return hdr
+    k = last_paren + 1
+    n = len(hdr)
+    while k < n:
+        if hdr[k] == ":":
+            prev_colon = k > 0 and hdr[k - 1] == ":"
+            next_colon = k + 1 < n and hdr[k + 1] == ":"
+            if not prev_colon and not next_colon:
+                return _collapse_ws(hdr[:k])
+            k += 2
+            continue
+        k += 1
+    return hdr
+
+
+def _extract_cpp_block(src: str, owner: str, default_access: str, sigs_out: List[str]) -> None:
+    n = len(src)
+    i = 0
+    stmt_start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    access = default_access
+
+    while i < n:
+        c = src[i]
+        if c in ('"', "'"):
+            i = _skip_string_literal(src, i, allow_backtick=False)
+            continue
+        if c == "(":
+            paren_depth += 1
+        elif c == ")":
+            paren_depth = max(0, paren_depth - 1)
+        elif c == "[":
+            bracket_depth += 1
+        elif c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif (
+            c == ":"
+            and paren_depth == 0
+            and bracket_depth == 0
+            and (i + 1 >= n or src[i + 1] != ":")
+            and (i == 0 or src[i - 1] != ":")
+        ):
+            lbl = _collapse_ws(src[stmt_start:i])
+            if lbl in ("public", "protected", "private"):
+                access = lbl
+                stmt_start = i + 1
+                i += 1
+                continue
+        elif c == "{" and paren_depth == 0 and bracket_depth == 0:
+            hdr = _collapse_ws(src[stmt_start:i])
+            close_b = _find_matching_delim(src, i, "{", "}", allow_backtick=False)
+            m_t = _CPP_TYPE_RE.match(hdr)
+            if m_t:
+                kind = m_t.group(1)
+                t_name = m_t.group(2)
+                if kind.startswith("enum"):
+                    if access != "private":
+                        full_enum = _collapse_ws(src[stmt_start : close_b + 1])
+                        sigs_out.append(f"{owner}::{full_enum}" if owner else full_enum)
+                elif access != "private":
+                    sigs_out.append(f"{owner}::{hdr}" if owner else hdr)
+                    child_access = "private" if kind == "class" else "public"
+                    full_owner = f"{owner}::{t_name}" if owner else t_name
+                    _extract_cpp_block(src[i + 1 : close_b], full_owner, child_access, sigs_out)
+            elif hdr and not hdr.startswith("#") and "(" in hdr:
+                if access != "private":
+                    sig_hdr = _strip_cpp_ctor_init(hdr)
+                    sigs_out.append(f"{owner}::{sig_hdr}" if owner else sig_hdr)
+            elif hdr.startswith(("typedef enum", "typedef struct", "typedef union", "enum", "struct", "union")):
+                if access != "private":
+                    sigs_out.append(_collapse_ws(src[stmt_start : close_b + 1]))
+            i = close_b + 1
+            stmt_start = i
+            continue
+        elif c == ";" and paren_depth == 0 and bracket_depth == 0:
+            stmt = _collapse_ws(src[stmt_start:i])
+            if stmt and not stmt.startswith("#") and access != "private":
+                if "=" in stmt and not stmt.startswith("using ") and "(" not in stmt.split("=", 1)[0]:
+                    stmt = _collapse_ws(stmt.split("=", 1)[0])
+                if owner or _CPP_TYPE_RE.match(stmt) or "(" in stmt or stmt.startswith(("extern ", "typedef ", "using ")):
+                    sigs_out.append(f"{owner}::{stmt}" if owner else stmt)
+            stmt_start = i + 1
+        elif c == "\n" and paren_depth == 0 and bracket_depth == 0:
+            cur_line = src[stmt_start:i]
+            cur_s = _collapse_ws(cur_line)
+            if cur_s.startswith("#") and not cur_line.rstrip().endswith("\\"):
+                stmt_start = i + 1
+        i += 1
+
+
+def _extract_cpp_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
+    clean = _strip_c_comments(src)
+    for ln in clean.splitlines():
+        m_inc = _C_INCLUDE_RE.match(ln)
+        if m_inc:
+            imports_out.append(m_inc.group(1))
+    _extract_cpp_block(clean, "", "public", sigs_out)
+
+
+def _extract_rich_non_py_signatures(norm_bytes: bytes, ext_l: str) -> Optional[Dict[str, List[str]]]:
+    text = norm_bytes.decode("utf-8", errors="replace")
+    imports: List[str] = []
+    sigs: List[str] = []
+    if ext_l in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}:
+        _extract_js_ts_rich_signatures(text, imports, sigs)
+    elif ext_l in {".vue", ".svelte"}:
+        script_chunks = [m.group(1) for m in _SFC_SCRIPT_RE.finditer(text)]
+        _extract_js_ts_rich_signatures("\n".join(script_chunks), imports, sigs)
+    elif ext_l == ".go":
+        _extract_go_rich_signatures(text, imports, sigs)
+    elif ext_l == ".rs":
+        _extract_rust_rich_signatures(text, imports, sigs)
+    elif ext_l in {".java", ".kt", ".kts", ".cs"}:
+        _extract_jvm_cs_rich_signatures(text, imports, sigs)
+    elif ext_l in {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
+        _extract_cpp_rich_signatures(text, imports, sigs)
+    elif ext_l == ".proto":
+        clean_p = _strip_c_comments(text)
+        for ln in clean_p.splitlines():
+            m_imp = _PROTO_IMPORT_RE.match(ln)
+            if m_imp:
+                imports.append(m_imp.group(1))
+        body_norm = _collapse_ws(clean_p)
+        if body_norm:
+            sigs.append(body_norm)
+    elif ext_l in {".graphql", ".gql"}:
+        body_norm = _collapse_ws(_strip_hash_comments(text))
+        if body_norm:
+            sigs.append(body_norm)
+    elif ext_l == ".prisma":
+        body_norm = _collapse_ws(_strip_c_comments(text))
+        if body_norm:
+            sigs.append(body_norm)
+    elif ext_l == ".sql":
+        body_norm = _collapse_ws(_strip_sql_comments(text))
+        if body_norm:
+            sigs.append(body_norm)
+    else:
+        return None
+    return {"i": sorted(set(imports)), "s": sorted(set(sigs))}
+
+
+def _extract_py_outline_from_tree(
+    tree: ast.Module,
+    imports: List[str],
+    symbols: List[str],
+    py_from_members: List[str],
+) -> None:
+    for node in _iter_py_import_nodes(tree.body):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            dots = "." * node.level
+            if node.module:
+                imports.append(f"{dots}{node.module}")
+                for alias in node.names:
+                    if alias.name and alias.name != "*":
+                        py_from_members.append(f"{dots}{node.module}.{alias.name}")
+            else:
+                for alias in node.names:
+                    imports.append(f"{dots}{alias.name}")
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [a.arg for a in node.args.args]
+            prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+            route_tag = _py_route_decorator(node)
+            symbols.append(f"{prefix} {node.name}({', '.join(args[:6])}){route_tag} [L{node.lineno}]")
+        elif isinstance(node, ast.ClassDef):
+            methods = [
+                n.name
+                for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
+            ][:8]
+            m_str = f" methods=[{', '.join(methods)}]" if methods else ""
+            symbols.append(f"class {node.name}{m_str} [L{node.lineno}]")
+
+
 def _extract_outline_from_bytes(
     norm_bytes: bytes,
     ext: str,
     rel: str,
     max_items: int = 30,
+    preparsed_py_tree: Optional[ast.Module] = None,
 ) -> Dict[str, Any]:
     """Pure byte-buffer implementation of `extract_file_outline` (expects LF-normalized bytes)."""
     line_count = 0 if not norm_bytes else norm_bytes.count(b"\n") + (0 if norm_bytes.endswith(b"\n") else 1)
@@ -445,35 +1408,8 @@ def _extract_outline_from_bytes(
 
     if ext == ".py":
         try:
-            tree = ast.parse(text)
-            for node in _iter_py_import_nodes(tree.body):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        imports.append(alias.name)
-                elif isinstance(node, ast.ImportFrom):
-                    dots = "." * node.level
-                    if node.module:
-                        imports.append(f"{dots}{node.module}")
-                        for alias in node.names:
-                            if alias.name and alias.name != "*":
-                                py_from_members.append(f"{dots}{node.module}.{alias.name}")
-                    else:
-                        for alias in node.names:
-                            imports.append(f"{dots}{alias.name}")
-            for node in tree.body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    args = [a.arg for a in node.args.args]
-                    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
-                    route_tag = _py_route_decorator(node)
-                    symbols.append(f"{prefix} {node.name}({', '.join(args[:6])}){route_tag} [L{node.lineno}]")
-                elif isinstance(node, ast.ClassDef):
-                    methods = [
-                        n.name
-                        for n in node.body
-                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
-                    ][:8]
-                    m_str = f" methods=[{', '.join(methods)}]" if methods else ""
-                    symbols.append(f"class {node.name}{m_str} [L{node.lineno}]")
+            tree = preparsed_py_tree if preparsed_py_tree is not None else ast.parse(text)
+            _extract_py_outline_from_tree(tree, imports, symbols, py_from_members)
         except SyntaxError:
             pass
     elif ext in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}:
@@ -531,7 +1467,7 @@ def _extract_outline_from_bytes(
             ms = _RS_SYM_RE.match(ln)
             if ms:
                 symbols.append(f"{ms.group(1)} {ms.group(2)} [L{idx}]")
-    elif ext in {".java", ".kt", ".cs"}:
+    elif ext in {".java", ".kt", ".kts", ".cs"}:
         clean_jvm = _strip_c_comments(text)
         jvm_lines = clean_jvm[:-1].split("\n") if clean_jvm.endswith("\n") else (clean_jvm.split("\n") if clean_jvm else [])
         for idx, ln in enumerate(jvm_lines, start=1):
@@ -542,6 +1478,62 @@ def _extract_outline_from_bytes(
             ms = _JVM_CS_SYM_RE.match(ln)
             if ms:
                 symbols.append(f"{ms.group(1)} {ms.group(2)} [L{idx}]")
+    elif ext == ".proto":
+        clean_p = _strip_c_comments(text)
+        p_lines = clean_p[:-1].split("\n") if clean_p.endswith("\n") else (clean_p.split("\n") if clean_p else [])
+        for idx, ln in enumerate(p_lines, start=1):
+            m_imp = _PROTO_IMPORT_RE.match(ln)
+            if m_imp:
+                imports.append(m_imp.group(1))
+                continue
+            m_item = _PROTO_ITEM_RE.match(ln)
+            if m_item:
+                symbols.append(f"{m_item.group(1)} {m_item.group(2)} [L{idx}]")
+                continue
+            m_rpc = _PROTO_RPC_RE.match(ln)
+            if m_rpc:
+                symbols.append(f"rpc {m_rpc.group(1)} [L{idx}]")
+    elif ext in {".graphql", ".gql"}:
+        clean_g = _strip_hash_comments(text)
+        g_lines = clean_g[:-1].split("\n") if clean_g.endswith("\n") else (clean_g.split("\n") if clean_g else [])
+        for idx, ln in enumerate(g_lines, start=1):
+            m_g = _GRAPHQL_ITEM_RE.match(ln)
+            if m_g:
+                symbols.append(f"{m_g.group(1)} {m_g.group(2)} [L{idx}]")
+    elif ext == ".prisma":
+        clean_pr = _strip_c_comments(text)
+        pr_lines = clean_pr[:-1].split("\n") if clean_pr.endswith("\n") else (clean_pr.split("\n") if clean_pr else [])
+        for idx, ln in enumerate(pr_lines, start=1):
+            m_pr = _PRISMA_ITEM_RE.match(ln)
+            if m_pr:
+                symbols.append(f"{m_pr.group(1)} {m_pr.group(2)} [L{idx}]")
+    elif ext == ".sql":
+        clean_sql = _strip_sql_comments(text)
+        sql_lines = clean_sql[:-1].split("\n") if clean_sql.endswith("\n") else (clean_sql.split("\n") if clean_sql else [])
+        for idx, ln in enumerate(sql_lines, start=1):
+            m_sql = _SQL_CREATE_RE.match(ln)
+            if m_sql:
+                symbols.append(f"{m_sql.group(1).lower()} {m_sql.group(2)} [L{idx}]")
+    elif ext in {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
+        clean_cpp = _strip_c_comments(text)
+        cpp_lines = clean_cpp[:-1].split("\n") if clean_cpp.endswith("\n") else (clean_cpp.split("\n") if clean_cpp else [])
+        brace_depth = 0
+        for idx, ln in enumerate(cpp_lines, start=1):
+            m_inc = _C_INCLUDE_RE.match(ln)
+            if m_inc:
+                imports.append(m_inc.group(1))
+            else:
+                m_t = _CPP_TYPE_RE.match(ln)
+                if m_t:
+                    kind = "enum" if m_t.group(1).startswith("enum") else m_t.group(1)
+                    symbols.append(f"{kind} {m_t.group(2)} [L{idx}]")
+                elif brace_depth == 0:
+                    m_fn = _CPP_FN_RE.match(ln)
+                    if m_fn:
+                        fn_name = m_fn.group(1)
+                        if fn_name not in _CPP_SKIP_KEYWORDS and not ln.lstrip().startswith("#"):
+                            symbols.append(f"fn {fn_name} [L{idx}]")
+            brace_depth = max(0, brace_depth + ln.count("{") - ln.count("}"))
     else:
         for idx, ln in enumerate(lines, start=1):
             s = ln.strip()
@@ -575,6 +1567,70 @@ def _py_all_sig(value: Optional[ast.AST]) -> str:
         return "__all__:" + ast.dump(value)
 
 
+def _compute_py_sig_hash_from_tree(tree: ast.Module) -> str:
+    py_imps: List[str] = []
+    py_sigs: List[str] = []
+    for node in _iter_py_import_nodes(tree.body):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                py_imps.append(f"imp:{alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            dots = "." * node.level
+            mod = node.module or ""
+            names = ",".join(sorted(a.name for a in node.names))
+            py_imps.append(f"from:{dots}{mod}:{names}")
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            py_sigs.append(_py_fn_sig(node))
+        elif isinstance(node, ast.ClassDef):
+            bases = ",".join(_ast_type_str(b) for b in node.bases)
+            members = [
+                _py_fn_sig(n)
+                for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
+            ]
+            for n in node.body:
+                if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and not n.target.id.startswith("_"):
+                    members.append(f"{n.target.id}:{_ast_type_str(n.annotation)}")
+            members.sort()
+            py_sigs.append(f"class {node.name}({bases})[{';'.join(members)}]")
+        elif isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
+                py_sigs.append(_py_all_sig(node.value))
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                ann = _ast_type_str(node.annotation)
+                py_sigs.append(f"__all__[{ann}]:{_py_all_sig(node.value)}")
+    payload = {"i": sorted(set(py_imps)), "s": sorted(py_sigs)}
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def extract_outline_and_sig_hash_from_bytes(
+    norm_bytes: bytes,
+    ext: str,
+    rel: str = "",
+    max_items: int = 30,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Extract outline and `sig_hash` together (reusing one `ast.parse` for Python files)."""
+    ext_l = ext.lower()
+    if b"\r\n" in norm_bytes:
+        norm_bytes = norm_bytes.replace(b"\r\n", b"\n")
+    tree: Optional[ast.Module] = None
+    sig_hash: Optional[str] = None
+    if ext_l == ".py":
+        try:
+            tree = ast.parse(norm_bytes.decode("utf-8", errors="replace"))
+            sig_hash = _compute_py_sig_hash_from_tree(tree)
+        except SyntaxError:
+            tree = None
+            sig_hash = None
+    elif ext_l in SIG_HASH_EXTS:
+        sig_hash = compute_signature_hash_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}")
+    out = _extract_outline_from_bytes(norm_bytes, ext_l, rel, max_items=max_items, preparsed_py_tree=tree)
+    return out, sig_hash
+
+
 def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = "") -> Optional[str]:
     """Compute a 16-hex-char fingerprint of a file's public interface & imports."""
     ext_l = ext.lower()
@@ -589,41 +1645,11 @@ def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = ""
             tree = ast.parse(text)
         except SyntaxError:
             return None
-        py_imps: List[str] = []
-        py_sigs: List[str] = []
-        for node in _iter_py_import_nodes(tree.body):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    py_imps.append(f"imp:{alias.name}")
-            elif isinstance(node, ast.ImportFrom):
-                dots = "." * node.level
-                mod = node.module or ""
-                names = ",".join(sorted(a.name for a in node.names))
-                py_imps.append(f"from:{dots}{mod}:{names}")
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                py_sigs.append(_py_fn_sig(node))
-            elif isinstance(node, ast.ClassDef):
-                bases = ",".join(_ast_type_str(b) for b in node.bases)
-                members = [
-                    _py_fn_sig(n)
-                    for n in node.body
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
-                ]
-                for n in node.body:
-                    if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and not n.target.id.startswith("_"):
-                        members.append(f"{n.target.id}:{_ast_type_str(n.annotation)}")
-                members.sort()
-                py_sigs.append(f"class {node.name}({bases})[{';'.join(members)}]")
-            elif isinstance(node, ast.Assign):
-                if any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
-                    py_sigs.append(_py_all_sig(node.value))
-            elif isinstance(node, ast.AnnAssign):
-                if isinstance(node.target, ast.Name) and node.target.id == "__all__":
-                    ann = _ast_type_str(node.annotation)
-                    py_sigs.append(f"__all__[{ann}]:{_py_all_sig(node.value)}")
-        payload = {"i": sorted(set(py_imps)), "s": sorted(py_sigs)}
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return _compute_py_sig_hash_from_tree(tree)
+
+    rich_payload = _extract_rich_non_py_signatures(norm_bytes, ext_l)
+    if rich_payload is not None:
+        encoded = json.dumps(rich_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]
 
     out = _extract_outline_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}", max_items=200)
@@ -729,24 +1755,55 @@ def _load_tsconfig_file(root: Path, cfg_path: Path, seen: Set[Path], depth: int 
             base_url = rel_cfg_dir if raw_b in ("", ".") else _norm_join_posix(rel_cfg_dir, raw_b)
         paths_obj = co.get("paths", {})
         if isinstance(paths_obj, dict):
+            added_aliases = False
             for pat, targets in paths_obj.items():
                 if isinstance(pat, str) and isinstance(targets, list):
                     str_targets = [normalize_relpath(str(t)) for t in targets if isinstance(t, str)]
                     if str_targets:
                         aliases[pat] = str_targets
+                        added_aliases = True
+            if added_aliases and "baseUrl" not in co and base_url is None:
+                base_url = rel_cfg_dir
     return base_url, aliases
 
 
-def _load_tsconfig_aliases(root: Path) -> Tuple[str, List[Tuple[str, List[str]]]]:
+def _load_tsconfig_aliases(root: Path, cfg_dir: Optional[Path] = None) -> Tuple[str, List[Tuple[str, List[str]]]]:
     """Parse `baseUrl` and `paths` aliases (following relative `extends`) from `tsconfig.json` / `jsconfig.json`."""
+    search_dir = cfg_dir if cfg_dir is not None else root
     for cfg_name in ("tsconfig.json", "jsconfig.json"):
-        cfg_path = root / cfg_name
+        cfg_path = search_dir / cfg_name
         if not cfg_path.is_file():
             continue
         base_url, aliases_map = _load_tsconfig_file(root, cfg_path, set())
         if base_url is not None or aliases_map:
             return base_url or "", list(aliases_map.items())
     return "", []
+
+
+def _resolve_tsconfig_for_dir(
+    root: Path,
+    cur_dir: str,
+    cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]],
+) -> Tuple[str, List[Tuple[str, List[str]]]]:
+    """Resolve nearest enclosing `tsconfig.json` / `jsconfig.json` for a monorepo directory."""
+    if cur_dir in cache:
+        return cache[cur_dir]
+    parts = [p for p in cur_dir.split("/") if p] if cur_dir else []
+    for cut in range(len(parts), -1, -1):
+        sub_dir = "/".join(parts[:cut])
+        if sub_dir in cache:
+            res = cache[sub_dir]
+            cache[cur_dir] = res
+            return res
+        cand_dir = (root / sub_dir) if sub_dir else root
+        if (cand_dir / "tsconfig.json").is_file() or (cand_dir / "jsconfig.json").is_file():
+            res = _load_tsconfig_aliases(root, cfg_dir=cand_dir)
+            cache[sub_dir] = res
+            cache[cur_dir] = res
+            return res
+    res = ("", [])
+    cache[cur_dir] = res
+    return res
 
 
 def _expand_rust_use_tree(spec: str) -> List[str]:
@@ -798,8 +1855,8 @@ def _expand_rust_use_tree(spec: str) -> List[str]:
     return expanded
 
 
-def _load_go_module_prefix(root: Path) -> str:
-    gomod = root / "go.mod"
+def _load_go_module_prefix(root: Path, mod_dir: Optional[Path] = None) -> str:
+    gomod = (mod_dir if mod_dir is not None else root) / "go.mod"
     if not gomod.is_file():
         return ""
     try:
@@ -812,6 +1869,34 @@ def _load_go_module_prefix(root: Path) -> str:
     return ""
 
 
+def _resolve_gomod_for_dir(
+    root: Path,
+    cur_dir: str,
+    cache: Dict[str, Tuple[str, str]],
+) -> Tuple[str, str]:
+    """Return `(mod_rel_dir, module_prefix)` for the nearest enclosing `go.mod`."""
+    if cur_dir in cache:
+        return cache[cur_dir]
+    parts = [p for p in cur_dir.split("/") if p] if cur_dir else []
+    for cut in range(len(parts), -1, -1):
+        sub_dir = "/".join(parts[:cut])
+        if sub_dir in cache:
+            res = cache[sub_dir]
+            cache[cur_dir] = res
+            return res
+        cand_dir = (root / sub_dir) if sub_dir else root
+        if (cand_dir / "go.mod").is_file():
+            mod_pfx = _load_go_module_prefix(root, mod_dir=cand_dir)
+            if mod_pfx:
+                res = (sub_dir, mod_pfx)
+                cache[sub_dir] = res
+                cache[cur_dir] = res
+                return res
+    res = ("", "")
+    cache[cur_dir] = res
+    return res
+
+
 def resolve_go_package_imports(
     root: Path,
     outlines: Dict[str, Dict[str, Any]],
@@ -819,30 +1904,34 @@ def resolve_go_package_imports(
 ) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]]]:
     """
     Resolve Go package directory imports per `.go` file and map each Go package directory to its
-    non-`_test.go` files using `_load_go_module_prefix(root)`.
+    non-`_test.go` files using the nearest enclosing `go.mod`.
     """
-    go_mod = _load_go_module_prefix(root)
     go_files_by_dir: Dict[str, List[str]] = {}
     for f_rel in sorted(discovered_files):
         if f_rel.endswith(".go") and not f_rel.endswith("_test.go"):
             parent = f_rel.rsplit("/", 1)[0] if "/" in f_rel else ""
             go_files_by_dir.setdefault(parent, []).append(f_rel)
 
+    go_cache: Dict[str, Tuple[str, str]] = {}
     go_imported_dirs_by_file: Dict[str, Set[str]] = {}
-    if go_mod:
-        for rel in discovered_files:
-            if not rel.endswith(".go"):
-                continue
-            out = outlines.get(rel)
-            if not isinstance(out, dict):
-                continue
-            imp_dirs: Set[str] = set()
-            for spec in out.get("imports", ()):
-                if spec == go_mod or spec.startswith(go_mod + "/"):
-                    sub_dir = spec[len(go_mod) :].lstrip("/")
-                    imp_dirs.add(sub_dir)
-            if imp_dirs:
-                go_imported_dirs_by_file[rel] = imp_dirs
+    for rel in discovered_files:
+        if not rel.endswith(".go"):
+            continue
+        out = outlines.get(rel)
+        if not isinstance(out, dict):
+            continue
+        cur_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        mod_root, go_mod = _resolve_gomod_for_dir(root, cur_dir, go_cache)
+        if not go_mod:
+            continue
+        imp_dirs: Set[str] = set()
+        for spec in out.get("imports", ()):
+            if spec == go_mod or spec.startswith(go_mod + "/"):
+                sub_dir = spec[len(go_mod) :].lstrip("/")
+                full_dir = f"{mod_root}/{sub_dir}".strip("/") if mod_root else sub_dir
+                imp_dirs.add(full_dir)
+        if imp_dirs:
+            go_imported_dirs_by_file[rel] = imp_dirs
     return go_imported_dirs_by_file, go_files_by_dir
 
 
@@ -869,7 +1958,27 @@ def _static_ecosystem(rel: str) -> Optional[str]:
         return "go"
     if ext == ".rs":
         return "rs"
+    if ext == ".proto":
+        return "proto"
+    if ext in {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
+        return "cpp"
     return None
+
+
+def _python_candidate_prefixes(cur_dir: str, subpkg_roots: Sequence[str]) -> List[str]:
+    prefixes: List[str] = ["", "src/"]
+    if cur_dir:
+        parts = cur_dir.split("/")
+        for cut in range(len(parts), 0, -1):
+            sub = "/".join(parts[:cut])
+            for cand in (f"{sub}/", f"{sub}/src/"):
+                if cand not in prefixes:
+                    prefixes.append(cand)
+    for sr in subpkg_roots:
+        for cand in (f"{sr}/", f"{sr}/src/"):
+            if cand not in prefixes:
+                prefixes.append(cand)
+    return prefixes
 
 
 def build_static_import_graph(
@@ -881,18 +1990,27 @@ def build_static_import_graph(
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     """
     Scan discovered source files once (using mtime-keyed `outline_cache.json` and parallel extraction
-    when needed) to resolve internal file-to-file imports across Python, JS/TS/Vue/Svelte, Go, and Rust.
+    when needed) to resolve internal file-to-file imports across Python, JS/TS/Vue/Svelte, Go, Rust,
+    Protobuf, and C/C++ (including monorepo nested configs).
     """
     extractor = outline_fn or extract_file_outline
     known_set = set(discovered_files)
-    ts_base, ts_aliases = _load_tsconfig_aliases(root)
-    go_mod = _load_go_module_prefix(root)
+    ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
+    go_cache: Dict[str, Tuple[str, str]] = {}
 
+    py_subpkg_roots: List[str] = []
+    seen_subpkgs: Set[str] = set()
     go_dir_files: Dict[str, List[str]] = {}
     for f_rel in discovered_files:
         if f_rel.endswith(".go") and not f_rel.endswith("_test.go"):
             parent = f_rel.rsplit("/", 1)[0] if "/" in f_rel else ""
             go_dir_files.setdefault(parent, []).append(f_rel)
+        bname = f_rel.rsplit("/", 1)[-1]
+        if bname in ("pyproject.toml", "setup.py", "setup.cfg") and "/" in f_rel:
+            pkg_root = f_rel.rsplit("/", 1)[0]
+            if pkg_root not in seen_subpkgs:
+                seen_subpkgs.add(pkg_root)
+                py_subpkg_roots.append(pkg_root)
 
     cache_path = (aoci_dir / CACHE_DIR / OUTLINE_CACHE) if aoci_dir is not None else None
     old_cache: Dict[str, Dict[str, Any]] = {}
@@ -985,6 +2103,7 @@ def build_static_import_graph(
 
         if ext == ".py":
             py_specs = list(dict.fromkeys([*out["imports"], *out.get("py_from_members", ())]))
+            py_prefixes = _python_candidate_prefixes(cur_dir, py_subpkg_roots)
             for imp in py_specs:
                 if imp.startswith("."):
                     lvl = len(imp) - len(imp.lstrip("."))
@@ -1000,7 +2119,7 @@ def build_static_import_graph(
                             break
                 else:
                     mod_path = imp.replace(".", "/")
-                    for prefix in ("", "src/"):
+                    for prefix in py_prefixes:
                         for cand in (f"{prefix}{mod_path}.py", f"{prefix}{mod_path}/__init__.py"):
                             if cand in known_set and cand != rel:
                                 resolved.append(cand)
@@ -1009,6 +2128,7 @@ def build_static_import_graph(
                             continue
                         break
         elif ext in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte"}:
+            ts_base, ts_aliases = _resolve_tsconfig_for_dir(root, cur_dir, ts_cache)
             for spec in out["imports"]:
                 hit: Optional[str] = None
                 if spec.startswith("."):
@@ -1035,13 +2155,16 @@ def build_static_import_graph(
                         hit = _probe_js_path(_norm_join_posix(ts_base, spec), known_set)
                 if hit and hit != rel:
                     resolved.append(hit)
-        elif ext == ".go" and go_mod:
-            for spec in out["imports"]:
-                if spec == go_mod or spec.startswith(go_mod + "/"):
-                    sub_dir = spec[len(go_mod) :].lstrip("/")
-                    for gf in go_dir_files.get(sub_dir, ())[:3]:
-                        if gf != rel:
-                            resolved.append(gf)
+        elif ext == ".go":
+            mod_root, go_mod = _resolve_gomod_for_dir(root, cur_dir, go_cache)
+            if go_mod:
+                for spec in out["imports"]:
+                    if spec == go_mod or spec.startswith(go_mod + "/"):
+                        sub_dir = spec[len(go_mod) :].lstrip("/")
+                        full_dir = f"{mod_root}/{sub_dir}".strip("/") if mod_root else sub_dir
+                        for gf in go_dir_files.get(full_dir, ())[:3]:
+                            if gf != rel:
+                                resolved.append(gf)
         elif ext == ".rs":
             if rel.startswith("src/"):
                 crate_src = "src"
@@ -1080,6 +2203,21 @@ def build_static_import_graph(
                                 break
                         else:
                             continue
+                        break
+        elif ext in {".proto", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
+            for spec in out["imports"]:
+                clean_spec = normalize_relpath(spec.strip("\"'<> "))
+                if not clean_spec:
+                    continue
+                for cand in (
+                    _norm_join_posix(cur_dir, clean_spec),
+                    clean_spec,
+                    f"include/{clean_spec}",
+                    f"src/{clean_spec}",
+                    f"proto/{clean_spec}",
+                ):
+                    if cand in known_set and cand != rel:
+                        resolved.append(cand)
                         break
 
         dedup = list(dict.fromkeys(resolved))
