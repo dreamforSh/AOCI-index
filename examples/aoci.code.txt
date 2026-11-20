@@ -1,0 +1,23 @@
+#AOCI-CODE-VOLUME: 1
+#Format: object-fras-v2
+#Updated-At: 2026-11-19T18:55:00Z
+#Tracked-Files: 7
+
+===./===
+pyproject.toml[RG6T]: F:Declares order-hub package metadata, pinned runtime dependencies, and pytest settings | R:- | A:- | S:Requires Python>=3.11; added dependencies must ship pure-Python wheels
+
+===src/===
+src/main.py[EG7T]: F:Bootstraps FastAPI application, mounts HTTP routers, and validates startup settings | R:src/config/env.py,src/routes/orders.py | A:create_app | S:Must invoke get_settings() before registering routes so missing secrets fail fast on boot
+
+===src/auth/===
+src/auth/jwt.py[MA8M]: F:Issues and verifies JWT access tokens with multi-KID key rotation | R:src/config/env.py | A:issue_token/verify_token<-src/routes/orders.py | S:Enforce explicit alg allowlist rejecting none; clock_skew fixed at 30s; keep previous KID active >=24h during rotation
+
+===src/config/===
+src/config/env.py[CG7S]: F:Loads and strictly validates startup environment variables into a frozen Settings object | R:- | A:get_settings<-src/main.py,src/auth/jwt.py,src/order/service.py | S:Must exit non-zero immediately if JWT_SECRET or DATABASE_URL is missing; never fall back to built-in defaults
+
+===src/order/===
+src/order/repo.py[PO7S]: F:Persists orders and inventory reservations via parameterized PostgreSQL queries | R:src/config/env.py | A:insert_order/reserve_stock<-src/order/service.py | S:All SQL must use bound parameters; reserve_stock requires SELECT FOR UPDATE row lock
+src/order/service.py[AO9M]: F:Orchestrates idempotent order creation, inventory reservation, and payment intent creation | R:src/config/env.py,src/order/repo.py | A:create_order/cancel_order<-src/routes/orders.py | S:Relies on unique idempotency_key for retry safety; amounts must be positive int64 cents; never invoke synchronous external HTTP inside a DB transaction
+
+===src/routes/===
+src/routes/orders.py[EO7S]: F:Exposes HTTP endpoints for order creation, lookup, and cancellation with payload validation | R:src/auth/jwt.py,src/order/service.py | A:router<-src/main.py | S:All mutating routes must attach verify_token dependency; error responses must use ProblemDetail without leaking stack traces

@@ -1,0 +1,18 @@
+{
+  "aoci-index-guard": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python skills/aoci-index/scripts/aoci_hook.py --host antigravity --event session-start",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python skills/aoci-index/scripts/aoci_hook.py --host antigravity --event stop",
+        "timeout": 10
+      }
+    ]
+  }
+}

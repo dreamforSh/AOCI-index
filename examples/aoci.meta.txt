@@ -1,0 +1,31 @@
+#AOCI-META-VOLUME: 1
+#Format: meta-v1
+
+# [Tag Dictionary: [LDIS] 4-char Symbolic Coordinate]
+# L (Layer - architectural tier):
+#   E=Entry  A=Application  D=Domain  K=Compute  P=Persistence  I=Integration
+#   M=Middleware  U=UI  C=Common  R=Runtime  T=Test  O=Docs
+#
+# D (Domain - project-specific single-character module codes for order-hub):
+#   G=Global  X=Core
+#   A=Auth  O=Order  P=Payment
+#
+# I (Importance 1-9 and token length budget):
+#   9-8=Core hub / high-risk critical path (80-150 tokens)
+#   7-5=Primary business module or public contract (45-80 tokens)
+#   4-3=Supporting utility or routine config (25-45 tokens)
+#   2-1=Peripheral script, boilerplate, or simple test (15-30 tokens)
+#
+# S (Size - auto-verified by aoci_index.py from actual line count):
+#   T=<50L  S=50-199L  M=200-499L  L=500-999L  H=>=1000L
+
+# [FRAS Schema: object-fras-v2]
+# Syntax: <relpath>[LDIS]: F:<Responsibility> | R:<Read-Along/Deps> | A:<API/Callers> | S:<Non-Obvious Constraints>
+#
+# [Glossary: Bilingual / Domain Term Aliases for BM25 Search]
+#   密钥轮换 = key rotation, kid rotation
+#   预留库存 = reserve stock, inventory reservation
+#   幂等键 = idempotency key, idempotency
+#   访问令牌 = access token, jwt
+#   订单创建 = create order, order creation
+#   环境变量 = environment variables, env settings

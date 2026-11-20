@@ -1,0 +1,12 @@
+#AOCI-ROOT-MANIFEST: 1
+#Format-Version: cognition-volumes/v1
+#Locale: en-US
+#Project: order-hub
+#Git-Excluded: true (.git/info/exclude)
+#Global-Invariants: All write HTTP endpoints require JWT auth middleware; all monetary values use int64 minor units (cents); services must not bypass Repository to issue raw SQL
+
+#Volume: id=meta kind=meta path=aoci.meta.txt format=meta-v1 depends=- state=enabled
+#Volume: id=code kind=code path=aoci.code.txt format=object-fras-v2 depends=meta state=enabled
+
+#Read-Order: aoci.txt -> aoci.meta.txt -> aoci.code.txt
+#Protocol: Read-Whole-First before exploring source files; sync after code updates.

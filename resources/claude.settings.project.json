@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import os,runpy;runpy.run_path(os.path.join(os.environ.get('CLAUDE_PROJECT_DIR','.'),'.claude/skills/aoci-index/scripts/aoci_hook.py'),run_name='__main__')\" --host claude-code --event session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import os,runpy;runpy.run_path(os.path.join(os.environ.get('CLAUDE_PROJECT_DIR','.'),'.claude/skills/aoci-index/scripts/aoci_hook.py'),run_name='__main__')\" --host claude-code --event turn-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import os,runpy;runpy.run_path(os.path.join(os.environ.get('CLAUDE_PROJECT_DIR','.'),'.claude/skills/aoci-index/scripts/aoci_hook.py'),run_name='__main__')\" --host claude-code --event stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
