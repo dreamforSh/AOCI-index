@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import contextlib
+import fnmatch
 import hashlib
 import heapq
 import json
