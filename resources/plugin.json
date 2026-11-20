@@ -1,0 +1,12 @@
+{
+  "name": "aoci-index",
+  "displayName": "AOCI Codebase Index",
+  "version": "1.2.0",
+  "description": "Fast AI-Oriented Code Indexing (.aoci/) builder, BM25/graph reader, branch-resilient cache restorer, MCP server, and drift guard.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Initialize and build a local .aoci codebase index for this repository",
+    "Generate an AOCI architectural diff impact briefing for my current changes",
+    "Check .aoci index drift and synchronize any modified or new source files"
+  ]
+}
