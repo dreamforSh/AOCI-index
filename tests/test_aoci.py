@@ -13,6 +13,7 @@ import gzip
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -746,6 +747,120 @@ class InstallAndNonGitTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, out)
         self.assertIn("overview", (proj / "AGENTS.md").read_text(encoding="utf-8"))
+
+    def test_install_skips_vcs_dirs_and_removes_readonly_files(self):
+        home = self.tmp / "home"
+        proj = self.tmp / "proj"
+        home.mkdir()
+        proj.mkdir()
+        ro_paths = []
+
+        def _make_ro(path: Path, data: str = "locked\n") -> Path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="\n") as fh:
+                fh.write(data)
+            os.chmod(path, 0o444)
+            ro_paths.append(path)
+            return path
+
+        try:
+            # 1) Claude Code install must never copy `.git/` or cache/IDE/venv dirs
+            code, out = self.run_install(
+                "--host", "claude-code", "--scope", "project", "--project-root", str(proj), "--home-dir", str(home)
+            )
+            self.assertEqual(code, 0, out)
+            cc_skill = proj / ".claude" / "skills" / "aoci-index"
+            self.assertTrue((cc_skill / "SKILL.md").is_file())
+            for skipped in (".git", ".hg", ".svn", ".aoci", ".venv", "venv", "__pycache__", "tests", ".idea"):
+                self.assertFalse((cc_skill / skipped).exists(), f"{skipped} must not be copied to {cc_skill}")
+
+            # `.bak` / `.tmp` / `.git/` files inside dest_dir are ignored by `_tree_hashes`
+            _make_ro(cc_skill / "scratch.bak")
+            _make_ro(cc_skill / "scratch.tmp")
+            ro_cc_nested = _make_ro(cc_skill / ".git" / "objects" / "pack" / "pack-test.pack")
+
+            # Read-only files (0o444) inside an existing Claude Code install must not fail --force reinstall or --uninstall
+            ro_cc_top = _make_ro(cc_skill / "SKILL.md", "# locked\n")
+            code, out = self.run_install(
+                "--host", "claude-code", "--scope", "project", "--project-root", str(proj), "--home-dir", str(home), "--force"
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(ro_cc_nested.exists())
+            self.assertFalse((cc_skill / ".git").exists())
+            self.assertFalse((cc_skill / "scratch.bak").exists())
+            self.assertTrue(ro_cc_top.is_file())
+
+            _make_ro(cc_skill / "ro_uninstall.txt")
+            code, out = self.run_install(
+                "--host", "claude-code", "--scope", "project", "--project-root", str(proj), "--home-dir", str(home), "--uninstall"
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(cc_skill.exists())
+
+            # 2) Antigravity `--as-plugin` install must also skip `.git/` and handle 0o444 files on --force and --uninstall
+            code, out = self.run_install(
+                "--host",
+                "antigravity",
+                "--scope",
+                "project",
+                "--project-root",
+                str(proj),
+                "--home-dir",
+                str(home),
+                "--as-plugin",
+                "--with-hooks",
+                "--with-rules",
+                "--with-mcp",
+            )
+            self.assertEqual(code, 0, out)
+            plugin_dir = proj / ".agents" / "plugins" / "aoci-index"
+            plugin_skill = plugin_dir / "skills" / "aoci-index"
+            self.assertTrue((plugin_skill / "SKILL.md").is_file())
+            self.assertFalse((plugin_dir / ".git").exists())
+            for skipped in (".git", ".hg", ".svn", ".aoci", ".venv", "venv", "__pycache__", "tests", ".idea"):
+                self.assertFalse((plugin_skill / skipped).exists(), f"{skipped} must not be copied to {plugin_skill}")
+
+            ro_plug_nested = _make_ro(plugin_skill / ".git" / "objects" / "aa" / "bbcc")
+            _make_ro(plugin_skill / "SKILL.md", "# locked plugin\n")
+            code, out = self.run_install(
+                "--host",
+                "antigravity",
+                "--scope",
+                "project",
+                "--project-root",
+                str(proj),
+                "--home-dir",
+                str(home),
+                "--as-plugin",
+                "--force",
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(ro_plug_nested.exists())
+            self.assertFalse((plugin_skill / ".git").exists())
+            self.assertTrue((plugin_skill / "SKILL.md").is_file())
+
+            _make_ro(plugin_skill / "ro_plugin_uninstall.txt")
+            code, out = self.run_install(
+                "--host",
+                "antigravity",
+                "--scope",
+                "project",
+                "--project-root",
+                str(proj),
+                "--home-dir",
+                str(home),
+                "--as-plugin",
+                "--uninstall",
+            )
+            self.assertEqual(code, 0, out)
+            self.assertFalse(plugin_dir.exists())
+        finally:
+            for target in ro_paths:
+                if target.exists():
+                    try:
+                        os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+                    except OSError:
+                        pass
 
     def test_non_git_workspace_honors_root_gitignore(self):
         ws = self.tmp / "nongit"

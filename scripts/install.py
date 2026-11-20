@@ -27,6 +27,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -38,7 +39,31 @@ SOURCE_DIR = Path(__file__).resolve().parent.parent
 AGY_HOOK_KEY = "aoci-index-guard"
 CLAUDE_HOOK_MARKER = "aoci_hook.py"
 INSTALL_MANIFEST = ".aoci-install.json"
-COPY_IGNORE = ("__pycache__", "*.pyc", "*.pyo", ".DS_Store", INSTALL_MANIFEST, "tests")
+_SKIP_DIR_NAMES = {
+    "__pycache__",
+    "tests",
+    ".git",
+    ".hg",
+    ".svn",
+    ".aoci",
+    ".github",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".vscode",
+    ".idea",
+}
+COPY_IGNORE = tuple(sorted(_SKIP_DIR_NAMES)) + (
+    "*.pyc",
+    "*.pyo",
+    "*.bak",
+    "*.orig.bak",
+    "*.tmp",
+    ".DS_Store",
+    INSTALL_MANIFEST,
+)
 
 RULE_BEGIN = "<!-- >>> aoci-index -->"
 RULE_END = "<!-- <<< aoci-index -->"
@@ -80,7 +105,11 @@ def _tree_hashes(base: Path) -> Dict[str, str]:
             continue
         rel = p.relative_to(base).as_posix()
         parts = rel.split("/")
-        if "__pycache__" in parts or "tests" in parts or rel.endswith((".pyc", ".pyo")) or p.name in (".DS_Store", INSTALL_MANIFEST):
+        if (
+            any(seg in _SKIP_DIR_NAMES for seg in parts)
+            or rel.endswith((".pyc", ".pyo", ".bak", ".tmp"))
+            or p.name in (".DS_Store", INSTALL_MANIFEST)
+        ):
             continue
         hashes[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
     return hashes
@@ -170,6 +199,19 @@ def _check_overwrite_guard(dest_dir: Path, force: bool) -> bool:
     return True
 
 
+def _rmtree_ro(path: Path) -> None:
+    """Remove a directory tree, clearing read-only attributes before retrying."""
+
+    def _handle_ro(func: Any, fpath: str, _exc: Any) -> None:
+        os.chmod(fpath, stat.S_IWRITE)
+        func(fpath)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_handle_ro)
+    else:
+        shutil.rmtree(path, onerror=_handle_ro)
+
+
 def copy_skill_tree(dest_dir: Path, dry_run: bool, force: bool = False) -> bool:
     if dest_dir.exists() and dest_dir.resolve() == SOURCE_DIR.resolve():
         print(f"  [skip] destination equals source: {dest_dir}")
@@ -180,7 +222,7 @@ def copy_skill_tree(dest_dir: Path, dry_run: bool, force: bool = False) -> bool:
         print(f"  [dry-run] copy skill `{SOURCE_DIR}` -> `{dest_dir}`")
         return True
     if dest_dir.exists():
-        shutil.rmtree(dest_dir)
+        _rmtree_ro(dest_dir)
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(SOURCE_DIR, dest_dir, ignore=shutil.ignore_patterns(*COPY_IGNORE))
     write_text_lf(
@@ -201,7 +243,7 @@ def remove_skill_tree(dest_dir: Path, dry_run: bool) -> None:
     if dry_run:
         print(f"  [dry-run] remove skill directory: {dest_dir}")
         return
-    shutil.rmtree(dest_dir)
+    _rmtree_ro(dest_dir)
     print(f"  [ok] removed skill -> {dest_dir}")
 
 
