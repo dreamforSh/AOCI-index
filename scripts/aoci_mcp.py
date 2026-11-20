@@ -195,7 +195,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "min_importance": {"type": "integer", "description": "Minimum Importance rating (1-9)"},
                 "path": {"type": "string", "description": "Glob pattern on relative path (e.g. 'src/auth/*')"},
                 "impact": {"type": "string", "description": "Target file to trace transitive upstream dependents"},
-                "depth": {"type": "integer", "default": 1, "description": "Transitive hops for `impact`"},
+                "tests_for": {"type": "string", "description": "Target file to find impacted T-layer test files"},
+                "depth": {"type": "integer", "default": 1, "description": "Transitive hops for `impact` (default 1) or `tests_for` (default 3)"},
                 "top": {"type": "integer", "default": 20, "description": "Maximum entries to return (0 = unlimited)"},
             },
             "required": ["root"],
@@ -215,6 +216,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Target relative file paths"},
                 "depth": {"type": "integer", "default": 1, "description": "Graph expansion hops"},
                 "budget": {"type": "integer", "default": 0, "description": "Optional token budget ceiling (0 = unlimited)"},
+                "with_tests": {"type": "boolean", "default": False, "description": "Attach impacted T-layer test files"},
             },
             "required": ["root", "paths"],
         },
@@ -233,6 +235,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "rev": {"type": "string", "description": "Optional Git revision spec (e.g. 'main...HEAD')"},
                 "staged": {"type": "boolean", "default": False, "description": "Inspect staged (`--cached`) changes"},
                 "depth": {"type": "integer", "default": 1, "description": "Upstream caller hops"},
+                "with_tests": {"type": "boolean", "default": False, "description": "Attach impacted T-layer test files"},
             },
             "required": ["root"],
         },
@@ -629,11 +632,25 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         impact_set: Optional[set] = None
         if args.get("impact"):
             imp_target = aoci_index.normalize_relpath(str(args["impact"]))
-            depth = int(args.get("depth", 1))
+            depth = int(args["depth"]) if args.get("depth") is not None else 1
             impact_set = {imp_target} | set(aoci_index.bfs_neighbors(slot["dependents"], [imp_target], depth))
 
+        impacted_tests: Optional[List[Dict[str, Any]]] = None
+        tests_for_set: Optional[set] = None
+        if args.get("tests_for"):
+            tests_target = aoci_index.normalize_relpath(str(args["tests_for"]))
+            tests_depth = int(args["depth"]) if args.get("depth") is not None else 3
+            impacted_tests = aoci_index.find_impacted_tests(
+                root,
+                slot["entries"],
+                slot["dependents"],
+                [tests_target],
+                max_depth=tests_depth,
+            )
+            tests_for_set = {item["path"] for item in impacted_tests}
+
         has_filters = any(
-            (layer_set, domain_set, min_imp, path_glob, keyword, impact_set is not None)
+            (layer_set, domain_set, min_imp, path_glob, keyword, impact_set is not None, tests_for_set is not None)
         )
         cand_paths: Optional[set] = None
         matched_lines: List[str] = []
@@ -652,8 +669,15 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                     continue
                 if impact_set is not None and rel not in impact_set:
                     continue
+                if tests_for_set is not None and rel not in tests_for_set:
+                    continue
                 cand_paths.add(rel)
                 matched_lines.append(item["line"])
+
+        if impacted_tests is not None:
+            impacted_tests = [item for item in impacted_tests if cand_paths is None or item["path"] in cand_paths]
+            if not search_q:
+                matched_lines = [item["entry"] for item in impacted_tests]
 
         if search_q:
             bm25 = _CACHE.get_bm25(slot)
@@ -676,10 +700,17 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             }
             if expansions:
                 res_obj["glossary_expansions"] = expansions
+            if impacted_tests is not None:
+                hit_paths = {h["path"] for h in hits}
+                impacted_tests = [item for item in impacted_tests if item["path"] in hit_paths]
         else:
             if top_k > 0:
                 matched_lines = matched_lines[:top_k]
+                if impacted_tests is not None:
+                    impacted_tests = impacted_tests[:top_k]
             res_obj = {"count": len(matched_lines), "entries": matched_lines}
+        if impacted_tests is not None:
+            res_obj["impacted_tests"] = impacted_tests
         return False, json.dumps(res_obj, indent=2, ensure_ascii=False)
 
     if name == "aoci_context":
@@ -687,8 +718,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if slot is None:
             return True, f"ERROR: `.aoci/aoci.code.txt` not found at {root}. Run `init` first."
         raw_paths = args.get("paths") or []
-        depth = int(args.get("depth", 1))
+        depth = int(args["depth"]) if args.get("depth") is not None else 1
         budget = int(args.get("budget", 0) or 0)
+        with_tests = bool(args.get("with_tests", False))
         payload = aoci_index.build_context_subgraph(
             root,
             slot["entries"],
@@ -699,15 +731,25 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             depth=depth,
             budget=budget,
         )
+        if with_tests:
+            payload["impacted_tests"] = aoci_index.find_impacted_tests(
+                root,
+                slot["entries"],
+                slot["dependents"],
+                [str(p) for p in raw_paths],
+                max_depth=max(3, depth),
+            )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
     if name == "aoci_diff":
         slot = _CACHE.get(root)
+        depth = int(args["depth"]) if args.get("depth") is not None else 1
         brief = aoci_index.compute_diff_briefing(
             root,
             rev=args.get("rev"),
             staged=bool(args.get("staged", False)),
-            depth=int(args.get("depth", 1)),
+            depth=depth,
+            with_tests=bool(args.get("with_tests", False)),
             cached_entries=slot["entries"] if slot is not None else None,
             cached_deps=slot["deps"] if slot is not None else None,
             cached_dependents=slot["dependents"] if slot is not None else None,

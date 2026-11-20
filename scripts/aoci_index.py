@@ -74,6 +74,7 @@ from aoci_core import githooks as _githooks  # noqa: E402
 from aoci_core import graph as _graph  # noqa: E402
 from aoci_core import parsers as _parsers  # noqa: E402
 from aoci_core import pool as _pool  # noqa: E402
+from aoci_core import test_impact as _test_impact  # noqa: E402
 from aoci_core.constants import (  # noqa: E402
     ALWAYS_SKIP_DIRS,
     AOCI_DIR_NAME,
@@ -226,6 +227,7 @@ from aoci_core.pool import (  # noqa: E402
     load_semantic_pool,
     semantic_pool_path,
 )
+from aoci_core.test_impact import find_impacted_tests  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -4068,6 +4070,12 @@ def search_entries_bm25_detailed(
     )
 
 
+def _print_impacted_tests(impacted_tests: Sequence[Dict[str, Any]]) -> None:
+    print(f"\n## Impacted Tests ({len(impacted_tests)})")
+    for item in impacted_tests:
+        print(f"  [{item['reason']}, hop={item['hop']}, via={item['via']}] {item['entry']}")
+
+
 def cmd_query(args: argparse.Namespace) -> int:
     root = resolve_root(args.root)
     code_path = root / AOCI_DIR_NAME / CODE_FILE
@@ -4077,18 +4085,37 @@ def cmd_query(args: argparse.Namespace) -> int:
 
     entries, _ = parse_code_volume(code_path)
     impact_target = normalize_relpath(args.impact) if args.impact else None
+    raw_tests_for = getattr(args, "tests_for", None)
+    tests_for_target = normalize_relpath(raw_tests_for) if raw_tests_for else None
     keyword = args.keyword.lower() if args.keyword else None
     layer_set = _parse_code_filter_set(args.layer)
     domain_set = _parse_code_filter_set(args.domain)
     search_q = getattr(args, "search", None)
     raw_top = getattr(args, "top", None)
     top_k = (20 if search_q else 0) if raw_top is None else int(raw_top)
+    raw_depth = getattr(args, "depth", None)
+    impact_depth = int(raw_depth) if raw_depth is not None else 1
+    tests_depth = int(raw_depth) if raw_depth is not None else 3
 
+    dependents: Optional[Dict[str, Set[str]]] = None
     impact_set: Optional[Set[str]] = None
-    if impact_target:
-        # Impact = the target plus every entry that (transitively, up to --depth) depends on it
+    if impact_target or tests_for_target:
         _, dependents = build_fras_graph(entries)
-        impact_set = {impact_target} | set(bfs_neighbors(dependents, [impact_target], args.depth))
+    if impact_target and dependents is not None:
+        # Impact = the target plus every entry that (transitively, up to --depth) depends on it
+        impact_set = {impact_target} | set(bfs_neighbors(dependents, [impact_target], impact_depth))
+
+    impacted_tests: Optional[List[Dict[str, Any]]] = None
+    impacted_test_paths: Optional[Set[str]] = None
+    if tests_for_target and dependents is not None:
+        impacted_tests = _test_impact.find_impacted_tests(
+            root,
+            entries,
+            dependents,
+            [tests_for_target],
+            max_depth=tests_depth,
+        )
+        impacted_test_paths = {item["path"] for item in impacted_tests}
 
     filtered_paths: Set[str] = set()
     results: List[str] = []
@@ -4108,8 +4135,15 @@ def cmd_query(args: argparse.Namespace) -> int:
             continue
         if impact_set is not None and rel not in impact_set:
             continue
+        if impacted_test_paths is not None and rel not in impacted_test_paths:
+            continue
         filtered_paths.add(rel)
         results.append(line)
+
+    if impacted_tests is not None:
+        impacted_tests = [item for item in impacted_tests if item["path"] in filtered_paths]
+        if not search_q:
+            results = [item["entry"] for item in impacted_tests]
 
     scores_out: Optional[List[Dict[str, Any]]] = None
     glossary_expansions: List[Dict[str, Any]] = []
@@ -4124,8 +4158,13 @@ def cmd_query(args: argparse.Namespace) -> int:
         )
         results = [h["entry"] for h in hits]
         scores_out = hits
+        if impacted_tests is not None:
+            hit_paths = {h["path"] for h in hits}
+            impacted_tests = [item for item in impacted_tests if item["path"] in hit_paths]
     elif top_k > 0:
         results = results[:top_k]
+        if impacted_tests is not None:
+            impacted_tests = impacted_tests[:top_k]
 
     if args.json:
         payload: Dict[str, Any] = {"count": len(results), "entries": results}
@@ -4133,6 +4172,8 @@ def cmd_query(args: argparse.Namespace) -> int:
             payload["scores"] = scores_out
         if glossary_expansions:
             payload["glossary_expansions"] = glossary_expansions
+        if impacted_tests is not None:
+            payload["impacted_tests"] = impacted_tests
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"# Query matches: {len(results)} / {len(entries)}")
@@ -4148,6 +4189,10 @@ def cmd_query(args: argparse.Namespace) -> int:
                     else ""
                 )
                 print(f"#   match: score={item['score']}, terms=[{', '.join(item.get('matched_terms', []))}]{g_note}")
+        elif impacted_tests is not None:
+            for item in impacted_tests:
+                print(item["entry"])
+                print(f"#   test-impact: reason={item['reason']}, hop={item['hop']}, via={item['via']}")
         else:
             for line in results:
                 print(line)
@@ -4172,6 +4217,7 @@ def cmd_context(args: argparse.Namespace) -> int:
     deps_adj, dependents_adj = build_fras_graph(entries)
     invariants = parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-"
     budget = int(getattr(args, "budget", 0) or 0)
+    with_tests = bool(getattr(args, "with_tests", False))
     payload = build_context_subgraph(
         root,
         entries,
@@ -4182,6 +4228,14 @@ def cmd_context(args: argparse.Namespace) -> int:
         depth=args.depth,
         budget=budget,
     )
+    if with_tests:
+        payload["impacted_tests"] = _test_impact.find_impacted_tests(
+            root,
+            entries,
+            dependents_adj,
+            args.paths,
+            max_depth=max(3, int(args.depth)),
+        )
 
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -4203,6 +4257,8 @@ def cmd_context(args: argparse.Namespace) -> int:
     print(f"\n## Dependents / Upstream Callers ({len(payload['callers'])})")
     for ln in payload["callers"]:
         print(ln)
+    if with_tests:
+        _print_impacted_tests(payload.get("impacted_tests", []))
     if payload.get("truncated"):
         print(f"\n# Omitted under --budget ({payload['omitted_count']}): {', '.join(payload['omitted_paths'])}")
     return 0
@@ -4698,6 +4754,7 @@ def compute_diff_briefing(
     cached_deps: Optional[Dict[str, Set[str]]] = None,
     cached_dependents: Optional[Dict[str, Set[str]]] = None,
     cached_invariants: Optional[str] = None,
+    with_tests: bool = False,
 ) -> Dict[str, Any]:
     """
     Build a focused architectural impact packet for Git working-tree or revision diffs:
@@ -4868,7 +4925,7 @@ def compute_diff_briefing(
             dep_constraints.append({"path": dp, "importance": int(df["imp"]), "s": df["s"]})
     dep_constraints.sort(key=lambda item: (-int(item["importance"]), str(item["path"])))
 
-    return {
+    brief: Dict[str, Any] = {
         "ok": True,
         "root": str(root),
         "scope": rev or ("--staged" if staged else "working-tree"),
@@ -4881,16 +4938,27 @@ def compute_diff_briefing(
         "deleted_entries": deleted_indexed,
         "affected_neighbors": neighbor_lines,
     }
+    if with_tests:
+        brief["impacted_tests"] = _test_impact.find_impacted_tests(
+            root,
+            entries,
+            dependents,
+            seed_paths,
+            max_depth=max(3, int(depth)),
+        )
+    return brief
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
     root = resolve_root(args.root)
+    with_tests = bool(getattr(args, "with_tests", False))
     brief = compute_diff_briefing(
         root,
         rev=args.rev,
         staged=args.staged,
         depth=args.depth,
         max_bytes=args.max_bytes,
+        with_tests=with_tests,
     )
     if not brief.get("ok"):
         print(f"ERROR: {brief.get('error')}", file=sys.stderr)
@@ -4923,6 +4991,8 @@ def cmd_diff(args: argparse.Namespace) -> int:
     print(f"\n## Affected Upstream Neighbors (depth={args.depth}, count={len(brief['affected_neighbors'])})")
     for ln in brief["affected_neighbors"]:
         print(ln)
+    if with_tests:
+        _print_impacted_tests(brief.get("impacted_tests", []))
     return 0
 
 
@@ -5649,7 +5719,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_q.add_argument("--search", help="Ranked multi-term BM25 + Importance search across path/symbols/F/R/A/S")
     p_q.add_argument("--top", type=int, default=None, help="Maximum entries to return (default: 20 with --search; 0 = unlimited)")
     p_q.add_argument("--impact", help="Target file plus every entry that depends on it (via R: or A: callers)")
-    p_q.add_argument("--depth", type=int, default=1, help="Transitive hops for --impact (default: 1)")
+    p_q.add_argument("--tests-for", help="Target file to find impacted T-layer test files (FRAS + outline + naming)")
+    p_q.add_argument("--depth", type=int, default=None, help="Transitive hops (default: 1 for --impact, 3 for --tests-for)")
     p_q.add_argument("--json", action="store_true", help="Output JSON")
     p_q.set_defaults(func=cmd_query)
 
@@ -5658,6 +5729,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ctx.add_argument("--root", help="Target codebase root")
     p_ctx.add_argument("--depth", type=int, default=1, help="Graph expansion hops (default: 1)")
     p_ctx.add_argument("--budget", type=int, default=0, help="Optional token budget ceiling (0 = unlimited)")
+    p_ctx.add_argument("--with-tests", action="store_true", help="Attach impacted T-layer test files")
     p_ctx.add_argument("--json", action="store_true", help="Output JSON")
     p_ctx.set_defaults(func=cmd_context)
 
@@ -5715,6 +5787,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("--root", help="Target codebase root")
     p_diff.add_argument("--staged", action="store_true", help="Inspect staged (`--cached`) diff")
     p_diff.add_argument("--depth", type=int, default=1, help="Upstream caller hops (default: 1)")
+    p_diff.add_argument("--with-tests", action="store_true", help="Attach impacted T-layer test files")
     p_diff.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_diff.add_argument("--json", action="store_true", help="Output JSON")
     p_diff.set_defaults(func=cmd_diff)

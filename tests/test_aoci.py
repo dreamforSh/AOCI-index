@@ -3554,4 +3554,5 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
 
 if __name__ == "__main__":
+    from test_ext_tests import TestImpactTests  # noqa: F401
     unittest.main(verbosity=2)
