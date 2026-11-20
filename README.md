@@ -1,13 +1,47 @@
-# AOCI Codebase Fast Index (`aoci-index`)
+<div align="center">
 
-![Version 1.5.0](https://img.shields.io/badge/version-1.5.0-0ea5e9)
-![Python 3.8+ Zero Deps](https://img.shields.io/badge/python-3.8%2B%20%7C%20zero--deps-3776ab)
-![MCP 2024-11-05 · 2025-03-26 · 2025-06-18](https://img.shields.io/badge/MCP-2024--11--05%20%C2%B7%202025--03--26%20%C2%B7%202025--06--18-6366f1)
-![Hosts: Claude Code · Antigravity](https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity-10b981)
+<img src="assets/logo.svg" width="120" height="120" alt="AOCI logo">
 
-A zero-dependency Python 3.8+ **AI-Oriented Codebase Indexing** (`.aoci/`) engine, BM25/FRAS graph reader, dual-host lifecycle guard, and stdio MCP server for **Claude Code** and **Antigravity**. A single read pass gives coding agents repository-wide architectural orientation, cross-file dependencies, and non-obvious invariants while keeping `.aoci/` strictly local via `.git/info/exclude`.
+<h1>AOCI Codebase Fast Index</h1>
 
-## What `.aoci/` Looks Like
+<p>
+  <b>AI-Oriented Codebase Indexing for coding agents</b><br>
+  <sub>One read pass &rarr; repository-wide architecture, cross-file dependencies &amp; non-obvious invariants</sub>
+</p>
+
+<p>
+  <a href="./pyproject.toml"><img src="https://img.shields.io/badge/version-1.5.0-0EA5E9?style=flat-square" alt="Version 1.5.0"></a>
+  <a href="https://github.com/dreamforSh/AOCI-index/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dreamforSh/AOCI-index/ci.yml?style=flat-square&label=CI&logo=githubactions&logoColor=white" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/dependencies-zero-10B981?style=flat-square" alt="Zero dependencies">
+  <img src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-64748B?style=flat-square" alt="Linux · macOS · Windows">
+</p>
+<p>
+  <img src="https://img.shields.io/badge/MCP-2024--11--05%20%C2%B7%202025--03--26%20%C2%B7%202025--06--18-6366F1?style=flat-square&logo=modelcontextprotocol&logoColor=white" alt="MCP 2024-11-05 · 2025-03-26 · 2025-06-18">
+  <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity-D97757?style=flat-square&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity">
+</p>
+
+<p>
+  <a href="#-index-format"><b>Format</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#-key-features"><b>Features</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#-quick-start"><b>Quick Start</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#-installation"><b>Install</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#-architecture"><b>Architecture</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#-cli--mcp-reference"><b>Reference</b></a>&nbsp;&nbsp;·&nbsp;&nbsp;
+  <a href="#-documentation--testing"><b>Docs</b></a>
+</p>
+
+</div>
+
+---
+
+**`aoci-index`** is a zero-dependency Python 3.8+ **AI-Oriented Codebase Indexing** (`.aoci/`) engine — a BM25/FRAS graph reader, dual-host lifecycle guard, and stdio MCP server for **Claude Code** and **Antigravity**.
+
+A single read pass gives coding agents repository-wide architectural orientation, cross-file dependencies, and non-obvious invariants — while `.aoci/` stays strictly local via `.git/info/exclude`.
+
+## <img src="assets/icons/format.svg" width="28" height="28" align="top" alt=""> Index Format
+
+What `.aoci/` looks like:
 
 ```text
 # aoci.txt (Root Manifest)
@@ -21,21 +55,32 @@ src/order/service.py[AO9M]: F:Orchestrates idempotent order creation and stock r
 src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves inventory row-locked, and records order atomically | S:Must hold SELECT FOR UPDATE before payment intent creation
 ```
 
-- **`[LDIS]`**: `L` Layer (`E A D K P I M U C R T O`) · `D` Domain (`[A-Z0-9]`) · `I` Importance (`1`-`9`) · `S` Size tier (`T/S/M/L/H`, auto-verified from line count).
-- **`F/R/A/S`**: `F:` Responsibility · `R:` Read-along dependencies · `A:` Exports & `<-callers` · `S:` Non-obvious stability, ordering, or security traps.
+| Coordinate | Meaning |
+| :---: | :--- |
+| **`L`** | Layer — `E A D K P I M U C R T O` |
+| **`D`** | Domain — `[A-Z0-9]` |
+| **`I`** | Importance — `1`–`9` |
+| **`S`** | Size tier — `T/S/M/L/H`, auto-verified from line count |
 
-## Key Features
+| Field | Meaning |
+| :---: | :--- |
+| **`F:`** | Responsibility |
+| **`R:`** | Read-along dependencies |
+| **`A:`** | Exports &amp; `<-callers` |
+| **`S:`** | Non-obvious stability, ordering, or security traps |
 
-- **Single-Pass Codebase Map (`object-fras-v2`)**: Dense one-line-per-file codebase map in `.aoci/aoci.code.txt`, paired with `#Global-Invariants:` (`aoci.txt`), `[LDIS]` coordinates and bilingual `#Glossary:` aliases (`aoci.meta.txt`), and auto-synced directory shards (`shard`) for 10k+ file monorepos.
-- **Task-Driven Context Packing & Test Impact**: `pack` / `aoci_pack` builds token-budgeted context packets from BM25, glossary expansion, explicit path mentions (`PathMentionIndex`), L1.5 hub sections, and working-tree Git diffs (`--with-tests` attaches impacted tests; `--live-anchors` extracts symbol anchors on cold cache without mutating disk).
-- **H-Tier Symbol Zoom & Auto-Lifecycle (`aoci.hubs.txt`)**: `zoom` / `aoci_zoom` extracts and verifies `[Lstart-Lend]` symbol-level sections for large (`>= 1000`-line) hub files, automatically registering `hubs` in `aoci.txt`, refreshing/pruning spans during `upsert`, migrating renames in `migrate-renames`, surfacing `hub_sections` in `context`/`diff`/`pack`, and validating spans in `verify`/`lint`.
-- **Single-Pass Sync Briefing (`prepare-sync` / `aoci_prepare_sync`)**: One command aggregates pool restorable counts, renames, `impl_only` vs `contract_changed` splits (with previous entries, outlines, and bounded git diffs), auto-generated scaffolds for added files, affected neighbors, and ordered sync steps.
-- **Sub-Second Drift, Rename & Branch Sync**: LF-normalized SHA-256 + `(mtime, size)` baseline (`baseline.json`, schema v2), multi-language rich `sig_hash` classification (`impl_only` vs `contract_changed` for Python, JS/TS/Vue/Svelte, Go, Rust, JVM/C#, C/C++, Proto/GraphQL/Prisma/SQL), exact and MinHash moved+edited rename migration (`migrate-renames`), and zero-token `restore` from a cross-worktree SQLite WAL semantic pool (`<git-common-dir>/aoci-cache`).
-- **Warm In-Memory Stdio MCP Server (`aoci_mcp.py`)**: Serves **22 annotated tools** (lock-free `contextvars` CLI capture + in-process `aoci_outline`/`aoci_lint`/`aoci_zoom(read)`/`aoci_prepare_sync`), **5 static resources**, **2 URI templates**, and **3 workflow prompts** over newline-delimited JSON-RPC 2.0 or `Content-Length` framing.
-- **Architectural Audit & Interactive Graph Export**: Cross-checks FRAS edges against static imports (including `.proto` & C/C++ includes and monorepo nested `tsconfig.json`/`go.mod`), detects Tarjan SCC dependency cycles, enforces `#Layer-Rules:`, mines Git co-change coupling (`audit --co-change`), and exports Mermaid, Graphviz DOT, or standalone zero-CDN interactive HTML graphs (`export --format html`).
-- **Dual-Host Lifecycle Guardrails & Local Git Exclusion**: `SessionStart`, optional `UserPromptSubmit`/`PreInvocation` turn-start snapshot refresh, and session-scoped convergent `Stop` gate for **Claude Code** and **Antigravity**, keeping `.aoci/` excluded in `.git/info/exclude` without dirtying tracked `.gitignore`.
+## <img src="assets/icons/features.svg" width="28" height="28" align="top" alt=""> Key Features
 
-## Quick Start
+- **Single-Pass Codebase Map (`object-fras-v2`)** — Dense one-line-per-file codebase map in `.aoci/aoci.code.txt`, paired with `#Global-Invariants:` (`aoci.txt`), `[LDIS]` coordinates and bilingual `#Glossary:` aliases (`aoci.meta.txt`), and auto-synced directory shards (`shard`) for 10k+ file monorepos.
+- **Task-Driven Context Packing &amp; Test Impact** — `pack` / `aoci_pack` builds token-budgeted context packets from BM25, glossary expansion, explicit path mentions (`PathMentionIndex`), L1.5 hub sections, and working-tree Git diffs (`--with-tests` attaches impacted tests; `--live-anchors` extracts symbol anchors on cold cache without mutating disk).
+- **H-Tier Symbol Zoom &amp; Auto-Lifecycle (`aoci.hubs.txt`)** — `zoom` / `aoci_zoom` extracts and verifies `[Lstart-Lend]` symbol-level sections for large (`>= 1000`-line) hub files, automatically registering `hubs` in `aoci.txt`, refreshing/pruning spans during `upsert`, migrating renames in `migrate-renames`, surfacing `hub_sections` in `context`/`diff`/`pack`, and validating spans in `verify`/`lint`.
+- **Single-Pass Sync Briefing (`prepare-sync` / `aoci_prepare_sync`)** — One command aggregates pool restorable counts, renames, `impl_only` vs `contract_changed` splits (with previous entries, outlines, and bounded git diffs), auto-generated scaffolds for added files, affected neighbors, and ordered sync steps.
+- **Sub-Second Drift, Rename &amp; Branch Sync** — LF-normalized SHA-256 + `(mtime, size)` baseline (`baseline.json`, schema v2), multi-language rich `sig_hash` classification (`impl_only` vs `contract_changed` for Python, JS/TS/Vue/Svelte, Go, Rust, JVM/C#, C/C++, Proto/GraphQL/Prisma/SQL), exact and MinHash moved+edited rename migration (`migrate-renames`), and zero-token `restore` from a cross-worktree SQLite WAL semantic pool (`<git-common-dir>/aoci-cache`).
+- **Warm In-Memory Stdio MCP Server (`aoci_mcp.py`)** — Serves **22 annotated tools** (lock-free `contextvars` CLI capture + in-process `aoci_outline`/`aoci_lint`/`aoci_zoom(read)`/`aoci_prepare_sync`), **5 static resources**, **2 URI templates**, and **3 workflow prompts** over newline-delimited JSON-RPC 2.0 or `Content-Length` framing.
+- **Architectural Audit &amp; Interactive Graph Export** — Cross-checks FRAS edges against static imports (including `.proto` &amp; C/C++ includes and monorepo nested `tsconfig.json`/`go.mod`), detects Tarjan SCC dependency cycles, enforces `#Layer-Rules:`, mines Git co-change coupling (`audit --co-change`), and exports Mermaid, Graphviz DOT, or standalone zero-CDN interactive HTML graphs (`export --format html`).
+- **Dual-Host Lifecycle Guardrails &amp; Local Git Exclusion** — `SessionStart`, optional `UserPromptSubmit`/`PreInvocation` turn-start snapshot refresh, and session-scoped convergent `Stop` gate for **Claude Code** and **Antigravity**, keeping `.aoci/` excluded in `.git/info/exclude` without dirtying tracked `.gitignore`.
+
+## <img src="assets/icons/quickstart.svg" width="28" height="28" align="top" alt=""> Quick Start
 
 ```bash
 # 1. Initialize .aoci/ and enforce local Git exclusion
@@ -54,7 +99,7 @@ python scripts/aoci_index.py diff --root <repo> --with-tests
 python scripts/aoci_index.py verify --root <repo> && python scripts/aoci_index.py lint --root <repo>
 ```
 
-## Installation
+## <img src="assets/icons/install.svg" width="28" height="28" align="top" alt=""> Installation
 
 ### Claude Code
 
@@ -84,9 +129,12 @@ aoci-index --version   # aoci-index 1.5.0
 aoci-mcp               # launches the stdio MCP server
 ```
 
-See [references/hooks-and-install.md](./references/hooks-and-install.md) for manual setup, `--keep-config`, and hook contract verification.
+> [!TIP]
+> See [references/hooks-and-install.md](./references/hooks-and-install.md) for manual setup, `--keep-config`, and hook contract verification.
 
-## Architecture & `.aoci/` Layout
+## <img src="assets/icons/architecture.svg" width="28" height="28" align="top" alt=""> Architecture
+
+### Source layout
 
 ```text
 scripts/
@@ -109,6 +157,8 @@ scripts/
     └── githooks.py      # Idempotent post-checkout/post-merge/post-rewrite/pre-commit hooks
 ```
 
+### `.aoci/` layout
+
 ```text
 <repo>/.aoci/
 ├── aoci.txt             # Root manifest: #Project, #Global-Invariants, volume layout, #Read-Order
@@ -123,7 +173,7 @@ scripts/
 └── .cache/              # Git exclusion, Git discovery, outline, scan_fps & batch_plan caches
 ```
 
-## CLI & MCP Reference
+## <img src="assets/icons/cli.svg" width="28" height="28" align="top" alt=""> CLI & MCP Reference
 
 | Action | CLI (`python scripts/aoci_index.py ...`) | MCP Tool (`scripts/aoci_mcp.py`) |
 | :--- | :--- | :--- |
@@ -151,19 +201,33 @@ scripts/
 | Repair Git exclusion | `ensure-git-exclude --root <repo>` | `aoci_ensure_git_exclude` |
 | Local Git hooks | `install-git-hooks --root <repo> [--with-pre-commit]` | `—` *(CLI-only)* |
 
-- **MCP Resources (5)**: `aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://hubs`, `aoci://shards/INDEX`.
-- **MCP URI Templates (2)**: `aoci://shards/{shard}`, `aoci://{volume}?root={root}`.
-- **MCP Prompts (3)**: `aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`.
+| MCP surface | Entries |
+| :--- | :--- |
+| **Resources (5)** | `aoci://manifest` · `aoci://meta` · `aoci://code` · `aoci://hubs` · `aoci://shards/INDEX` |
+| **URI Templates (2)** | `aoci://shards/{shard}` · `aoci://{volume}?root={root}` |
+| **Prompts (3)** | `aoci-bootstrap` · `aoci-review-diff` · `aoci-sync` |
 
-## Documentation & Testing
+## <img src="assets/icons/docs.svg" width="28" height="28" align="top" alt=""> Documentation & Testing
 
-- Skill protocol & workflows: [SKILL.md](./SKILL.md)
-- Format spec & scaling architecture: [references/aoci-format-spec.md](./references/aoci-format-spec.md)
-- Installation & lifecycle hook contracts: [references/hooks-and-install.md](./references/hooks-and-install.md)
-- Worked index examples: [examples/](./examples/)
+| Topic | Link |
+| :--- | :--- |
+| Skill protocol & workflows | [SKILL.md](./SKILL.md) |
+| Format spec & scaling architecture | [references/aoci-format-spec.md](./references/aoci-format-spec.md) |
+| Installation & lifecycle hook contracts | [references/hooks-and-install.md](./references/hooks-and-install.md) |
+| Worked index examples | [examples/](./examples/) |
 
 ```bash
 # Run with base Python on PATH (stdlib unittest only, requires git)
 python -B tests/test_aoci.py
 python -B -m unittest discover -s tests -p "test_*.py"
 ```
+
+---
+
+<div align="center">
+  <img src="assets/logo.svg" width="32" height="32" alt="">
+  <br>
+  <sub>Zero dependencies &middot; Local-only <code>.aoci/</code> &middot; Built for Claude Code &amp; Antigravity</sub>
+  <br>
+  <sub><a href="#readme">Back to top</a></sub>
+</div>
