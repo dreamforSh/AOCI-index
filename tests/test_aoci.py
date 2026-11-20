@@ -1840,6 +1840,7 @@ class Phase1FixesTests(RepoTestCase):
                 "aoci_audit",
                 "aoci_export",
                 "aoci_pool",
+                "aoci_pack",
             },
         )
         for t_name, t_spec in tools.items():
@@ -3554,4 +3555,6 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
 
 if __name__ == "__main__":
+    from test_ext_pack import TaskPackTests  # noqa: F401
+
     unittest.main(verbosity=2)

@@ -472,6 +472,34 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "required": ["root"],
         },
     },
+    {
+        "name": "aoci_pack",
+        "description": (
+            "Build a task-driven, token-budgeted context packet: BM25 + bilingual glossary + path-mention + diff seeds, "
+            "R:/A: graph neighborhood, S: critical constraints, and prioritized open_next files with cached symbol anchors."
+        ),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "task": {"type": "string", "description": "Task description or query to pack context for"},
+                "include_diff": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Include Git working-tree diff signals when inside a Git repository",
+                },
+                "depth": {"type": "integer", "default": 1, "description": "Graph expansion hops around seeds"},
+                "budget": {
+                    "type": "integer",
+                    "default": 2500,
+                    "description": "Token budget ceiling (0 = unlimited)",
+                },
+                "top_seeds": {"type": "integer", "default": 8, "description": "Maximum BM25 seed hits"},
+            },
+            "required": ["root", "task"],
+        },
+    },
 ]
 
 
@@ -903,6 +931,47 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
         return rc != 0, out
+
+    if name == "aoci_pack":
+        slot = _CACHE.get(root)
+        if slot is None:
+            return True, f"ERROR: `.aoci/aoci.code.txt` not found at {root}. Run `init` first."
+        task_q = args.get("task")
+        if task_q is None or not str(task_q).strip():
+            return True, "ERROR: `task` parameter is required for `aoci_pack`."
+        include_diff = bool(args.get("include_diff", True))
+        diff_brief: Optional[Dict[str, Any]] = None
+        if include_diff:
+            cand_diff = aoci_index.compute_diff_briefing(
+                root,
+                depth=1,
+                cached_entries=slot["entries"],
+                cached_deps=slot["deps"],
+                cached_dependents=slot["dependents"],
+                cached_invariants=slot["invariants"],
+            )
+            if cand_diff.get("ok"):
+                diff_brief = cand_diff
+        bm25 = _CACHE.get_bm25(slot)
+        depth_val = int(args["depth"]) if args.get("depth") is not None else 1
+        budget_val = int(args["budget"]) if args.get("budget") is not None else 2500
+        top_seeds_val = int(args["top_seeds"]) if args.get("top_seeds") is not None else 8
+        payload = aoci_index.build_task_pack(
+            root,
+            slot["entries"],
+            slot["deps"],
+            slot["dependents"],
+            slot["invariants"],
+            slot["domains"],
+            slot.get("glossary", ()),
+            task=str(task_q),
+            diff_brief=diff_brief,
+            depth=depth_val,
+            budget=budget_val,
+            top_seeds=top_seeds_val,
+            bm25_index=bm25,
+        )
+        return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
     return True, f"Unknown tool: `{name}`"
 

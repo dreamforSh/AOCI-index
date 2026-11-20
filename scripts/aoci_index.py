@@ -36,6 +36,8 @@ Subcommands:
                       pool after branch switches, rebases, or new worktrees.
   diff                Generate an architectural impact briefing (FRAS + S: traps +
                       upstream neighbors) for working-tree or Git revision diffs.
+  pack                Build a task-driven, token-budgeted context packet (BM25 +
+                      glossary + path mentions + diff + R:/A: + S: + open_next).
   scaffold            Pre-fill [LDIS], resolved internal R: imports, and repo-wide A:
                       callers from static analysis (<TODO> F:/S: requires reading code).
   ensure-git-exclude  Idempotently enforce `.aoci/` exclusion in `.git/info/exclude`
@@ -72,6 +74,7 @@ if _SCRIPT_DIR not in sys.path:
 
 from aoci_core import githooks as _githooks  # noqa: E402
 from aoci_core import graph as _graph  # noqa: E402
+from aoci_core import pack as _pack  # noqa: E402
 from aoci_core import parsers as _parsers  # noqa: E402
 from aoci_core import pool as _pool  # noqa: E402
 from aoci_core.constants import (  # noqa: E402
@@ -178,6 +181,7 @@ from aoci_core.graph import (  # noqa: E402
     semantic_word_count,
     validate_parsed_entry_tags,
 )
+from aoci_core.pack import build_task_pack  # noqa: E402
 from aoci_core.parsers import (  # noqa: E402
     _CLEAN_SYM_RE,
     _GO_SYM_RE,
@@ -4926,6 +4930,99 @@ def cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pack(args: argparse.Namespace) -> int:
+    root = resolve_root(args.root)
+    aoci_dir = root / AOCI_DIR_NAME
+    code_path = aoci_dir / CODE_FILE
+    if not code_path.exists():
+        msg = f"`{code_path}` not found. Run `init` first."
+        if args.json:
+            print(json.dumps({"ok": False, "error": msg}, indent=2, ensure_ascii=False))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 2
+
+    entries, _ = parse_code_volume(code_path)
+    deps_adj, dependents_adj = build_fras_graph(entries)
+    invariants = parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-"
+    domains = parse_declared_domains(aoci_dir)
+    glossary = parse_glossary(aoci_dir)
+
+    diff_brief: Optional[Dict[str, Any]] = None
+    if not args.no_diff:
+        cand_diff = compute_diff_briefing(
+            root,
+            depth=1,
+            max_bytes=args.max_bytes,
+            cached_entries=entries,
+            cached_deps=deps_adj,
+            cached_dependents=dependents_adj,
+            cached_invariants=invariants,
+        )
+        if cand_diff.get("ok"):
+            diff_brief = cand_diff
+
+    bm25 = BM25Index(entries) if entries else None
+    pack_obj = _pack.build_task_pack(
+        root,
+        entries,
+        deps_adj,
+        dependents_adj,
+        invariants,
+        domains,
+        glossary,
+        task=args.task,
+        diff_brief=diff_brief,
+        depth=args.depth,
+        budget=args.budget,
+        top_seeds=args.top_seeds,
+        bm25_index=bm25,
+    )
+
+    if args.json:
+        print(json.dumps(pack_obj, indent=2, ensure_ascii=False))
+        return 0
+
+    trunc_note = f" | Omitted={pack_obj['omitted_count']}" if pack_obj.get("truncated") else ""
+    budget_str = (
+        f"~{pack_obj['estimated_tokens']}/{pack_obj['budget']} tokens{trunc_note}"
+        if pack_obj["budget"] > 0
+        else f"~{pack_obj['estimated_tokens']} tokens"
+    )
+    print(f"# AOCI Task Pack (depth={args.depth}, {budget_str})")
+    print(f"# Task: {pack_obj['task']}")
+    print(f"# Global-Invariants: {pack_obj['global_invariants']}")
+    if pack_obj.get("glossary_expansions"):
+        exp_txt = "; ".join(f"{e['term']} -> {', '.join(e['aliases'])}" for e in pack_obj["glossary_expansions"])
+        print(f"# Glossary: {exp_txt}")
+    if pack_obj["critical_constraints"]:
+        print(f"\n## Critical S: Constraints ({len(pack_obj['critical_constraints'])})")
+        for item in pack_obj["critical_constraints"]:
+            print(f"  ! {item['path']} [I={item['importance']}]: {item['s']}")
+    print(f"\n## Seeds ({len(pack_obj['seeds'])})")
+    for seed in pack_obj["seeds"]:
+        reasons_str = ",".join(seed["reasons"])
+        print(f"{seed['entry']}  # [{reasons_str}, score={seed['score']}]")
+    print(f"\n## Dependencies / Read-Along ({len(pack_obj['dependencies'])})")
+    for ln in pack_obj["dependencies"]:
+        print(ln)
+    print(f"\n## Dependents / Upstream Callers ({len(pack_obj['callers'])})")
+    for ln in pack_obj["callers"]:
+        print(ln)
+    if pack_obj["unindexed_changed"]:
+        print(f"\n## Unindexed Changed/New Files ({len(pack_obj['unindexed_changed'])})")
+        for p in pack_obj["unindexed_changed"]:
+            print(f"  + {p}")
+    if pack_obj["open_next"]:
+        print(f"\n## Open Next ({len(pack_obj['open_next'])})")
+        for item in pack_obj["open_next"]:
+            syms = f" -> {', '.join(item['symbols'])}" if item.get("symbols") else ""
+            print(f"  - {item['path']} ({item['kind']}: {', '.join(item['reasons'])}){syms}")
+    if pack_obj.get("truncated") and pack_obj.get("omitted_paths"):
+        print(f"\n# Omitted under --budget ({pack_obj['omitted_count']}): {', '.join(pack_obj['omitted_paths'])}")
+    return 0
+
+
 def build_static_import_graph(
     root: Path,
     discovered_files: Sequence[str],
@@ -5807,6 +5904,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_gh.add_argument("--dry-run", action="store_true", help="Preview hook actions without writing")
     p_gh.add_argument("--json", action="store_true", help="Output JSON")
     p_gh.set_defaults(func=cmd_install_git_hooks)
+
+    p_pack = sub.add_parser(
+        "pack",
+        help="Build a task-driven, token-budgeted context pack (seeds + R:/A: neighborhood + S: traps + open_next)",
+    )
+    p_pack.add_argument("--task", required=True, help="Task description or query to pack context for")
+    p_pack.add_argument("--root", help="Target codebase root")
+    p_pack.add_argument("--no-diff", action="store_true", help="Exclude working-tree Git diff signals")
+    p_pack.add_argument("--depth", type=int, default=1, help="Graph expansion hops around seeds (default: 1)")
+    p_pack.add_argument("--budget", type=int, default=2500, help="Token budget ceiling (default: 2500; 0 = unlimited)")
+    p_pack.add_argument("--top-seeds", type=int, default=8, help="Maximum BM25 seed hits (default: 8)")
+    p_pack.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_pack.add_argument("--json", action="store_true", help="Output JSON")
+    p_pack.set_defaults(func=cmd_pack)
 
     return p
 
