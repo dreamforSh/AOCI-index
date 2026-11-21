@@ -443,7 +443,9 @@ class FeatureExtensionsTests(RepoTestCase):
             shutil.copytree(
                 SKILL_DIR,
                 clone_dir,
-                ignore=shutil.ignore_patterns(".git", ".aoci", "__pycache__", "tests", "dist", "build"),
+                ignore=shutil.ignore_patterns(
+                    ".git", ".aoci", "__pycache__", "tests", "dist", "build", ".venv", "venv", ".idea", "*.egg-info"
+                ),
             )
             cli_json("init", "--root", str(clone_dir))
             # Declare project domains matching `self-pool.json.gz` (`G`, `K`, `M`, `H`, `P`)
@@ -460,8 +462,132 @@ class FeatureExtensionsTests(RepoTestCase):
 
             rest_self = cli_json("restore", "--root", str(clone_dir), "--json")
             self.assertTrue(rest_self["ok"], rest_self)
-            self.assertGreaterEqual(len(rest_self["restored"]), 20)
-            self.assertGreaterEqual(len(rest_self.get("restored_hubs", [])), 4)
+            self.assertGreaterEqual(
+                len(rest_self["restored"]),
+                20,
+                "examples/self-pool.json.gz is out of date; run `python .github/scripts/refresh_self_pool.py`.",
+            )
+            self.assertGreaterEqual(
+                len(rest_self.get("restored_hubs", [])),
+                4,
+                "examples/self-pool.json.gz hubs are out of date; run `python .github/scripts/refresh_self_pool.py`.",
+            )
+
+    def test_8_refresh_self_pool_script_check_and_deterministic_roundtrip(self):
+        refresh_script = SKILL_DIR / ".github" / "scripts" / "refresh_self_pool.py"
+        self.assertTrue(refresh_script.is_file(), f"Missing {refresh_script}")
+
+        # 1) Live repository self-pool MUST report zero stale files or hubs
+        live_chk = subprocess.run(
+            [sys.executable, "-B", str(refresh_script), "--root", str(SKILL_DIR), "--check"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            live_chk.returncode,
+            0,
+            f"examples/self-pool.json.gz is stale!\n{live_chk.stdout}{live_chk.stderr}\n"
+            "Fix by running: python .github/scripts/refresh_self_pool.py",
+        )
+        self.assertIn("0 stale", live_chk.stdout)
+
+        # 2) In an isolated sandbox, `--check` reports stale file + hub without modifying the bundle,
+        #    and running refresh with `--entry-file` deterministically updates SHAs (`mtime=0`).
+        with tempfile.TemporaryDirectory() as td:
+            sb = Path(td) / "sandbox"
+            (sb / "scripts").mkdir(parents=True)
+            (sb / "examples").mkdir(parents=True)
+            mod_file = sb / "scripts" / "sample.py"
+            mod_file.write_text("def alpha(x: int) -> int:\n    val = x + 1\n    return val\n", encoding="utf-8")
+
+            from aoci_core import hubs as _hubs_mod
+
+            norm_b = _hubs_mod._read_norm_bytes(mod_file)
+            span_sha = _hubs_mod.compute_span_body_sha256(norm_b, 1, 3)
+            init_bundle = {
+                "schema_version": 1,
+                "format": "aoci-semantic-pool-v1",
+                "exported_at": "2026-01-01T00:00:00Z",
+                "by_path_sha": [
+                    {
+                        "path": "scripts/sample.py",
+                        "sha256": "0" * 64,
+                        "entry": "scripts/sample.py[CK5T]: F:computes alpha offset | R:- | A:alpha | S:-",
+                    }
+                ],
+                "by_sha": [
+                    {
+                        "sha256": "0" * 64,
+                        "entry": "scripts/sample.py[CK5T]: F:computes alpha offset | R:- | A:alpha | S:-",
+                    }
+                ],
+                "hubs_by_symbol_sha": [
+                    {
+                        "path": "scripts/sample.py",
+                        "symbol": "alpha",
+                        "span_sha256": "f" * 64,
+                        "f": "increments input integer",
+                        "s": "pure arithmetic",
+                    }
+                ],
+            }
+            bundle_p = sb / "examples" / "self-pool.json.gz"
+            orig_gz = gzip.compress(
+                (json.dumps(init_bundle, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
+                compresslevel=9,
+                mtime=0,
+            )
+            bundle_p.write_bytes(orig_gz)
+
+            # Create symlink/copy to repo `scripts/aoci_core` so `--root sb` can bootstrap `aoci_core`
+            shutil.copytree(
+                SKILL_DIR / "scripts" / "aoci_core",
+                sb / "scripts" / "aoci_core",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+
+            stale_chk = subprocess.run(
+                [sys.executable, "-B", str(refresh_script), "--root", str(sb), "--check"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(stale_chk.returncode, 1)
+            self.assertIn("scripts/sample.py", stale_chk.stderr)
+            self.assertIn("scripts/sample.py#alpha", stale_chk.stderr)
+            self.assertIn("refresh_self_pool.py", stale_chk.stderr)
+            # `--check` must NOT modify disk!
+            self.assertEqual(bundle_p.read_bytes(), orig_gz)
+
+            ov_file = sb / "overrides.txt"
+            ov_file.write_text(
+                "scripts/sample.py[CK6T]: F:computes deterministic alpha offset | R:- | A:alpha | S:-\n",
+                encoding="utf-8",
+            )
+            ref_run = subprocess.run(
+                [sys.executable, "-B", str(refresh_script), "--root", str(sb), "--entry-file", str(ov_file)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(ref_run.returncode, 0, ref_run.stdout + ref_run.stderr)
+
+            raw_after = bundle_p.read_bytes()
+            # Gzip header bytes 4..8 store 32-bit little-endian mtime; deterministic builds require mtime == 0
+            self.assertEqual(int.from_bytes(raw_after[4:8], "little"), 0)
+            after_obj = json.loads(gzip.decompress(raw_after).decode("utf-8"))
+            self.assertEqual(after_obj["exported_at"], "2026-01-01T00:00:00Z")
+            self.assertIn("deterministic alpha offset", after_obj["by_path_sha"][0]["entry"])
+            self.assertEqual(after_obj["hubs_by_symbol_sha"][0]["span_sha256"], span_sha)
+
+            ok_chk = subprocess.run(
+                [sys.executable, "-B", str(refresh_script), "--root", str(sb), "--check"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(ok_chk.returncode, 0, ok_chk.stdout + ok_chk.stderr)
 
 
 if __name__ == "__main__":

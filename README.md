@@ -284,6 +284,10 @@ Speaks MCP JSON-RPC 2.0 over stdio (`2024-11-05` · `2025-03-26` · `2025-06-18`
 # Run with base Python on PATH (stdlib unittest only, requires git)
 python -B tests/test_aoci.py
 python -B -m unittest discover -s tests -p "test_*.py"
+
+# After modifying scripts/ (or other pooled files), refresh examples/self-pool.json.gz:
+python -B .github/scripts/refresh_self_pool.py
+python -B .github/scripts/refresh_self_pool.py --check
 ```
 
 ---
