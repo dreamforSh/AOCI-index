@@ -24,14 +24,14 @@ if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
 from test_aoci import HAS_GIT, RepoTestCase, SKILL_DIR, aoci_index  # noqa: E402
-from aoci_core import graph, lock, parsers  # noqa: E402
+from aoci_core import git_ops, graph, lock, parsers  # noqa: E402
 
 SNAPSHOT_PATH = _TESTS_DIR / "cli_help_snapshot.json"
 
 # Authoritative defining modules for monkeypatch seams (updated stage-by-stage as functions move).
 SEAM_TARGETS: Dict[str, Any] = {
-    "run_git": aoci_index,
-    "detect_git_info": aoci_index,
+    "run_git": git_ops,
+    "detect_git_info": git_ops,
     "_fingerprint_bytes_norm": aoci_index,
     "inspect_and_fingerprint_one": aoci_index,
     "parse_code_volume": aoci_index,

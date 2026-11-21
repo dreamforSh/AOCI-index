@@ -35,6 +35,7 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import aoci_hook  # noqa: E402
 import aoci_index  # noqa: E402
+from aoci_core import git_ops  # noqa: E402
 
 HAS_GIT = shutil.which("git") is not None
 
@@ -763,8 +764,9 @@ class HookSessionTests(RepoTestCase):
         import aoci_hook
 
         with tempfile.TemporaryDirectory() as plain_dir:
-            with mock.patch.object(aoci_index, "detect_git_info", side_effect=AssertionError("git must not be called")):
-                self.assertEqual(aoci_hook.discover_indexed_roots({"cwd": plain_dir}), [])
+            with mock.patch.object(git_ops, "detect_git_info", side_effect=AssertionError("git must not be called")):
+                with mock.patch.object(aoci_index, "detect_git_info", side_effect=AssertionError("git must not be called")):
+                    self.assertEqual(aoci_hook.discover_indexed_roots({"cwd": plain_dir}), [])
 
     def test_codex_hook_contract_auto_detect_session_turn_and_stop(self):
         self.write("a.py", "a = 1\n")
@@ -1587,7 +1589,7 @@ class Phase2PerformanceTests(RepoTestCase):
     def test_detect_git_info_pure_python_standard_and_worktree_zero_subprocesses(self):
         sub = self.root / "nested" / "pkg"
         sub.mkdir(parents=True)
-        with mock.patch.object(aoci_index, "run_git", side_effect=AssertionError("git must not be spawned")):
+        with mock.patch.object(git_ops, "run_git", side_effect=AssertionError("git must not be spawned")):
             info = aoci_index.detect_git_info(sub)
         self.assertTrue(info["is_git"])
         self.assertEqual(info["toplevel"], self.root.resolve())
@@ -1604,7 +1606,7 @@ class Phase2PerformanceTests(RepoTestCase):
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "init"], cwd=self.root, check=True)
         wt_dir = Path(self._tmp.name) / "wt2"
         subprocess.run(["git", "worktree", "add", "-q", "-b", "wt-branch", str(wt_dir)], cwd=self.root, check=True)
-        with mock.patch.object(aoci_index, "run_git", side_effect=AssertionError("git must not be spawned")):
+        with mock.patch.object(git_ops, "run_git", side_effect=AssertionError("git must not be spawned")):
             wt_info = aoci_index.detect_git_info(wt_dir)
         self.assertTrue(wt_info["is_git"])
         self.assertEqual(wt_info["toplevel"], wt_dir.resolve())
@@ -1660,7 +1662,7 @@ class Phase2PerformanceTests(RepoTestCase):
         import io
 
         self.write("a.py", "# a.py\nval = 2\n")
-        with mock.patch.object(aoci_index, "run_git", side_effect=AssertionError("ack must not spawn git on warm tracked file")):
+        with mock.patch.object(git_ops, "run_git", side_effect=AssertionError("ack must not spawn git on warm tracked file")):
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = aoci_index.main(["ack", "--root", str(self.root), "a.py"])
         self.assertEqual(rc, 0)
@@ -2336,7 +2338,7 @@ class Phase1FixesTests(RepoTestCase):
 
         # Git Copy (`C100\0app.py\0app_copy.py\0`) must NOT report source `app.py` as deleted
         fake_cp = subprocess.CompletedProcess(["git"], 0, stdout="C100\0app.py\0app_copy.py\0", stderr="")
-        with mock.patch.object(aoci_index, "run_git", return_value=fake_cp) as spy_copy_git:
+        with mock.patch.object(git_ops, "run_git", return_value=fake_cp) as spy_copy_git:
             cp_brief = aoci_index.compute_diff_briefing(sub, rev="HEAD~1..HEAD")
         self.assertGreaterEqual(spy_copy_git.call_count, 1)
         self.assertEqual(cp_brief["deleted_entries"], [])
