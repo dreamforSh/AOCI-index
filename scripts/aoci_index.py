@@ -140,6 +140,7 @@ from aoci_core.constants import (  # noqa: E402
     HUBS_FILE,
     IGNORE_FILE,
     IMPORTANCE_TOKEN_BUDGET,
+    INSTALL_MANIFEST_NAME,
     LINE_SKETCH_K,
     LOCK_FILE,
     LOCK_STALE_S,
@@ -161,6 +162,7 @@ from aoci_core.constants import (  # noqa: E402
     SHARDS_MANIFEST,
     SIG_HASH_EXTS,
     SIMILAR_RENAME_THRESHOLD,
+    SKIP_RULES_REV,
     VALID_LAYERS,
     VALID_SIZES,
     VAGUE_F_RE,
@@ -199,6 +201,7 @@ from aoci_core.graph import (  # noqa: E402
     build_explicit_mention_index,
     build_fras_graph,
     check_layer_violations,
+    code_dependency_view,
     compile_path_ref_rewriter,
     estimate_tokens,
     expand_query_with_glossary,
@@ -223,9 +226,11 @@ from aoci_core.ignore import (  # noqa: E402
     _read_ignore_lines,
     is_probably_binary_bytes,
     load_aociignore,
+    install_manifest_dirs,
     load_ignore_matcher,
     matches_ignore,
     path_skip_reason,
+    under_install_manifest_dir,
 )
 from aoci_core.lock import IndexLock, _pid_is_alive  # noqa: E402
 from aoci_core.pack import PathMentionIndex, build_task_pack  # noqa: E402
@@ -743,10 +748,13 @@ def discover_candidates(
     git_info: Dict[str, Any],
     extra_ignores: Any,
     tracked_out: Optional[Set[str]] = None,
+    install_dirs_out: Optional[List[str]] = None,
 ) -> Tuple[List[Tuple[str, Optional[os.stat_result]]], Dict[str, int]]:
     """
     Discover candidate files as `(rel_posix, optional_stat_result)` after fast path-level filtering.
     When `tracked_out` is passed in Git mode, fills it with tracked paths from the same single `git ls-files -t` call.
+    Directories holding an `installer.py` manifest (`.aoci-install.json`) are AOCI skill copies and are skipped;
+    their prefixes are reported through `install_dirs_out` so Git discovery caches can honor them.
     """
     raw_candidates: List[Tuple[str, Optional[os.stat_result]]] = []
     skipped: Dict[str, int] = {}
@@ -777,9 +785,15 @@ def discover_candidates(
         _scandir_walk(root, "", extra_ignores, raw_candidates, honor_nested_gitignore=True)
         raw_candidates.sort(key=lambda pair: pair[0])
 
+    install_dirs = install_manifest_dirs([rel for rel, _ in raw_candidates])
+    if install_dirs_out is not None:
+        install_dirs_out.extend(install_dirs)
+
     filtered: List[Tuple[str, Optional[os.stat_result]]] = []
     for rel, st in raw_candidates:
         reason = path_skip_reason(rel, extra_ignores)
+        if reason is None and install_dirs and under_install_manifest_dir(rel, install_dirs):
+            reason = "installed-skill"
         if reason is not None:
             skipped[reason] = skipped.get(reason, 0) + 1
             continue
@@ -943,6 +957,7 @@ def _git_discovery_cache_key(root: Path, git_info: Dict[str, Any], max_bytes: in
         "gitignore": _stat_key(root / ".gitignore"),
         "aociignore": _stat_key(root / AOCI_DIR_NAME / IGNORE_FILE),
         "max_bytes": max_bytes,
+        "skip_rules": SKIP_RULES_REV,
     }
 
 
@@ -976,6 +991,7 @@ def _save_git_discovery_cache(
     fingerprints: Dict[str, Dict[str, Any]],
     max_bytes: int,
     tracked_paths: Optional[Set[str]] = None,
+    install_dirs: Sequence[str] = (),
 ) -> None:
     key = _git_discovery_cache_key(root, git_info, max_bytes)
     aoci_dir = root / AOCI_DIR_NAME
@@ -1009,6 +1025,8 @@ def _save_git_discovery_cache(
             continue
         seen.add(rel)
         reason = path_skip_reason(rel, extra_ignores)
+        if reason is None and install_dirs and under_install_manifest_dir(rel, install_dirs):
+            reason = "installed-skill"
         if reason is not None:
             skipped_tracked[reason] = skipped_tracked.get(reason, 0) + 1
             continue
@@ -1031,6 +1049,7 @@ def _save_git_discovery_cache(
         "tracked_clean": sorted(tracked_clean),
         "tracked_recheck": sorted(tracked_recheck),
         "skipped_tracked": skipped_tracked,
+        "install_dirs": sorted(install_dirs),
     }
     cache_path = aoci_dir / CACHE_DIR / GIT_DISCOVERY_CACHE
     try:
@@ -1112,6 +1131,10 @@ def _try_git_incremental_scan(
     # Nested `.gitignore` edited -> fall back to full discovery so new ignore rules apply
     if any(p == ".gitignore" or p.endswith("/.gitignore") for p in status_paths):
         return None
+    # Installed AOCI skill copy added/removed (`.aoci-install.json`) -> full discovery recomputes skip prefixes
+    if any(p.rsplit("/", 1)[-1] == INSTALL_MANIFEST_NAME for p in status_paths):
+        return None
+    install_dirs: Tuple[str, ...] = tuple(d for d in cached.get("install_dirs", []) if isinstance(d, str))
 
     skipped: Dict[str, int] = dict(cached.get("skipped_tracked", {}))
     fingerprints: Dict[str, Dict[str, Any]] = {}
@@ -1127,8 +1150,13 @@ def _try_git_incremental_scan(
         else:
             to_probe.add(rel)
 
+    if install_dirs:
+        to_probe = {rel for rel in to_probe if not under_install_manifest_dir(rel, install_dirs)}
+
     for rel in status_paths:
         reason = path_skip_reason(rel, extra_ignores)
+        if reason is None and install_dirs and under_install_manifest_dir(rel, install_dirs):
+            reason = "installed-skill"
         if reason is not None:
             if rel not in to_probe:
                 skipped[reason] = skipped.get(reason, 0) + 1
@@ -1316,7 +1344,10 @@ def discover_and_fingerprint(
 
     want_cache = skip_paths is None and git_info.get("is_git")
     tracked_set: Optional[Set[str]] = set() if want_cache else None
-    candidates, skipped = discover_candidates(root, git_info, extra_ignores, tracked_out=tracked_set)
+    install_dirs: List[str] = []
+    candidates, skipped = discover_candidates(
+        root, git_info, extra_ignores, tracked_out=tracked_set, install_dirs_out=install_dirs
+    )
 
     aoci_dir = root / AOCI_DIR_NAME
     scan_fps: Dict[str, Dict[str, Any]] = {}
@@ -1383,7 +1414,14 @@ def discover_and_fingerprint(
 
     if skip_paths is None and (git_incremental or len(fingerprints) >= GIT_FAST_AUTO_THRESHOLD):
         _save_git_discovery_cache(
-            root, git_info, extra_ignores, base_files, fingerprints, max_bytes, tracked_paths=tracked_set
+            root,
+            git_info,
+            extra_ignores,
+            base_files,
+            fingerprints,
+            max_bytes,
+            tracked_paths=tracked_set,
+            install_dirs=install_dirs,
         )
 
     return fingerprints, skipped
@@ -5309,7 +5347,8 @@ def audit_architecture(
 
     cycles: List[Dict[str, Any]] = []
     if check_cycles:
-        for comp in find_dependency_cycles(fras_deps):
+        # `R`/`O`-layer co-read pairs (e.g. `pyproject.toml` <-> `setup.py`) are not executable import cycles
+        for comp in find_dependency_cycles(code_dependency_view(fras_deps, parsed_map)):
             cycles.append({"nodes": comp, "size": len(comp)})
 
     forbidden: Dict[str, Set[str]] = {}

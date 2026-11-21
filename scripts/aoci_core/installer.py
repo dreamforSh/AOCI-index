@@ -1252,6 +1252,32 @@ def _remove_antigravity_project_mcp_plugin(plugin_dir: Path, legacy_mcp_file: Pa
     uninstall_antigravity_plugin_bundle(plugin_dir, with_hooks=False, with_rules=False, with_mcp=True, dry_run=dry_run)
 
 
+def vscode_user_config_dir(home_dir: Path, platform: Optional[str] = None, honor_env: Optional[bool] = None) -> Path:
+    """
+    Return the VS Code *user* settings directory that holds the global `mcp.json`:
+      - Windows: `%APPDATA%/Code/User`
+      - macOS:   `~/Library/Application Support/Code/User`
+      - Linux:   `${XDG_CONFIG_HOME:-~/.config}/Code/User`
+    (`~/.vscode/` only holds extensions and is never read for `mcp.json`.) `APPDATA` / `XDG_CONFIG_HOME` are
+    honored only for the real home directory, so sandboxed `--home-dir` installs stay inside the sandbox.
+    """
+    plat = platform or sys.platform
+    if honor_env is None:
+        try:
+            honor_env = home_dir.resolve() == Path.home().resolve()
+        except OSError:
+            honor_env = False
+    if plat.startswith("win"):
+        appdata = os.environ.get("APPDATA", "").strip() if honor_env else ""
+        base = Path(appdata) if appdata else (home_dir / "AppData" / "Roaming")
+    elif plat == "darwin":
+        base = home_dir / "Library" / "Application Support"
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip() if honor_env else ""
+        base = Path(xdg) if xdg else (home_dir / ".config")
+    return base / "Code" / "User"
+
+
 def process_host(
     host: str,
     scope: str,
@@ -1547,7 +1573,9 @@ def process_host(
 
     elif host == "vscode":
         gh_base = (home_dir / ".copilot") if scope == "global" else (project_root / ".github")
-        vscode_dir = (home_dir / ".vscode") if scope == "global" else (project_root / ".vscode")
+        vscode_dir = vscode_user_config_dir(home_dir) if scope == "global" else (project_root / ".vscode")
+        # Versions <= 1.5.0 wrote the global server into `~/.vscode/mcp.json`, which VS Code never reads
+        legacy_global_mcp = (home_dir / ".vscode" / "mcp.json") if scope == "global" else None
         skill_dest = gh_base / "skills" / SKILL_NAME
         rule_file = gh_base / "copilot-instructions.md"
         mcp_file = vscode_dir / "mcp.json"
@@ -1558,10 +1586,13 @@ def process_host(
                 remove_rule_snippet(rule_file, dry_run)
             if with_mcp:
                 _remove_vscode_mcp_server(mcp_file, dry_run, remove_if_empty=True)
+                if legacy_global_mcp is not None and legacy_global_mcp.exists():
+                    _remove_vscode_mcp_server(legacy_global_mcp, dry_run, remove_if_empty=True)
             if not dry_run:
                 _prune_empty_dir(gh_base / "skills")
                 _prune_empty_dir(gh_base)
-                _prune_empty_dir(vscode_dir)
+                if scope == "project":
+                    _prune_empty_dir(vscode_dir)
         else:
             try:
                 src_dir = _require_source_dir()
@@ -1579,6 +1610,8 @@ def process_host(
                 else:
                     mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
                 _upsert_vscode_mcp_server(mcp_file, py_cmd, mcp_args, dry_run)
+                if legacy_global_mcp is not None and legacy_global_mcp.exists():
+                    _remove_vscode_mcp_server(legacy_global_mcp, dry_run, remove_if_empty=True)
     return True
 
 

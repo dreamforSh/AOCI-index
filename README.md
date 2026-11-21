@@ -175,7 +175,8 @@ python scripts/install.py --host codex --scope project --project-root <repo> --w
 # Cursor (.cursor/skills + .cursor/rules/aoci-index.mdc + .cursor/hooks.json + .cursor/mcp.json)
 python scripts/install.py --host cursor --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
 
-# Windsurf & VS Code Copilot (.vscode/mcp.json `servers` + .github/copilot-instructions.md)
+# Windsurf & VS Code Copilot (project: .vscode/mcp.json `servers` + .github/copilot-instructions.md;
+#   global: VS Code user dir `Code/User/mcp.json` — %APPDATA% / ~/Library/Application Support / ~/.config)
 python scripts/install.py --host windsurf --scope global --with-rules --with-mcp
 python scripts/install.py --host vscode --scope project --project-root <repo> --with-rules --with-mcp
 

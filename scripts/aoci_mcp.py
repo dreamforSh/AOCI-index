@@ -26,7 +26,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 sys.dont_write_bytecode = True
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -288,6 +288,36 @@ _CLIENT_ROOT_HINTS: List[str] = []
 _NEGOTIATED_PROTOCOL: str = DEFAULT_PROTOCOL_VERSION
 _CLIENT_SUPPORTS_ROOTS: bool = False
 _SUBSCRIBED_URIS: Set[str] = set()
+# Guards client root hints and resource subscriptions when `handle_rpc_request` is driven from several threads
+_STATE_LOCK = threading.RLock()
+# Per-`tools/call` holder letting a tool hand its underlying dict to `structuredContent` when the text channel
+# is rendered as Markdown / SARIF / GitHub annotations (MCP 2025-06-18: `outputSchema` => `structuredContent`)
+_STRUCTURED_SIDECAR: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.ContextVar(
+    "aoci_structured_sidecar", default=None
+)
+
+
+def _publish_structured(obj: Any) -> None:
+    holder = _STRUCTURED_SIDECAR.get()
+    if holder is not None and isinstance(obj, dict):
+        holder["structured"] = obj
+
+
+def _structured_content_for(text: str, holder: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Pick `structuredContent` for an `outputSchema` tool: the dict a tool explicitly published (keeps one stable
+    report shape across `json`/`markdown`/`sarif`/`github` renderings), else JSON text, else a `{"text": ...}` wrapper.
+    """
+    published = holder.get("structured")
+    if isinstance(published, dict):
+        return published
+    try:
+        parsed_obj = json.loads(text)
+        if isinstance(parsed_obj, dict):
+            return parsed_obj
+    except ValueError:
+        pass
+    return {"text": text}
 _OUTBOUND_LOCK = threading.Lock()
 _OUTBOUND_QUEUE: List[Dict[str, Any]] = []
 _ROOTS_REQ_SEQ = 0
@@ -319,7 +349,8 @@ def update_client_roots(roots_items: Any) -> List[str]:
     """Apply a client `roots` array (`[{"uri": "file:///...", "name": "..."}]`) to multi-root hints."""
     global _CLIENT_ROOT_HINT
     if not isinstance(roots_items, list):
-        return list(_CLIENT_ROOT_HINTS)
+        with _STATE_LOCK:
+            return list(_CLIENT_ROOT_HINTS)
     collected: List[str] = []
     for item in roots_items:
         uri_str = item.get("uri") if isinstance(item, dict) else (item if isinstance(item, str) else None)
@@ -327,21 +358,24 @@ def update_client_roots(roots_items: Any) -> List[str]:
             resolved = _file_uri_to_path(uri_str.strip())
             if resolved and resolved not in collected:
                 collected.append(resolved)
-    if collected:
-        _CLIENT_ROOT_HINTS[:] = collected
-        _CLIENT_ROOT_HINT = _select_default_root_hint() or collected[0]
-    return list(_CLIENT_ROOT_HINTS)
+    with _STATE_LOCK:
+        if collected:
+            _CLIENT_ROOT_HINTS[:] = collected
+            _CLIENT_ROOT_HINT = _select_default_root_hint() or collected[0]
+        return list(_CLIENT_ROOT_HINTS)
 
 
 def _notify_resource_updates(mutated_root: Path) -> None:
     """Queue `notifications/resources/updated` for any subscribed `aoci://` URIs matching `mutated_root`."""
-    if not _SUBSCRIBED_URIS:
+    with _STATE_LOCK:
+        subscribed = sorted(_SUBSCRIBED_URIS)
+    if not subscribed:
         return
     try:
         mut_resolved = mutated_root.resolve()
     except OSError:
         mut_resolved = mutated_root
-    for sub_uri in sorted(list(_SUBSCRIBED_URIS)):
+    for sub_uri in subscribed:
         parsed = urllib.parse.urlparse(sub_uri)
         qs = urllib.parse.parse_qs(parsed.query)
         raw_r = (qs.get("root") or [None])[0]
@@ -401,11 +435,14 @@ def _file_uri_to_path(uri: str, require_dir: bool = True) -> Optional[str]:
 
 
 def _select_default_root_hint() -> Optional[str]:
-    for cand_str in _CLIENT_ROOT_HINTS:
+    with _STATE_LOCK:
+        hints = list(_CLIENT_ROOT_HINTS)
+        fallback = _CLIENT_ROOT_HINT
+    for cand_str in hints:
         cand = Path(cand_str)
         if (cand / aoci_index.AOCI_DIR_NAME / aoci_index.CODE_FILE).is_file():
             return cand_str
-    return _CLIENT_ROOT_HINT
+    return fallback
 
 
 def _resolve_mcp_root(raw_root: Optional[Any], *, for_init: bool = False) -> Path:
@@ -2030,6 +2067,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             except OSError as exc:
                 return True, f"ERROR: Cannot write batch pack to `{out_path}`: {exc}"
         if fmt_bp == "markdown":
+            _publish_structured(pack_res)
             return False, rendered_md
         return False, json.dumps(pack_res, indent=2, ensure_ascii=False)
 
@@ -2061,6 +2099,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             except OSError as exc:
                 return True, f"ERROR: Cannot write SARIF output to `{sarif_p}`: {exc}"
         is_ci_err = bool(args.get("strict") and not report.get("ok"))
+        if fmt_ci in ("sarif", "github", "markdown"):
+            _publish_structured(report)
         if fmt_ci == "sarif":
             return is_ci_err, aoci_index._ci_check.format_ci_sarif(report)
         if fmt_ci == "github":
@@ -2165,7 +2205,9 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # Notifications carry no `id` and expect no response
     if req_id is None:
         if method == "notifications/initialized":
-            if _CLIENT_SUPPORTS_ROOTS and not _CLIENT_ROOT_HINTS:
+            with _STATE_LOCK:
+                need_roots = _CLIENT_SUPPORTS_ROOTS and not _CLIENT_ROOT_HINTS
+            if need_roots:
                 _enqueue_roots_list_request()
         elif method == "notifications/roots/list_changed":
             if isinstance(params.get("roots"), list):
@@ -2203,8 +2245,9 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if h_ru and h_ru not in collected_hints:
                 collected_hints.insert(0, h_ru)
         if collected_hints:
-            _CLIENT_ROOT_HINTS[:] = collected_hints
-            _CLIENT_ROOT_HINT = _select_default_root_hint() or collected_hints[0]
+            with _STATE_LOCK:
+                _CLIENT_ROOT_HINTS[:] = collected_hints
+                _CLIENT_ROOT_HINT = _select_default_root_hint() or collected_hints[0]
         client_ver = str(params.get("protocolVersion", DEFAULT_PROTOCOL_VERSION))
         chosen_ver = client_ver if client_ver in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL_VERSION
         _NEGOTIATED_PROTOCOL = chosen_ver
@@ -2236,12 +2279,14 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         uri = str(params.get("uri", "")).strip()
         if not uri or not uri.startswith("aoci://"):
             return _err(-32602, f"Invalid or unsupported resource URI for subscribe: `{uri}`")
-        _SUBSCRIBED_URIS.add(uri)
+        with _STATE_LOCK:
+            _SUBSCRIBED_URIS.add(uri)
         return _ok({})
 
     if method == "resources/unsubscribe":
         uri = str(params.get("uri", "")).strip()
-        _SUBSCRIBED_URIS.discard(uri)
+        with _STATE_LOCK:
+            _SUBSCRIBED_URIS.discard(uri)
         return _ok({})
 
     if method == "resources/read":
@@ -2265,19 +2310,20 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if method == "tools/call":
         tool_name = str(params.get("name", ""))
         tool_args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        sidecar: Dict[str, Any] = {}
+        sidecar_token = _STRUCTURED_SIDECAR.set(sidecar)
         try:
             is_err, text = call_tool(tool_name, tool_args)
         except (Exception, SystemExit) as exc:  # Isolation boundary for RPC server stability
             is_err, text = True, f"Internal error in `{tool_name}`: {exc}"
+        finally:
+            _STRUCTURED_SIDECAR.reset(sidecar_token)
         call_result: Dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": is_err}
         t_spec = _TOOL_BY_NAME.get(tool_name)
         if not is_err and t_spec is not None and "outputSchema" in t_spec:
-            try:
-                parsed_obj = json.loads(text)
-                if isinstance(parsed_obj, dict):
-                    call_result["structuredContent"] = parsed_obj
-            except ValueError:
-                pass
+            # MCP 2025-06-18: tools declaring `outputSchema` MUST return `structuredContent` on success,
+            # even when the text channel is Markdown / SARIF / GitHub annotations / Mermaid
+            call_result["structuredContent"] = _structured_content_for(text, sidecar)
         return _ok(call_result)
 
     return _err(-32601, f"Method not found: {method}")

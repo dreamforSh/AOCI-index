@@ -107,7 +107,20 @@ ALWAYS_SKIP_DIRS: Set[str] = {
     ".claude",
     ".agents",
     ".agent",
+    # Agent-host config dirs written by `installer.py --scope project` (skill copies, hooks, MCP, rules)
+    ".codex",
+    ".cursor",
+    ".windsurf",
+    ".copilot",
+    ".codeium",
 }
+
+# Name of the skill tree that `installer.py` copies into host skill roots (e.g. `.github/skills/aoci-index/`)
+INSTALLED_SKILL_DIR_NAME = "aoci-index"
+# Manifest dropped by `installer.py` into every installed skill copy; any directory holding it is AOCI itself
+INSTALL_MANIFEST_NAME = ".aoci-install.json"
+# Bump whenever path-level skip rules change so cached Git discovery tables are rebuilt
+SKIP_RULES_REV = 2
 
 # Additional build/vendor directories skipped when walking non-Git workspaces
 DEFAULT_SKIP_DIRS: Set[str] = ALWAYS_SKIP_DIRS | {

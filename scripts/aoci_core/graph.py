@@ -700,6 +700,32 @@ def find_dependency_cycles(adj: Dict[str, Set[str]]) -> List[List[str]]:
     return sccs
 
 
+# Layers whose mutual `R:`/`A:` mentions express co-read / co-edit contracts (e.g. `pyproject.toml` <-> `setup.py`,
+# README <-> SKILL.md) rather than executable import edges, so they never form an actionable dependency cycle.
+NON_CODE_LAYERS: Set[str] = {"R", "O"}
+
+
+def code_dependency_view(
+    deps_adj: Dict[str, Set[str]],
+    parsed: Mapping[str, ParsedEntry],
+    non_code_layers: Optional[Set[str]] = None,
+) -> Dict[str, Set[str]]:
+    """
+    Return a copy of `deps_adj` without edges whose BOTH endpoints sit in non-code layers (`R` runtime config,
+    `O` docs). Edges touching at least one code-layer file are kept, so real import cycles are still reported.
+    """
+    skip_layers = NON_CODE_LAYERS if non_code_layers is None else non_code_layers
+    if not skip_layers:
+        return deps_adj
+    non_code = {rel for rel, pe in parsed.items() if pe.layer in skip_layers}
+    if not non_code:
+        return deps_adj
+    return {
+        src: ({d for d in dsts if d not in non_code} if src in non_code else set(dsts))
+        for src, dsts in deps_adj.items()
+    }
+
+
 def _check_layer_violations_from_parsed(
     parsed: Mapping[str, ParsedEntry],
     deps_adj: Dict[str, Set[str]],

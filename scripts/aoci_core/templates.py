@@ -39,19 +39,39 @@ def parse_manifest_field(aoci_dir: Path, prefix: str) -> str:
     return ""
 
 
-def parse_declared_domains(aoci_dir: Path) -> Dict[str, str]:
-    """Extract declared single-character Domain codes (`D=Name`, ASCII or Unicode/CJK) from `.aoci/aoci.meta.txt`."""
-    meta_path = aoci_dir / META_FILE
-    if not meta_path.exists():
-        return {}
-    domains: Dict[str, str] = {}
-    in_domain_section = False
+_DOMAINS_DIRECTIVE_RE = re.compile(r"^#\s*Domains?\s*:(.*)$", re.IGNORECASE)
+
+
+def _read_lines(path: Path) -> List[str]:
+    if not path.exists():
+        return []
     try:
-        meta_lines = meta_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        return path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
     except OSError:
-        return {}
+        return []
+
+
+def parse_declared_domains(aoci_dir: Path) -> Dict[str, str]:
+    """
+    Extract declared single-character Domain codes (`D=Name`) from `.aoci/aoci.meta.txt`.
+
+    Two equivalent declaration styles are accepted:
+      - the `# D (Domain ...)` comment section of `aoci.meta.txt` (ends at the next `# X (` section);
+      - a one-line `#Domains: G=governance, K=kernel` (or `#Domain:`) directive anywhere in
+        `aoci.meta.txt` or `aoci.txt`, mirroring `#Glossary:` / `#Layer-Rules:`. Directives win on conflicts.
+    """
+    meta_lines = _read_lines(aoci_dir / META_FILE)
+    domains: Dict[str, str] = {}
+    directive_domains: Dict[str, str] = {}
+    in_domain_section = False
     for raw in meta_lines:
         line = raw.strip()
+        m_dir = _DOMAINS_DIRECTIVE_RE.match(line)
+        if m_dir:
+            in_domain_section = False
+            for code, label in DOMAIN_TOKEN_RE.findall(m_dir.group(1)):
+                directive_domains[code] = label
+            continue
         if re.match(r"^#\s*D\s*\(Domain", line, re.IGNORECASE):
             in_domain_section = True
             continue
@@ -64,6 +84,12 @@ def parse_declared_domains(aoci_dir: Path) -> Dict[str, str]:
                 continue
             for code, label in DOMAIN_TOKEN_RE.findall(line):
                 domains[code] = label
+    for raw in _read_lines(aoci_dir / MANIFEST_FILE):
+        m_dir = _DOMAINS_DIRECTIVE_RE.match(raw.strip())
+        if m_dir:
+            for code, label in DOMAIN_TOKEN_RE.findall(m_dir.group(1)):
+                directive_domains[code] = label
+    domains.update(directive_domains)
     return domains
 
 

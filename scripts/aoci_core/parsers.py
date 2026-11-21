@@ -2431,9 +2431,12 @@ def invalidate_outline_cache(
 
     if changed:
         try:
+            payload_inv: Dict[str, Any] = {"schema_version": 2, "files": files_obj}
+            if isinstance(loaded.get("extractor"), str):
+                payload_inv["extractor"] = loaded["extractor"]
             atomic_write_text(
                 cache_path,
-                json.dumps({"schema_version": 2, "files": files_obj}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(payload_inv, ensure_ascii=False, separators=(",", ":")),
             )
         except OSError:
             pass
@@ -2493,14 +2496,21 @@ def build_static_import_graph(
         jvm_cls_map, jvm_pkg_map, cs_cls_map, cs_ns_map = _build_jvm_cs_indexes(discovered_files)
 
     cache_path = (aoci_dir / CACHE_DIR / OUTLINE_CACHE) if aoci_dir is not None else None
+    # Outlines differ between the regex path and the optional tree-sitter accelerator; never serve
+    # outlines produced by the other extractor (or an older accelerator revision) from the mtime cache.
+    extractor_tag = _ts_accel.extractor_cache_tag()
     old_cache: Dict[str, Dict[str, Any]] = {}
     if cache_path is not None and cache_path.is_file():
         try:
             loaded_c = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached_tag = loaded_c.get("extractor") if isinstance(loaded_c, dict) else None
+            # Legacy untagged caches were produced by the regex path in the overwhelming majority of installs
+            tag_ok = cached_tag == extractor_tag or (cached_tag is None and extractor_tag == "regex")
             if (
                 isinstance(loaded_c, dict)
                 and int(loaded_c.get("schema_version", 0)) == 2
                 and isinstance(loaded_c.get("files"), dict)
+                and tag_ok
             ):
                 old_cache = loaded_c["files"]
         except (OSError, ValueError, TypeError):
@@ -2565,7 +2575,11 @@ def build_static_import_graph(
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(
                 cache_path,
-                json.dumps({"schema_version": 2, "files": new_cache}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(
+                    {"schema_version": 2, "extractor": extractor_tag, "files": new_cache},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
             )
         except OSError:
             pass

@@ -13,6 +13,8 @@ from .constants import (
     DEFAULT_SKIP_FILENAMES,
     DEFAULT_SKIP_SUFFIXES,
     IGNORE_FILE,
+    INSTALL_MANIFEST_NAME,
+    INSTALLED_SKILL_DIR_NAME,
 )
 
 
@@ -247,6 +249,39 @@ def is_probably_binary_bytes(chunk: bytes) -> bool:
     return (control_bytes / len(chunk)) > 0.15
 
 
+def _is_installed_skill_path(parts: Sequence[str]) -> bool:
+    """
+    True for files inside an AOCI skill copy installed under a hidden agent-host dir, e.g.
+    `.github/skills/aoci-index/...` (VS Code / Copilot project scope) or `.foo/skills/aoci-index/...`.
+    """
+    # parts[-1] is the filename; need at least `<.host>/skills/aoci-index/<file>`
+    for idx in range(1, len(parts) - 2):
+        if (
+            parts[idx] == "skills"
+            and parts[idx + 1] == INSTALLED_SKILL_DIR_NAME
+            and parts[idx - 1].startswith(".")
+        ):
+            return True
+    return False
+
+
+def install_manifest_dirs(rel_paths: Sequence[str]) -> Tuple[str, ...]:
+    """Return directory prefixes (`dir/`) that contain an `installer.py` manifest (`.aoci-install.json`)."""
+    suffix = "/" + INSTALL_MANIFEST_NAME
+    found: List[str] = []
+    for rel in rel_paths:
+        if rel == INSTALL_MANIFEST_NAME:
+            # A manifest at the repo root would exclude everything; never treat the root as an installed copy
+            continue
+        if rel.endswith(suffix):
+            found.append(rel[: -len(INSTALL_MANIFEST_NAME)])
+    return tuple(sorted(set(found)))
+
+
+def under_install_manifest_dir(rel_posix: str, manifest_dirs: Sequence[str]) -> bool:
+    return bool(manifest_dirs) and any(rel_posix.startswith(prefix) for prefix in manifest_dirs)
+
+
 def path_skip_reason(rel_posix: str, extra_ignores: Any) -> Optional[str]:
     """Cheap pure-string filter run before any filesystem stat/open."""
     if not rel_posix:
@@ -256,7 +291,11 @@ def path_skip_reason(rel_posix: str, extra_ignores: Any) -> Optional[str]:
         return "reserved-dir"
     if len(parts) > 1 and any(seg in ALWAYS_SKIP_DIRS for seg in parts[:-1]):
         return "skip-dir"
+    if len(parts) > 3 and _is_installed_skill_path(parts):
+        return "installed-skill"
     filename = parts[-1]
+    if filename == INSTALL_MANIFEST_NAME:
+        return "installed-skill"
     if filename in DEFAULT_SKIP_FILENAMES:
         return "lock-or-os-file"
     lower_name = filename.lower()

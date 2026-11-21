@@ -21,6 +21,7 @@ from .graph import (
     bfs_neighbors,
     build_fras_graph,
     check_layer_violations,
+    code_dependency_view,
     find_dependency_cycles,
     parse_entries_map,
     parse_layer_rules,
@@ -220,7 +221,8 @@ def run_ci_check(
                 layer_violations = check_layer_violations(synth_entries, eval_deps, rules, parsed_entries=parsed_map)
 
         if check_cycles:
-            for scc in find_dependency_cycles(eval_deps):
+            # `R`/`O`-layer co-read pairs (e.g. `pyproject.toml` <-> `setup.py`) are not executable import cycles
+            for scc in find_dependency_cycles(code_dependency_view(eval_deps, parsed_map)):
                 cycles.append({"size": len(scc), "nodes": scc})
 
         total_indexed = len(synth_entries)
@@ -373,7 +375,7 @@ def format_ci_sarif(report: Mapping[str, Any]) -> str:
                     "driver": {
                         "name": "aoci-index",
                         "version": AOCI_VERSION,
-                        "informationUri": "https://github.com/CancriRecoleta/AOCI-index",
+                        "informationUri": "https://github.com/dreamforSh/AOCI-index",
                         "rules": rules,
                     }
                 },
