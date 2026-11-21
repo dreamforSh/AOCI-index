@@ -38,7 +38,7 @@ SEAM_TARGETS: Dict[str, Any] = {
     "extract_file_outline": aoci_index,
     "compute_signature_hash": parsers,
     "compute_signature_hash_from_bytes": parsers,
-    "IndexLock": aoci_index,
+    "IndexLock": lock,
     "BM25Index": aoci_index,
 }
 

@@ -17,7 +17,7 @@ for _p in (str(TESTS_DIR), str(SCRIPTS_DIR)):
         sys.path.insert(0, _p)
 
 import aoci_index  # noqa: E402
-from aoci_core import hubs  # noqa: E402
+from aoci_core import hubs, lock  # noqa: E402
 from aoci_core.constants import AOCI_DIR_NAME, HUBS_FILE  # noqa: E402
 from test_aoci import RepoTestCase, cli, cli_json  # noqa: E402
 
@@ -198,27 +198,26 @@ class HubZoomTests(RepoTestCase):
             self.assertFalse(hubs_path.exists())
 
         # 2) `--dry-run` validates locklessly and does not create `aoci.hubs.txt`
-        with mock.patch.object(aoci_index, "IndexLock", side_effect=AssertionError("dry-run must be lockless")):
+        with mock.patch.object(lock, "IndexLock", side_effect=AssertionError("dry-run must be lockless")):
             dry_res = hubs.upsert_hub_entries(
                 self.root,
                 aoci_dir,
                 ["mod/a.py#alpha[L1-L2]: F:returns constant 1 | S:pure function"],
                 dry_run=True,
-                lock_cls=aoci_index.IndexLock,
+                lock_cls=lock.IndexLock,
+            )
+            dry_cli = cli_json(
+                "zoom",
+                "--root",
+                str(self.root),
+                "--upsert",
+                "mod/a.py#alpha[L1-L2]: F:returns constant 1 | S:pure function",
+                "--dry-run",
             )
         self.assertTrue(dry_res["ok"])
         self.assertTrue(dry_res["dry_run"])
         self.assertEqual(dry_res["upserted"], ["mod/a.py#alpha"])
         self.assertFalse(hubs_path.exists())
-
-        dry_cli = cli_json(
-            "zoom",
-            "--root",
-            str(self.root),
-            "--upsert",
-            "mod/a.py#alpha[L1-L2]: F:returns constant 1 | S:pure function",
-            "--dry-run",
-        )
         self.assertTrue(dry_cli["ok"])
         self.assertTrue(dry_cli["dry_run"])
         self.assertFalse(hubs_path.exists())

@@ -35,7 +35,7 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import aoci_hook  # noqa: E402
 import aoci_index  # noqa: E402
-from aoci_core import discovery, git_ops, parsers  # noqa: E402
+from aoci_core import constants, discovery, git_ops, parsers  # noqa: E402
 
 HAS_GIT = shutil.which("git") is not None
 
@@ -2628,7 +2628,7 @@ class AuditV2RegressionTests(RepoTestCase):
         self.assertTrue(aoci_index.semantic_pool_path(self.root, git_info).is_file())
 
         # Concurrent writes + LRU eviction on SQLite WAL pool
-        with mock.patch.object(aoci_index, "MAX_SEMANTIC_POOL_ENTRIES", 5):
+        with mock.patch.object(constants, "MAX_SEMANTIC_POOL_ENTRIES", 5):
             def _writer(idx: int) -> None:
                 fp_fake = {"sha256": f"{idx:064x}", "lines": 10}
                 ent = f"f{idx}.py[CX3T]: F:concurrent entry number {idx} | R:- | A:- | S:-"
