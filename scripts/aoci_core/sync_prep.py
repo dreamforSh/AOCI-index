@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
@@ -30,6 +31,103 @@ def _safe_outline(
         return None
 
 
+def _truncate_diff_lines(lines: List[str], max_diff_lines: int) -> str:
+    if len(lines) <= max_diff_lines:
+        return "\n".join(lines)
+    kept = lines[:max_diff_lines]
+    kept.append(f"... (+{len(lines) - max_diff_lines} truncated line(s))")
+    return "\n".join(kept)
+
+
+def _extract_diff_section_rel(sec_lines: Sequence[str], wanted: Set[str]) -> Optional[str]:
+    for ln in sec_lines[1:8]:
+        if ln.startswith("+++ "):
+            rhs = ln[4:].strip()
+            if rhs == "/dev/null":
+                break
+            if rhs.startswith('"') and rhs.endswith('"') and len(rhs) >= 2:
+                rhs = rhs[1:-1]
+            if rhs.startswith("b/"):
+                cand = normalize_relpath(rhs[2:])
+                if cand in wanted:
+                    return cand
+        elif ln.startswith("--- "):
+            lhs = ln[4:].strip()
+            if lhs == "/dev/null":
+                continue
+            if lhs.startswith('"') and lhs.endswith('"') and len(lhs) >= 2:
+                lhs = lhs[1:-1]
+            if lhs.startswith("a/"):
+                cand = normalize_relpath(lhs[2:])
+                if cand in wanted:
+                    return cand
+    if sec_lines and sec_lines[0].startswith("diff --git "):
+        body = sec_lines[0][11:]
+        mid = len(body) // 2
+        if len(body) % 2 == 1 and body[mid : mid + 1] == " ":
+            lhs, rhs = body[:mid], body[mid + 1 :]
+            if lhs.startswith("a/") and rhs.startswith("b/") and lhs[2:] == rhs[2:]:
+                cand = normalize_relpath(rhs[2:])
+                if cand in wanted:
+                    return cand
+        try:
+            toks = shlex.split(body, posix=True)
+            if len(toks) >= 2 and toks[-1].startswith("b/"):
+                cand = normalize_relpath(toks[-1][2:])
+                if cand in wanted:
+                    return cand
+        except ValueError:
+            pass
+    return None
+
+
+def _batch_bounded_git_diff_previews(
+    root: Path,
+    rels: Sequence[str],
+    git_info: Mapping[str, Any],
+    run_git_fn: Any,
+    max_diff_lines: int,
+) -> Dict[str, str]:
+    """Fetch bounded unified diffs for many modified files in batched `git diff` calls."""
+    if not git_info.get("is_git") or max_diff_lines <= 0 or not rels:
+        return {}
+    previews: Dict[str, str] = {}
+    unique_rels = list(dict.fromkeys(normalize_relpath(r) for r in rels if str(r).strip()))
+    chunk_size = 150
+    for idx in range(0, len(unique_rels), chunk_size):
+        chunk = unique_rels[idx : idx + chunk_size]
+        wanted = set(chunk)
+        cp = run_git_fn(
+            ["-c", "core.quotePath=false", "diff", "-U1", "--relative", "HEAD", "--", *chunk],
+            root,
+        )
+        if cp.returncode != 0:
+            cp = run_git_fn(
+                ["-c", "core.quotePath=false", "diff", "-U1", "--relative", "--", *chunk],
+                root,
+            )
+        if cp.returncode != 0 or not cp.stdout:
+            continue
+        sections: List[List[str]] = []
+        cur: List[str] = []
+        for ln in cp.stdout.splitlines():
+            if ln.startswith("diff --git "):
+                if cur:
+                    sections.append(cur)
+                cur = [ln]
+            elif cur:
+                cur.append(ln)
+        if cur:
+            sections.append(cur)
+        for sec in sections:
+            matched_rel = _extract_diff_section_rel(sec, wanted)
+            if matched_rel is not None and matched_rel not in previews:
+                previews[matched_rel] = _truncate_diff_lines(sec, max_diff_lines)
+        if len(chunk) == 1 and chunk[0] not in previews and not sections and cp.stdout.strip():
+            previews[chunk[0]] = _truncate_diff_lines(cp.stdout.splitlines(), max_diff_lines)
+    return previews
+
+
 def _bounded_git_diff_preview(
     root: Path,
     rel: str,
@@ -37,19 +135,8 @@ def _bounded_git_diff_preview(
     run_git_fn: Any,
     max_diff_lines: int,
 ) -> str:
-    if not git_info.get("is_git") or max_diff_lines <= 0:
-        return ""
-    cp = run_git_fn(["-c", "core.quotePath=false", "diff", "-U1", "HEAD", "--", rel], root)
-    if cp.returncode != 0:
-        cp = run_git_fn(["-c", "core.quotePath=false", "diff", "-U1", "--", rel], root)
-    if cp.returncode != 0 or not cp.stdout:
-        return ""
-    lines = cp.stdout.splitlines()
-    if len(lines) <= max_diff_lines:
-        return "\n".join(lines)
-    kept = lines[:max_diff_lines]
-    kept.append(f"... (+{len(lines) - max_diff_lines} truncated line(s))")
-    return "\n".join(kept)
+    norm = normalize_relpath(rel)
+    return _batch_bounded_git_diff_previews(root, [norm], git_info, run_git_fn, max_diff_lines).get(norm, "")
 
 
 def prepare_sync_briefing(
@@ -61,6 +148,9 @@ def prepare_sync_briefing(
     run_git_fn: Any,
     max_diff_lines: int = 40,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    cached_entries: Optional[Mapping[str, str]] = None,
+    cached_parsed: Optional[Mapping[str, Any]] = None,
+    cached_dependents: Optional[Mapping[str, Set[str]]] = None,
 ) -> Dict[str, Any]:
     """
     Build an agent-ready single-pass sync briefing combining drift classification,
@@ -74,18 +164,24 @@ def prepare_sync_briefing(
 
     impl_only_modified: List[Dict[str, Any]] = []
     contract_or_unknown_modified: List[Dict[str, Any]] = []
+    contract_rels: List[str] = []
     for item in drift.get("modified", ()):
         rel = normalize_relpath(str(item["path"]))
         if item.get("change_kind") == "impl_only":
             impl_only_modified.append(dict(item))
         else:
             enriched = dict(item)
+            enriched["path"] = rel
             enriched["previous_entry"] = code_entries.get(rel)
             enriched["current_outline"] = _safe_outline(root, rel, max_bytes)
-            enriched["diff_preview"] = _bounded_git_diff_preview(
-                root, rel, git_info, run_git_fn, max_diff_lines
-            )
             contract_or_unknown_modified.append(enriched)
+            contract_rels.append(rel)
+
+    diff_previews = _batch_bounded_git_diff_previews(
+        root, contract_rels, git_info, run_git_fn, max_diff_lines
+    )
+    for enriched in contract_or_unknown_modified:
+        enriched["diff_preview"] = diff_previews.get(enriched["path"], "")
 
     renames = [dict(r) for r in drift.get("renamed", ())]
     similar_renames = [dict(sr) for sr in drift.get("similar_renames", ())]
@@ -142,8 +238,18 @@ def prepare_sync_briefing(
         + deleted
     )
     if changed_paths and code_entries:
-        parsed = parse_entries_map(code_entries)
-        _, dependents = build_fras_graph(code_entries, parsed_entries=parsed)
+        cache_usable = (
+            cached_parsed is not None
+            and (
+                (cached_entries is not None and cached_entries == code_entries)
+                or (cached_entries is None and set(cached_parsed.keys()) == set(code_entries.keys()))
+            )
+        )
+        parsed = cached_parsed if cache_usable else parse_entries_map(code_entries)
+        if cache_usable and cached_dependents is not None:
+            dependents = cached_dependents
+        else:
+            _, dependents = build_fras_graph(code_entries, parsed_entries=parsed)
         mentioned_by = build_explicit_mention_index(code_entries, parsed_entries=parsed)
         changed_set: Set[str] = set(changed_paths)
         for p in changed_paths:

@@ -10,7 +10,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .constants import (
     CACHE_DIR,
@@ -97,94 +97,124 @@ _CPP_FN_RE = re.compile(
 _CPP_SKIP_KEYWORDS: Set[str] = {"if", "for", "while", "switch", "catch", "return", "sizeof", "alignof", "decltype"}
 
 
+_JS_QUOTE_OR_SLASH_RX = re.compile(r"""["'`/]""")
+_JS_STR_PATTERNS: Dict[str, "re.Pattern[str]"] = {
+    '"': re.compile(r'"[^"\\]*(?:\\[\s\S][^"\\]*)*(?:"|$)'),
+    "'": re.compile(r"'[^'\\]*(?:\\[\s\S][^'\\]*)*(?:'|$)"),
+    "`": re.compile(r"`[^`\\]*(?:\\[\s\S][^`\\]*)*(?:`|$)"),
+}
+
+_C_COMMENT_RX_CACHE: Dict[Tuple[bool, bool], "re.Pattern[str]"] = {}
+
+
+def _get_c_comment_rx(allow_backtick: bool, single_quote_char_only: bool) -> "re.Pattern[str]":
+    key = (allow_backtick, single_quote_char_only)
+    rx = _C_COMMENT_RX_CACHE.get(key)
+    if rx is not None:
+        return rx
+    parts = [
+        r'"[^"\\]*(?:\\[\s\S][^"\\]*)*(?:"|$)',
+        r"//[^\n]*",
+        r"/\*[\s\S]*?(?:\*/|$)",
+    ]
+    if allow_backtick:
+        parts.append(r"`[^`]*(?:`|$)")
+    if single_quote_char_only:
+        parts.append(r"'(?:\\[^\n]|[^'\\\n]){0,16}'")
+    else:
+        parts.append(r"'[^'\\\n]*(?:\\[^\n][^'\\\n]*)*(?:'|(?=\n|$))")
+    rx = re.compile("|".join(parts))
+    _C_COMMENT_RX_CACHE[key] = rx
+    return rx
+
+
+def _blank_block_comment(s: str) -> str:
+    if "\n" not in s:
+        return " " * len(s)
+    return "\n".join(" " * len(part) for part in s.split("\n"))
+
+
+def _strip_c_sub(m: "re.Match[str]") -> str:
+    s = m.group(0)
+    if s.startswith("//"):
+        return " " * len(s)
+    if s.startswith("/*"):
+        return _blank_block_comment(s)
+    return s
+
+
+def _prev_js_tok(out: List[str]) -> str:
+    tail_parts: List[str] = []
+    non_ws = 0
+    for chunk in reversed(out):
+        if not chunk:
+            continue
+        tail_parts.append(chunk)
+        stripped = chunk.rstrip()
+        if stripped:
+            non_ws += len(stripped)
+            if non_ws >= 64:
+                break
+    tail = "".join(reversed(tail_parts)).rstrip()
+    if not tail:
+        return ""
+    ch = tail[-1]
+    if ch in ("+", "-") and len(tail) >= 2 and tail[-2] == ch:
+        return ch * 2
+    if ch.isalnum() or ch in "_$":
+        j = len(tail) - 1
+        while j >= 0 and (tail[j].isalnum() or tail[j] in "_$"):
+            j -= 1
+        word = tail[j + 1 :]
+        return ch if word[0].isdigit() else word
+    return ch
+
+
 def _strip_js_comments(src: str) -> str:
     """
     Blank out `//` and `/* */` comments while preserving string literals, `/regex/` literals
     (including `//` or `/*` inside regexes), and exact line breaks.
     """
+    if not src:
+        return src
     out: List[str] = []
-    i, n = 0, len(src)
-    prev_tok = ""
-    while i < n:
-        c = src[i]
-        if c in " \t\r\n":
-            out.append(c)
-            i += 1
-        elif c in ("'", '"', "`"):
-            q = c
-            out.append(c)
-            i += 1
-            while i < n:
-                ch = src[i]
-                out.append(ch)
-                i += 1
-                if ch == "\\" and i < n:
-                    out.append(src[i])
-                    i += 1
-                    continue
-                if ch == q:
-                    break
-            prev_tok = q
-        elif c == "/":
-            nxt = src[i + 1] if i + 1 < n else ""
-            if nxt == "/":
-                out.append("  ")
-                i += 2
-                while i < n and src[i] != "\n":
-                    out.append(" ")
-                    i += 1
-            elif nxt == "*":
-                out.append("  ")
-                i += 2
-                while i < n:
-                    if src[i] == "*" and i + 1 < n and src[i + 1] == "/":
-                        out.append("  ")
-                        i += 2
-                        break
-                    out.append("\n" if src[i] == "\n" else " ")
-                    i += 1
-            elif not prev_tok or prev_tok in _JS_REGEX_PREV_CHARS or prev_tok in _JS_REGEX_PREV_KW:
-                out.append("/")
-                i += 1
-                in_class = False
-                while i < n and src[i] != "\n":
-                    ch = src[i]
-                    out.append(ch)
-                    i += 1
-                    if ch == "\\" and i < n and src[i] != "\n":
-                        out.append(src[i])
-                        i += 1
-                        continue
-                    if ch == "[":
-                        in_class = True
-                    elif ch == "]":
-                        in_class = False
-                    elif ch == "/" and not in_class:
-                        while i < n and src[i].isalpha():
-                            out.append(src[i])
-                            i += 1
-                        break
-                prev_tok = "/"
+    pos = 0
+    n = len(src)
+    while pos < n:
+        m = _JS_QUOTE_OR_SLASH_RX.search(src, pos)
+        if m is None:
+            out.append(src[pos:])
+            break
+        idx = m.start()
+        if idx > pos:
+            out.append(src[pos:idx])
+        ch = src[idx]
+        if ch in ("'", '"', "`"):
+            sm = _JS_STR_PATTERNS[ch].match(src, idx)
+            end = sm.end() if sm is not None else n
+            out.append(src[idx:end])
+            pos = end
+            continue
+        nxt = src[idx + 1] if idx + 1 < n else ""
+        if nxt == "/":
+            nl = src.find("\n", idx + 2)
+            end = nl if nl != -1 else n
+            out.append(" " * (end - idx))
+            pos = end
+        elif nxt == "*":
+            close_c = src.find("*/", idx + 2)
+            end = (close_c + 2) if close_c != -1 else n
+            out.append(_blank_block_comment(src[idx:end]))
+            pos = end
+        else:
+            prev_tok = _prev_js_tok(out)
+            if not prev_tok or prev_tok in _JS_REGEX_PREV_CHARS or prev_tok in _JS_REGEX_PREV_KW:
+                end = _skip_js_regex(src, idx)
+                out.append(src[idx:end])
+                pos = end
             else:
                 out.append("/")
-                i += 1
-                prev_tok = "/"
-        elif c.isalpha() or c in "_$":
-            j = i + 1
-            while j < n and (src[j].isalnum() or src[j] in "_$"):
-                j += 1
-            word = src[i:j]
-            out.append(word)
-            prev_tok = word
-            i = j
-        elif c in "+-" and i + 1 < n and src[i + 1] == c:
-            out.append(c * 2)
-            prev_tok = c * 2
-            i += 2
-        else:
-            out.append(c)
-            prev_tok = c
-            i += 1
+                pos = idx + 1
     return "".join(out)
 
 
@@ -203,90 +233,9 @@ def _strip_c_comments(src: str, allow_backtick: bool = False, single_quote_char_
     Blank out `//` and `/* */` comments while preserving strings (including optional raw backtick
     strings), Rust single-quote lifetimes when `single_quote_char_only=True`, and exact line breaks.
     """
-    out: List[str] = []
-    i, n = 0, len(src)
-    while i < n:
-        c = src[i]
-        if c == '"':
-            out.append(c)
-            i += 1
-            while i < n:
-                ch = src[i]
-                out.append(ch)
-                i += 1
-                if ch == "\\" and i < n:
-                    out.append(src[i])
-                    i += 1
-                    continue
-                if ch == '"':
-                    break
-        elif c == "'":
-            if single_quote_char_only:
-                j = i + 1
-                closed = False
-                limit = min(n, i + 18)
-                while j < limit and src[j] != "\n":
-                    if src[j] == "\\":
-                        j += 2
-                        continue
-                    if src[j] == "'":
-                        closed = True
-                        j += 1
-                        break
-                    j += 1
-                if closed:
-                    out.append(src[i:j])
-                    i = j
-                else:
-                    out.append(c)
-                    i += 1
-            else:
-                out.append(c)
-                i += 1
-                while i < n and src[i] != "\n":
-                    ch = src[i]
-                    out.append(ch)
-                    i += 1
-                    if ch == "\\" and i < n and src[i] != "\n":
-                        out.append(src[i])
-                        i += 1
-                        continue
-                    if ch == "'":
-                        break
-        elif allow_backtick and c == "`":
-            out.append(c)
-            i += 1
-            while i < n:
-                ch = src[i]
-                out.append(ch)
-                i += 1
-                if ch == "`":
-                    break
-        elif c == "/":
-            nxt = src[i + 1] if i + 1 < n else ""
-            if nxt == "/":
-                out.append("  ")
-                i += 2
-                while i < n and src[i] != "\n":
-                    out.append(" ")
-                    i += 1
-            elif nxt == "*":
-                out.append("  ")
-                i += 2
-                while i < n:
-                    if src[i] == "*" and i + 1 < n and src[i + 1] == "/":
-                        out.append("  ")
-                        i += 2
-                        break
-                    out.append("\n" if src[i] == "\n" else " ")
-                    i += 1
-            else:
-                out.append(c)
-                i += 1
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+    if not src or ("/" not in src):
+        return src
+    return _get_c_comment_rx(allow_backtick, single_quote_char_only).sub(_strip_c_sub, src)
 
 
 def _extract_js_ts_outline(src: str, line_offset: int, imports: List[str], symbols: List[str]) -> None:
@@ -339,6 +288,29 @@ def _extract_js_ts_outline(src: str, line_offset: int, imports: List[str], symbo
         symbols.append(label)
 
 
+_PY_CONTRACT_DUNDERS: Set[str] = {
+    "__init__",
+    "__new__",
+    "__post_init__",
+    "__call__",
+    "__enter__",
+    "__aenter__",
+    "__exit__",
+    "__aexit__",
+    "__getitem__",
+    "__setitem__",
+    "__delitem__",
+    "__len__",
+    "__iter__",
+    "__aiter__",
+    "__next__",
+    "__anext__",
+    "__contains__",
+    "__eq__",
+    "__hash__",
+}
+
+
 def _py_route_decorator(node: ast.AST) -> str:
     for dec in getattr(node, "decorator_list", ()):
         if (
@@ -351,6 +323,23 @@ def _py_route_decorator(node: ast.AST) -> str:
         ):
             return f" [@{dec.func.attr}('{dec.args[0].value}')]"
     return ""
+
+
+def _ast_decorator_str(dec: ast.AST) -> str:
+    """Format a Python decorator AST node into a compact canonical string."""
+    if isinstance(dec, ast.Call):
+        fn_name = _ast_type_str(dec.func)
+        if not fn_name:
+            return ""
+        pos_args = [_ast_type_str(a) for a in dec.args]
+        kw_args = [
+            f"{kw.arg}={_ast_type_str(kw.value)}" if kw.arg else f"**{_ast_type_str(kw.value)}"
+            for kw in dec.keywords
+        ]
+        all_args = ",".join([*pos_args, *kw_args])
+        return f"@{fn_name}({all_args})"
+    name = _ast_type_str(dec)
+    return f"@{name}" if name else ""
 
 
 def _ast_type_str(node: Optional[ast.AST]) -> str:
@@ -415,39 +404,35 @@ def _py_fn_sig(fn_node: ast.AST) -> str:
     ret = _ast_type_str(getattr(fn_node, "returns", None))
     ret_str = f"->{ret}" if ret else ""
     route_tag = _py_route_decorator(fn_node)
-    return f"{prefix} {getattr(fn_node, 'name', '')}({','.join(parts)}){ret_str}{route_tag}"
+    dec_tags = [t for t in (_ast_decorator_str(d) for d in getattr(fn_node, "decorator_list", ())) if t]
+    dec_prefix = f"[{','.join(dec_tags)}] " if dec_tags else ""
+    return f"{dec_prefix}{prefix} {getattr(fn_node, 'name', '')}({','.join(parts)}){ret_str}{route_tag}"
 
 
-def _iter_py_import_nodes(body: Sequence[ast.AST]) -> Iterator[ast.AST]:
-    """Yield top-level Import/ImportFrom nodes plus those directly inside top-level If/Try blocks."""
+def _iter_py_import_nodes(body: Sequence[ast.AST], _depth: int = 0) -> Iterator[ast.AST]:
+    """Yield top-level Import/ImportFrom nodes plus those inside nested top-level If/Try blocks."""
+    if _depth >= 4:
+        return
     for node in body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             yield node
         elif isinstance(node, ast.If):
-            for sub in node.body:
-                if isinstance(sub, (ast.Import, ast.ImportFrom)):
-                    yield sub
+            yield from _iter_py_import_nodes(node.body, _depth + 1)
             cur_else = node.orelse
             while cur_else:
-                for sub in cur_else:
-                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
-                        yield sub
                 if len(cur_else) == 1 and isinstance(cur_else[0], ast.If):
                     elif_node = cur_else[0]
-                    for sub in elif_node.body:
-                        if isinstance(sub, (ast.Import, ast.ImportFrom)):
-                            yield sub
+                    yield from _iter_py_import_nodes(elif_node.body, _depth + 1)
                     cur_else = elif_node.orelse
                 else:
+                    yield from _iter_py_import_nodes(cur_else, _depth + 1)
                     break
         elif isinstance(node, ast.Try):
             sub_lists: List[Sequence[ast.AST]] = [node.body, node.orelse, node.finalbody]
             for handler in node.handlers:
                 sub_lists.append(handler.body)
             for stmts in sub_lists:
-                for sub in stmts:
-                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
-                        yield sub
+                yield from _iter_py_import_nodes(stmts, _depth + 1)
 
 
 def _collapse_ws(text: str) -> str:
@@ -1584,16 +1569,19 @@ def _compute_py_sig_hash_from_tree(tree: ast.Module) -> str:
             py_sigs.append(_py_fn_sig(node))
         elif isinstance(node, ast.ClassDef):
             bases = ",".join(_ast_type_str(b) for b in node.bases)
+            cls_decs = [t for t in (_ast_decorator_str(d) for d in getattr(node, "decorator_list", ())) if t]
+            cls_dec_prefix = f"[{','.join(cls_decs)}] " if cls_decs else ""
             members = [
                 _py_fn_sig(n)
                 for n in node.body
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and (not n.name.startswith("__") or n.name in _PY_CONTRACT_DUNDERS)
             ]
             for n in node.body:
                 if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and not n.target.id.startswith("_"):
                     members.append(f"{n.target.id}:{_ast_type_str(n.annotation)}")
             members.sort()
-            py_sigs.append(f"class {node.name}({bases})[{';'.join(members)}]")
+            py_sigs.append(f"{cls_dec_prefix}class {node.name}({bases})[{';'.join(members)}]")
         elif isinstance(node, ast.Assign):
             if any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
                 py_sigs.append(_py_all_sig(node.value))
@@ -1958,11 +1946,220 @@ def _static_ecosystem(rel: str) -> Optional[str]:
         return "go"
     if ext == ".rs":
         return "rs"
+    if ext in {".java", ".kt", ".kts"}:
+        return "jvm"
+    if ext == ".cs":
+        return "cs"
     if ext == ".proto":
         return "proto"
     if ext in {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
         return "cpp"
     return None
+
+
+_JVM_EXTS: Set[str] = {".java", ".kt", ".kts"}
+_CS_FRAMEWORK_PREFIXES: Set[str] = {
+    "system",
+    "microsoft",
+    "windows",
+    "netstandard",
+    "xunit",
+    "nunit",
+    "moq",
+    "fluentassertions",
+    "serilog",
+    "newtonsoft",
+}
+
+
+def _is_jvm_cs_test_rel(rel: str) -> bool:
+    parts = rel.lower().split("/")
+    if any(seg in {"test", "tests", "__tests__", "spec", "specs"} for seg in parts[:-1]):
+        return True
+    bname = parts[-1]
+    stem = bname.rsplit(".", 1)[0]
+    return stem.endswith(("test", "tests", "spec", "specs"))
+
+
+def _build_jvm_cs_indexes(
+    discovered_files: Sequence[str],
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
+    jvm_cls_map: Dict[str, List[str]] = {}
+    jvm_pkg_map: Dict[str, List[str]] = {}
+    cs_cls_map: Dict[str, List[str]] = {}
+    cs_ns_map: Dict[str, List[str]] = {}
+
+    for f_rel in sorted(discovered_files):
+        ext = Path(f_rel).suffix.lower()
+        if ext in _JVM_EXTS:
+            no_ext = f_rel[: -len(ext)]
+            parts = no_ext.split("/")
+            for i in range(len(parts)):
+                suf = "/".join(parts[i:])
+                jvm_cls_map.setdefault(suf, []).append(f_rel)
+            dir_parts = parts[:-1]
+            for i in range(len(dir_parts)):
+                dsuf = "/".join(dir_parts[i:])
+                jvm_pkg_map.setdefault(dsuf, []).append(f_rel)
+        elif ext == ".cs":
+            no_ext_l = f_rel[:-3].lower()
+            parts = no_ext_l.split("/")
+            for i in range(len(parts)):
+                suf = "/".join(parts[i:])
+                cs_cls_map.setdefault(suf, []).append(f_rel)
+            dir_parts = parts[:-1]
+            for i in range(len(dir_parts)):
+                dsuf = "/".join(dir_parts[i:])
+                cs_ns_map.setdefault(dsuf, []).append(f_rel)
+    return jvm_cls_map, jvm_pkg_map, cs_cls_map, cs_ns_map
+
+
+def _filter_jvm_cs_cands(cands: Sequence[str], src_rel: str, src_is_test: bool) -> List[str]:
+    filtered = [c for c in cands if c != src_rel]
+    if not src_is_test:
+        non_test = [c for c in filtered if not _is_jvm_cs_test_rel(c)]
+        if non_test:
+            return non_test
+    return filtered
+
+
+def _resolve_jvm_imports_for_file(
+    src_rel: str,
+    imports: Sequence[str],
+    jvm_cls_map: Mapping[str, List[str]],
+    jvm_pkg_map: Mapping[str, List[str]],
+) -> Tuple[List[str], List[List[str]]]:
+    src_is_test = _is_jvm_cs_test_rel(src_rel)
+    exact_hits: List[str] = []
+    group_hits: List[List[str]] = []
+
+    for raw_imp in imports:
+        s = raw_imp.strip().rstrip(";").strip()
+        is_static = False
+        if s.startswith("import static "):
+            s = s[14:].strip()
+            is_static = True
+        elif s.startswith("import "):
+            s = s[7:].strip()
+        if " as " in s:
+            s = s.split(" as ", 1)[0].strip()
+        if not s:
+            continue
+
+        if s.endswith(".*"):
+            pkg_slash = s[:-2].replace(".", "/").strip("/")
+            if pkg_slash:
+                cands = _filter_jvm_cs_cands(jvm_pkg_map.get(pkg_slash, ()), src_rel, src_is_test)[:5]
+                if cands:
+                    group_hits.append(cands)
+            continue
+
+        cls_slash = s.replace(".", "/").strip("/")
+        if not cls_slash:
+            continue
+        direct = _filter_jvm_cs_cands(jvm_cls_map.get(cls_slash, ()), src_rel, src_is_test)
+        if direct and ("/" in cls_slash or "/" not in direct[0]):
+            exact_hits.extend(direct)
+            continue
+        if "/" in cls_slash:
+            parent_slash = cls_slash.rsplit("/", 1)[0]
+            parent_cls = _filter_jvm_cs_cands(jvm_cls_map.get(parent_slash, ()), src_rel, src_is_test)
+            if parent_cls:
+                exact_hits.extend(parent_cls)
+                continue
+            if not is_static:
+                kt_pkg = [
+                    c
+                    for c in _filter_jvm_cs_cands(jvm_pkg_map.get(parent_slash, ()), src_rel, src_is_test)
+                    if c.lower().endswith((".kt", ".kts"))
+                ][:5]
+                if kt_pkg:
+                    group_hits.append(kt_pkg)
+
+    return exact_hits, group_hits
+
+
+def _resolve_cs_imports_for_file(
+    src_rel: str,
+    imports: Sequence[str],
+    cs_cls_map: Mapping[str, List[str]],
+    cs_ns_map: Mapping[str, List[str]],
+) -> Tuple[List[str], List[List[str]]]:
+    src_is_test = _is_jvm_cs_test_rel(src_rel)
+    exact_hits: List[str] = []
+    group_hits: List[List[str]] = []
+
+    for raw_imp in imports:
+        s = raw_imp.strip().rstrip(";").strip()
+        is_static_or_alias = False
+        if s.startswith("using static "):
+            s = s[13:].strip()
+            is_static_or_alias = True
+        elif s.startswith("using "):
+            s = s[6:].strip()
+        if "=" in s:
+            s = s.split("=", 1)[1].strip()
+            is_static_or_alias = True
+        if s.startswith("global::"):
+            s = s[8:]
+        if not s:
+            continue
+
+        spec_slash = s.replace(".", "/").strip("/").lower()
+        if not spec_slash:
+            continue
+        probes = [spec_slash]
+        if "/" in spec_slash:
+            first_seg, rest = spec_slash.split("/", 1)
+            if first_seg not in _CS_FRAMEWORK_PREFIXES and rest:
+                probes.append(rest)
+
+        matched = False
+        for pr in probes:
+            cls_cands = _filter_jvm_cs_cands(cs_cls_map.get(pr, ()), src_rel, src_is_test)
+            if cls_cands:
+                exact_hits.extend(cls_cands)
+                matched = True
+                break
+            if is_static_or_alias and "/" in pr:
+                parent_pr = pr.rsplit("/", 1)[0]
+                p_cands = _filter_jvm_cs_cands(cs_cls_map.get(parent_pr, ()), src_rel, src_is_test)
+                if p_cands:
+                    exact_hits.extend(p_cands)
+                    matched = True
+                    break
+        if matched or is_static_or_alias:
+            continue
+
+        for pr in probes:
+            ns_cands = _filter_jvm_cs_cands(cs_ns_map.get(pr, ()), src_rel, src_is_test)[:5]
+            if ns_cands:
+                group_hits.append(ns_cands)
+                break
+
+    return exact_hits, group_hits
+
+
+def resolve_jvm_cs_package_imports(
+    outlines: Mapping[str, Mapping[str, Any]],
+    discovered_files: Sequence[str],
+) -> Dict[str, Tuple[List[str], List[List[str]]]]:
+    """Resolve JVM (`import`) and C# (`using`) imports into `(exact_files, package_or_namespace_groups)`."""
+    jvm_cls_map, jvm_pkg_map, cs_cls_map, cs_ns_map = _build_jvm_cs_indexes(discovered_files)
+    result: Dict[str, Tuple[List[str], List[List[str]]]] = {}
+    for rel in discovered_files:
+        ext = Path(rel).suffix.lower()
+        if ext not in _JVM_EXTS and ext != ".cs":
+            continue
+        out = outlines.get(rel)
+        if not isinstance(out, Mapping):
+            continue
+        imps = out.get("imports", ())
+        if ext in _JVM_EXTS:
+            result[rel] = _resolve_jvm_imports_for_file(rel, imps, jvm_cls_map, jvm_pkg_map)
+        else:
+            result[rel] = _resolve_cs_imports_for_file(rel, imps, cs_cls_map, cs_ns_map)
+    return result
 
 
 def _python_candidate_prefixes(cur_dir: str, subpkg_roots: Sequence[str]) -> List[str]:
@@ -2001,16 +2198,26 @@ def build_static_import_graph(
     py_subpkg_roots: List[str] = []
     seen_subpkgs: Set[str] = set()
     go_dir_files: Dict[str, List[str]] = {}
+    has_jvm_or_cs = False
     for f_rel in discovered_files:
         if f_rel.endswith(".go") and not f_rel.endswith("_test.go"):
             parent = f_rel.rsplit("/", 1)[0] if "/" in f_rel else ""
             go_dir_files.setdefault(parent, []).append(f_rel)
+        elif not has_jvm_or_cs and f_rel.lower().endswith((".java", ".kt", ".kts", ".cs")):
+            has_jvm_or_cs = True
         bname = f_rel.rsplit("/", 1)[-1]
         if bname in ("pyproject.toml", "setup.py", "setup.cfg") and "/" in f_rel:
             pkg_root = f_rel.rsplit("/", 1)[0]
             if pkg_root not in seen_subpkgs:
                 seen_subpkgs.add(pkg_root)
                 py_subpkg_roots.append(pkg_root)
+
+    jvm_cls_map: Dict[str, List[str]] = {}
+    jvm_pkg_map: Dict[str, List[str]] = {}
+    cs_cls_map: Dict[str, List[str]] = {}
+    cs_ns_map: Dict[str, List[str]] = {}
+    if has_jvm_or_cs:
+        jvm_cls_map, jvm_pkg_map, cs_cls_map, cs_ns_map = _build_jvm_cs_indexes(discovered_files)
 
     cache_path = (aoci_dir / CACHE_DIR / OUTLINE_CACHE) if aoci_dir is not None else None
     old_cache: Dict[str, Dict[str, Any]] = {}
@@ -2204,6 +2411,20 @@ def build_static_import_graph(
                         else:
                             continue
                         break
+        elif ext in _JVM_EXTS:
+            exact_hits, group_hits = _resolve_jvm_imports_for_file(
+                rel, out["imports"], jvm_cls_map, jvm_pkg_map
+            )
+            resolved.extend(exact_hits)
+            for grp in group_hits:
+                resolved.extend(grp)
+        elif ext == ".cs":
+            exact_hits, group_hits = _resolve_cs_imports_for_file(
+                rel, out["imports"], cs_cls_map, cs_ns_map
+            )
+            resolved.extend(exact_hits)
+            for grp in group_hits:
+                resolved.extend(grp)
         elif ext in {".proto", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
             for spec in out["imports"]:
                 clean_spec = normalize_relpath(spec.strip("\"'<> "))

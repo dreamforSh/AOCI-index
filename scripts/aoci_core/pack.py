@@ -261,6 +261,7 @@ def build_task_pack(
     hub_records: Optional[Sequence[Dict[str, Any]]] = None,
     live_anchors: bool = False,
     with_tests: bool = False,
+    live_test_imports: bool = False,
 ) -> Dict[str, Any]:
     """
     Assemble a task-driven, token-budgeted context packet from FRAS index entries,
@@ -565,6 +566,66 @@ def build_task_pack(
             seed_obj["matched_glossary"] = seed_glossary[rel]
         seeds_out.append(seed_obj)
 
+    hub_sections_omitted = 0
+    if hub_sections:
+        if budget > 0:
+            seed_path_set = set(packed_seeds)
+            ranked_hubs = [
+                sec
+                for _, sec in sorted(
+                    enumerate(hub_sections),
+                    key=lambda idx_sec: (0 if str(idx_sec[1].get("path", "")) in seed_path_set else 1, idx_sec[0]),
+                )
+            ]
+            kept_hubs: List[Dict[str, Any]] = []
+            for sec in ranked_hubs:
+                cost = estimate_tokens(str(sec.get("entry", "")))
+                if used_tokens + cost <= budget:
+                    used_tokens += cost
+                    kept_hubs.append(sec)
+                else:
+                    hub_sections_omitted += 1
+            hub_sections = kept_hubs
+            if hub_sections_omitted > 0:
+                truncated = True
+        else:
+            for sec in hub_sections:
+                used_tokens += estimate_tokens(str(sec.get("entry", "")))
+
+    impacted_tests: Optional[List[Dict[str, Any]]] = None
+    impacted_tests_omitted = 0
+    if with_tests:
+        impact_targets = list(dict.fromkeys([*packed_seeds, *unindexed_changed]))
+        if impact_targets:
+            raw_tests = find_impacted_tests(
+                root,
+                entries,
+                dependents_adj,
+                impact_targets,
+                max_depth=max(3, hops),
+                parsed_entries=parsed_map,
+                preloaded_outline_files=preloaded_outline_files,
+                live_imports=live_test_imports,
+            )
+        else:
+            raw_tests = []
+        if budget > 0:
+            kept_tests: List[Dict[str, Any]] = []
+            for t_item in raw_tests:
+                cost = estimate_tokens(str(t_item.get("entry", "")))
+                if used_tokens + cost <= budget:
+                    used_tokens += cost
+                    kept_tests.append(t_item)
+                else:
+                    impacted_tests_omitted += 1
+            impacted_tests = kept_tests
+            if impacted_tests_omitted > 0:
+                truncated = True
+        else:
+            for t_item in raw_tests:
+                used_tokens += estimate_tokens(str(t_item.get("entry", "")))
+            impacted_tests = raw_tests
+
     payload: Dict[str, Any] = {
         "ok": True,
         "root": str(root),
@@ -586,18 +647,10 @@ def build_task_pack(
         payload["glossary_expansions"] = glossary_expansions
     if hub_sections:
         payload["hub_sections"] = hub_sections
-    if with_tests:
-        impact_targets = list(dict.fromkeys([*packed_seeds, *unindexed_changed]))
-        if impact_targets:
-            payload["impacted_tests"] = find_impacted_tests(
-                root,
-                entries,
-                dependents_adj,
-                impact_targets,
-                max_depth=max(3, hops),
-                parsed_entries=parsed_map,
-                preloaded_outline_files=preloaded_outline_files,
-            )
-        else:
-            payload["impacted_tests"] = []
+    if hub_sections_omitted > 0:
+        payload["hub_sections_omitted"] = hub_sections_omitted
+    if impacted_tests is not None:
+        payload["impacted_tests"] = impacted_tests
+    if impacted_tests_omitted > 0:
+        payload["impacted_tests_omitted"] = impacted_tests_omitted
     return payload

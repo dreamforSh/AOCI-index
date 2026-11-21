@@ -1892,6 +1892,8 @@ class Phase1FixesTests(RepoTestCase):
                 "aoci_pack",
                 "aoci_zoom",
                 "aoci_prepare_sync",
+                "aoci_apply_sync",
+                "aoci_symbol",
             },
         )
         for t_name, t_spec in tools.items():
@@ -3247,13 +3249,16 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         home = tmp_base / "space home"
         home.mkdir()
         py_dir = tmp_base / "py dir"
-        real_py_dir = Path(sys.executable).parent
+        base_exe = getattr(sys, "_base_executable", "") or sys.executable
+        if not Path(base_exe).is_file():
+            base_exe = sys.executable
+        real_py_dir = Path(base_exe).parent
         if os.name == "nt":
             subprocess.run(["cmd", "/c", "mklink", "/J", str(py_dir), str(real_py_dir)], check=True, capture_output=True)
         else:
             os.symlink(str(real_py_dir), str(py_dir))
         try:
-            spaced_py = py_dir / Path(sys.executable).name
+            spaced_py = py_dir / Path(base_exe).name
             quoted_py = f'"{spaced_py.as_posix()}"'
             r = subprocess.run(
                 [

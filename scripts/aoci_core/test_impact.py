@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .constants import AOCI_DIR_NAME, CACHE_DIR, OUTLINE_CACHE, normalize_relpath
+from .constants import AOCI_DIR_NAME, CACHE_DIR, DEFAULT_MAX_BYTES, OUTLINE_CACHE, _is_within_root, normalize_relpath
 from .graph import ParsedEntry, parse_entries_map
 from .parsers import (
     _expand_rust_use_tree,
@@ -15,6 +17,7 @@ from .parsers import (
     _resolve_gomod_for_dir,
     _resolve_tsconfig_for_dir,
     _static_ecosystem,
+    extract_file_outline,
 )
 
 REASON_RANK: Dict[str, int] = {
@@ -28,6 +31,11 @@ _GENERIC_STEMS: Set[str] = {"__init__", "index", "mod", "main", "lib", "app", "i
 _PY_EXTS: Set[str] = {".py", ".pyi"}
 _JS_EXTS: Set[str] = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte", ".astro"}
 _JVM_EXTS: Set[str] = {".java", ".kt", ".kts", ".scala", ".groovy"}
+_CS_EXTS: Set[str] = {".cs"}
+_RS_EXTS: Set[str] = {".rs"}
+_CPP_EXTS: Set[str] = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"}
+_RB_EXTS: Set[str] = {".rb"}
+_PHP_EXTS: Set[str] = {".php"}
 _JS_STRIP_EXTS: Tuple[str, ...] = (
     ".tsx",
     ".ts",
@@ -59,12 +67,9 @@ def _strip_js_ext(path: str) -> str:
 def _same_test_ecosystem(target_ext: str, test_ext: str) -> bool:
     if not target_ext or target_ext == test_ext:
         return True
-    if target_ext in _PY_EXTS and test_ext in _PY_EXTS:
-        return True
-    if target_ext in _JS_EXTS and test_ext in _JS_EXTS:
-        return True
-    if target_ext in _JVM_EXTS and test_ext in _JVM_EXTS:
-        return True
+    for fam in (_PY_EXTS, _JS_EXTS, _JVM_EXTS, _CS_EXTS, _RS_EXTS, _CPP_EXTS, _RB_EXTS, _PHP_EXTS):
+        if target_ext in fam and test_ext in fam:
+            return True
     return False
 
 
@@ -72,13 +77,20 @@ def _is_test_filename(bname: str) -> bool:
     low = bname.lower()
     ext = Path(bname).suffix.lower()
     stem = bname[: -len(ext)] if ext else bname
+    stem_l = stem.lower()
     if ext == ".py" and (low.startswith("test_") or low.endswith("_test.py")):
         return True
     if low.endswith("_test.go"):
         return True
+    if ext == ".rs" and (stem_l.startswith("test_") or stem_l.endswith(("_test", "_tests"))):
+        return True
+    if ext in _CPP_EXTS and (stem_l.startswith("test_") or stem_l.endswith(("_test", "_unittest"))):
+        return True
+    if ext == ".rb" and (stem_l.startswith("test_") or stem_l.endswith(("_spec", "_test"))):
+        return True
     if ".test." in low or ".spec." in low:
         return True
-    if len(stem) > 4 and stem.endswith(("Test", "Spec")):
+    if (len(stem) > 4 and stem.endswith(("Test", "Spec"))) or (len(stem) > 5 and stem.endswith(("Tests", "Specs"))):
         return True
     return False
 
@@ -398,6 +410,11 @@ def _test_imports_match_target(
             return True
         if "/" not in clean and t_info["stem"] not in _GENERIC_STEMS and clean == t_info["stem"]:
             return True
+        clean_bname = clean.rsplit("/", 1)[-1]
+        clean_stem = clean_bname.rsplit(".", 1)[0] if "." in clean_bname else clean_bname
+        if t_info["stem"] not in _GENERIC_STEMS and clean_stem == t_info["stem"]:
+            if "/" not in clean or t_info["no_ext"].endswith("/" + clean.rsplit(".", 1)[0]):
+                return True
     return False
 
 
@@ -409,6 +426,8 @@ def _matches_naming_convention(test_rel: str, t_info: Dict[str, Any]) -> bool:
     test_bname_l = test_bname.lower()
     test_ext = Path(test_bname).suffix.lower()
     test_stem = test_bname[: -len(test_ext)] if test_ext else test_bname
+    test_stem_l = test_stem.lower()
+    test_dir_parts = [seg.lower() for seg in test_dir.split("/") if seg]
 
     if t_info["ext"] == ".go" and test_bname_l.endswith("_test.go") and test_dir == t_info["dir"]:
         return True
@@ -430,6 +449,22 @@ def _matches_naming_convention(test_rel: str, t_info: Dict[str, Any]) -> bool:
         stem_l = raw_stem.lower()
         if test_ext == ".py" and (test_bname_l == f"test_{stem_l}.py" or test_bname_l == f"{stem_l}_test.py"):
             return True
+        if test_ext == ".rs" and (
+            test_bname_l in (f"{stem_l}_test.rs", f"{stem_l}_tests.rs", f"test_{stem_l}.rs")
+            or ("tests" in test_dir_parts and test_bname_l == f"{stem_l}.rs")
+        ):
+            return True
+        if test_ext in _CPP_EXTS and test_stem_l in (
+            f"{stem_l}_test",
+            f"{stem_l}_unittest",
+            f"test_{stem_l}",
+        ):
+            return True
+        if test_ext == ".rb" and test_bname_l in (f"{stem_l}_spec.rb", f"test_{stem_l}.rb", f"{stem_l}_test.rb"):
+            return True
+        if test_ext == ".php" and len(test_stem) > 4 and test_stem.endswith("Test"):
+            if _norm_stem(test_stem[:-4]) == norm_target_stem:
+                return True
         if test_ext and (
             test_bname_l.startswith(f"{stem_l}.test.") or test_bname_l.startswith(f"{stem_l}.spec.")
         ):
@@ -437,7 +472,27 @@ def _matches_naming_convention(test_rel: str, t_info: Dict[str, Any]) -> bool:
         if len(test_stem) > 4 and test_stem.endswith(("Test", "Spec")):
             if _norm_stem(test_stem[:-4]) == norm_target_stem:
                 return True
+        if len(test_stem) > 5 and test_stem.endswith(("Tests", "Specs")):
+            if _norm_stem(test_stem[:-5]) == norm_target_stem:
+                return True
     return False
+
+
+def _extract_live_test_imports(root: Path, test_rel: str) -> Tuple[List[str], List[str]]:
+    full = root / test_rel
+    if not _is_within_root(root, full):
+        return [], []
+    try:
+        st = os.lstat(full)
+    except OSError:
+        return [], []
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size > DEFAULT_MAX_BYTES:
+        return [], []
+    try:
+        outline = extract_file_outline(full, test_rel, max_items=200)
+    except OSError:
+        return [], []
+    return _extract_cached_imports(outline)
 
 
 def find_impacted_tests(
@@ -449,11 +504,12 @@ def find_impacted_tests(
     *,
     parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
     preloaded_outline_files: Optional[Dict[str, Dict[str, Any]]] = None,
+    live_imports: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Derive impacted `T`-layer tests for `target_paths` by combining:
       1) FRAS graph `dependents_adj` BFS up to `max_depth` (`direct-fras`, `transitive-fras`)
-      2) Warm `.aoci/.cache/outline_cache.json` static import fallback (`static-import`)
+      2) Warm `.aoci/.cache/outline_cache.json` (or opt-in read-only `live_imports`) static import fallback (`static-import`)
       3) Multi-language test naming conventions (`naming-convention`)
     """
     targets = list(dict.fromkeys(normalize_relpath(str(p)) for p in target_paths if str(p).strip()))
@@ -503,13 +559,19 @@ def find_impacted_tests(
 
     target_infos = [_build_target_info(t) for t in targets]
 
-    # 2) Warm Outline Static Import Fallback (zero source-disk scan)
+    # 2) Warm Outline (or opt-in read-only live extraction) Static Import Fallback
     cache_files = preloaded_outline_files if preloaded_outline_files is not None else _load_outline_cache(root)
-    if cache_files:
+    if cache_files or live_imports:
         go_cache: Dict[str, Tuple[str, str]] = {}
         ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
         for test_rel in sorted(test_entries.keys()):
-            imports, py_members = _extract_cached_imports(cache_files.get(test_rel))
+            cached_rec = cache_files.get(test_rel) if cache_files else None
+            if cached_rec is not None:
+                imports, py_members = _extract_cached_imports(cached_rec)
+            elif live_imports:
+                imports, py_members = _extract_live_test_imports(root, test_rel)
+            else:
+                imports, py_members = [], []
             if not imports and not py_members:
                 continue
             eco = _static_ecosystem(test_rel)

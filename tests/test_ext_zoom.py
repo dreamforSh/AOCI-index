@@ -96,9 +96,9 @@ class HubZoomTests(RepoTestCase):
         ts_path = self.write("web/session.ts", ts_src)
         ts_spans = hubs.extract_symbol_spans(ts_path, "web/session.ts")
         ts_map = {sp["symbol"]: (sp["start"], sp["end"]) for sp in ts_spans}
-        self.assertEqual(ts_map["Session"], (3, 6))
-        self.assertEqual(ts_map["verifySession"], (7, 10))
-        self.assertEqual(ts_map["SessionStore"], (11, 15))
+        self.assertEqual(ts_map["Session"], (3, 5))
+        self.assertEqual(ts_map["verifySession"], (7, 9))
+        self.assertEqual(ts_map["SessionStore"], (11, 13))
         # Same-line exports share [L16-L16] cleanly without inverted bounds
         self.assertEqual(ts_map["helper"], (16, 16))
         self.assertEqual(ts_map["UserSession"], (16, 16))
@@ -127,9 +127,9 @@ class HubZoomTests(RepoTestCase):
         go_path = self.write("pkg/server.go", go_src)
         go_spans = hubs.extract_symbol_spans(go_path, "pkg/server.go")
         go_map = {sp["symbol"]: (sp["start"], sp["end"]) for sp in go_spans}
-        self.assertEqual(go_map["Server"], (5, 8))
-        self.assertEqual(go_map["NewServer"], (9, 12))
-        self.assertEqual(go_map["Server.Handle"], (13, 16))
+        self.assertEqual(go_map["Server"], (5, 7))
+        self.assertEqual(go_map["NewServer"], (9, 11))
+        self.assertEqual(go_map["Server.Handle"], (13, 15))
         self.assertEqual(go_map["Client.Handle"], (17, 19))
 
     def test_zoom_scaffold_cli_and_output_file(self):

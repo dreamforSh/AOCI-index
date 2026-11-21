@@ -44,121 +44,129 @@ class _MemoryIndexCache:
 
     def __init__(self, max_slots: int = 16) -> None:
         self._max_slots = max(1, max_slots)
+        self._lock = threading.RLock()
         self._slots: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._outline_slots: "OrderedDict[str, Tuple[Any, Dict[str, Any]]]" = OrderedDict()
         self._hub_slots: "OrderedDict[str, Tuple[Any, List[Dict[str, Any]]]]" = OrderedDict()
 
     def invalidate(self, root: Path) -> None:
         root_key = str(root)
-        self._slots.pop(root_key, None)
-        self._outline_slots.pop(root_key, None)
-        self._hub_slots.pop(root_key, None)
+        with self._lock:
+            self._slots.pop(root_key, None)
+            self._outline_slots.pop(root_key, None)
+            self._hub_slots.pop(root_key, None)
 
     def get(self, root: Path) -> Optional[Dict[str, Any]]:
         aoci_dir = root / aoci_index.AOCI_DIR_NAME
         code_path = aoci_dir / aoci_index.CODE_FILE
-        if not code_path.is_file():
-            self.invalidate(root)
-            return None
-        key = (
-            aoci_index._stat_key(code_path),
-            aoci_index._stat_key(aoci_dir / aoci_index.MANIFEST_FILE),
-            aoci_index._stat_key(aoci_dir / aoci_index.META_FILE),
-            aoci_index._stat_key(aoci_dir / aoci_index.GLOSSARY_FILE),
-        )
-        root_key = str(root)
-        cached = self._slots.get(root_key)
-        if cached is not None and cached.get("key") == key:
-            self._slots.move_to_end(root_key)
-            return cached
+        with self._lock:
+            if not code_path.is_file():
+                self.invalidate(root)
+                return None
+            key = (
+                aoci_index._stat_key(code_path),
+                aoci_index._stat_key(aoci_dir / aoci_index.MANIFEST_FILE),
+                aoci_index._stat_key(aoci_dir / aoci_index.META_FILE),
+                aoci_index._stat_key(aoci_dir / aoci_index.GLOSSARY_FILE),
+            )
+            root_key = str(root)
+            cached = self._slots.get(root_key)
+            if cached is not None and cached.get("key") == key:
+                self._slots.move_to_end(root_key)
+                return cached
 
-        entries, malformed = aoci_index.parse_code_volume(code_path)
-        parsed = aoci_index.parse_entries_map(entries)
-        deps, dependents = aoci_index.build_fras_graph(entries, parsed_entries=parsed)
-        mention_index = aoci_index.PathMentionIndex(sorted(entries.keys()))
-        estimated_tokens = max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
-        slot: Dict[str, Any] = {
-            "key": key,
-            "entries": entries,
-            "parsed": parsed,
-            "malformed": malformed,
-            "deps": deps,
-            "dependents": dependents,
-            "mention_index": mention_index,
-            "bm25": None,
-            "glossary": aoci_index.parse_glossary(aoci_dir),
-            "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or root.name,
-            "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
-            "git_hdr": aoci_index.parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown",
-            "domains": aoci_index.parse_declared_domains(aoci_dir),
-            "estimated_tokens": estimated_tokens,
-        }
-        self._slots[root_key] = slot
-        self._slots.move_to_end(root_key)
-        while len(self._slots) > self._max_slots:
-            self._slots.popitem(last=False)
-        return slot
+            duplicates: List[str] = []
+            entries, malformed = aoci_index.parse_code_volume(code_path, duplicates=duplicates)
+            parsed = aoci_index.parse_entries_map(entries)
+            deps, dependents = aoci_index.build_fras_graph(entries, parsed_entries=parsed)
+            mention_index = aoci_index.PathMentionIndex(sorted(entries.keys()))
+            estimated_tokens = max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
+            slot: Dict[str, Any] = {
+                "key": key,
+                "entries": entries,
+                "parsed": parsed,
+                "malformed": malformed,
+                "duplicates": duplicates,
+                "deps": deps,
+                "dependents": dependents,
+                "mention_index": mention_index,
+                "bm25": None,
+                "glossary": aoci_index.parse_glossary(aoci_dir),
+                "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or root.name,
+                "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
+                "git_hdr": aoci_index.parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown",
+                "domains": aoci_index.parse_declared_domains(aoci_dir),
+                "estimated_tokens": estimated_tokens,
+            }
+            self._slots[root_key] = slot
+            self._slots.move_to_end(root_key)
+            while len(self._slots) > self._max_slots:
+                self._slots.popitem(last=False)
+            return slot
 
     def get_bm25(self, slot: Dict[str, Any]) -> aoci_index.BM25Index:
-        idx = slot.get("bm25")
-        if idx is None:
-            if aoci_index.BM25Index is aoci_index._graph.BM25Index:
-                idx = aoci_index.BM25Index(slot["entries"], parsed_entries=slot["parsed"])
-            else:
-                idx = aoci_index.BM25Index(slot["entries"])
-            slot["bm25"] = idx
-        return idx
+        with self._lock:
+            idx = slot.get("bm25")
+            if idx is None:
+                if aoci_index.BM25Index is aoci_index._graph.BM25Index:
+                    idx = aoci_index.BM25Index(slot["entries"], parsed_entries=slot["parsed"])
+                else:
+                    idx = aoci_index.BM25Index(slot["entries"])
+                slot["bm25"] = idx
+            return idx
 
     def get_outline_files(self, root: Path) -> Optional[Dict[str, Any]]:
         cache_path = root / aoci_index.AOCI_DIR_NAME / aoci_index.CACHE_DIR / aoci_index.OUTLINE_CACHE
-        if not cache_path.is_file():
-            self._outline_slots.pop(str(root), None)
-            return None
-        key = aoci_index._stat_key(cache_path)
         root_key = str(root)
-        cached = self._outline_slots.get(root_key)
-        if cached is not None and cached[0] == key:
-            self._outline_slots.move_to_end(root_key)
-            return cached[1]
-        try:
-            loaded = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return None
-        if not isinstance(loaded, dict):
-            return None
-        sv = loaded.get("schema_version")
-        if sv is not None:
-            try:
-                if int(sv) != 2:
-                    return None
-            except (ValueError, TypeError):
+        with self._lock:
+            if not cache_path.is_file():
+                self._outline_slots.pop(root_key, None)
                 return None
-        files_obj = loaded.get("files") if isinstance(loaded.get("files"), dict) else loaded
-        if not isinstance(files_obj, dict):
-            return None
-        self._outline_slots[root_key] = (key, files_obj)
-        self._outline_slots.move_to_end(root_key)
-        while len(self._outline_slots) > self._max_slots:
-            self._outline_slots.popitem(last=False)
-        return files_obj
+            key = aoci_index._stat_key(cache_path)
+            cached = self._outline_slots.get(root_key)
+            if cached is not None and cached[0] == key:
+                self._outline_slots.move_to_end(root_key)
+                return cached[1]
+            try:
+                loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                return None
+            if not isinstance(loaded, dict):
+                return None
+            sv = loaded.get("schema_version")
+            if sv is not None:
+                try:
+                    if int(sv) != 2:
+                        return None
+                except (ValueError, TypeError):
+                    return None
+            files_obj = loaded.get("files") if isinstance(loaded.get("files"), dict) else loaded
+            if not isinstance(files_obj, dict):
+                return None
+            self._outline_slots[root_key] = (key, files_obj)
+            self._outline_slots.move_to_end(root_key)
+            while len(self._outline_slots) > self._max_slots:
+                self._outline_slots.popitem(last=False)
+            return files_obj
 
     def get_hub_records(self, root: Path) -> Optional[List[Dict[str, Any]]]:
         hubs_path = root / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
-        if not hubs_path.is_file():
-            self._hub_slots.pop(str(root), None)
-            return None
-        key = aoci_index._stat_key(hubs_path)
         root_key = str(root)
-        cached = self._hub_slots.get(root_key)
-        if cached is not None and cached[0] == key:
+        with self._lock:
+            if not hubs_path.is_file():
+                self._hub_slots.pop(root_key, None)
+                return None
+            key = aoci_index._stat_key(hubs_path)
+            cached = self._hub_slots.get(root_key)
+            if cached is not None and cached[0] == key:
+                self._hub_slots.move_to_end(root_key)
+                return cached[1]
+            records, _ = aoci_index._hubs.parse_hubs_volume(hubs_path)
+            self._hub_slots[root_key] = (key, records)
             self._hub_slots.move_to_end(root_key)
-            return cached[1]
-        records, _ = aoci_index._hubs.parse_hubs_volume(hubs_path)
-        self._hub_slots[root_key] = (key, records)
-        self._hub_slots.move_to_end(root_key)
-        while len(self._hub_slots) > self._max_slots:
-            self._hub_slots.popitem(last=False)
-        return records
+            while len(self._hub_slots) > self._max_slots:
+                self._hub_slots.popitem(last=False)
+            return records
 
 
 _CACHE = _MemoryIndexCache()
@@ -246,6 +254,11 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "path": {"type": "string", "description": "Glob pattern on relative path (e.g. 'src/auth/*')"},
                 "impact": {"type": "string", "description": "Target file to trace transitive upstream dependents"},
                 "tests_for": {"type": "string", "description": "Target file to find impacted T-layer test files"},
+                "live_test_imports": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Read uncached T-layer test imports in memory when outline cache misses",
+                },
                 "depth": {"type": "integer", "default": 1, "description": "Transitive hops for `impact` (default 1) or `tests_for` (default 3)"},
                 "top": {"type": "integer", "default": 20, "description": "Maximum entries to return (0 = unlimited)"},
             },
@@ -267,6 +280,11 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "depth": {"type": "integer", "default": 1, "description": "Graph expansion hops"},
                 "budget": {"type": "integer", "default": 0, "description": "Optional token budget ceiling (0 = unlimited)"},
                 "with_tests": {"type": "boolean", "default": False, "description": "Attach impacted T-layer test files"},
+                "live_test_imports": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Read uncached T-layer test imports in memory when outline cache misses",
+                },
             },
             "required": ["root", "paths"],
         },
@@ -286,6 +304,11 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "staged": {"type": "boolean", "default": False, "description": "Inspect staged (`--cached`) changes"},
                 "depth": {"type": "integer", "default": 1, "description": "Upstream caller hops"},
                 "with_tests": {"type": "boolean", "default": False, "description": "Attach impacted T-layer test files"},
+                "live_test_imports": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Read uncached T-layer test imports in memory when outline cache misses",
+                },
             },
             "required": ["root"],
         },
@@ -487,6 +510,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "co_change_commits": {"type": "integer", "default": 200, "description": "Max commits scanned when check_co_change=true"},
                 "min_co_changes": {"type": "integer", "default": 3, "description": "Minimum co-change commit threshold"},
                 "min_co_confidence": {"type": "number", "default": 0.6, "description": "Minimum co-change confidence in [0,1]"},
+                "exclude_tests": {"type": "boolean", "default": False, "description": "Exclude T-layer test files from co-change analysis"},
             },
             "required": ["root"],
         },
@@ -558,6 +582,11 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                     "default": False,
                     "description": "Attach impacted T-layer test files for packed seeds",
                 },
+                "live_test_imports": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Read uncached T-layer test imports in memory when outline cache misses",
+                },
                 "live_anchors": {
                     "type": "boolean",
                     "default": False,
@@ -622,6 +651,57 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 },
             },
             "required": ["root"],
+        },
+    },
+    {
+        "name": "aoci_apply_sync",
+        "description": (
+            "Execute ordered index synchronization in one call "
+            "(restore -> migrate-renames -> ack -> upsert -> verify)."
+        ),
+        "annotations": _MUTATE_IDEMPOTENT_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "restore": {"type": "boolean", "default": False, "description": "Run semantic pool restore (`--no-prune`) first"},
+                "allow_sha_fallback": {"type": "boolean", "default": False, "description": "Allow content-hash fallback in `restore`"},
+                "migrate_renames": {"type": "boolean", "default": False, "description": "Migrate exact and similar renames"},
+                "exact_only": {"type": "boolean", "default": False, "description": "Only migrate exact byte-identical renames"},
+                "ack_paths": {"type": "array", "items": {"type": "string"}, "description": "Modified paths to acknowledge (requires `reviewed: true` unless `dry_run`)"},
+                "ack_impl_only": {"type": "boolean", "default": False, "description": "Acknowledge `impl_only` modified files (requires `reviewed: true` unless `dry_run`)"},
+                "reviewed": {"type": "boolean", "default": False, "description": "Confirm acknowledged files were read and verified"},
+                "entries": {"type": "array", "items": {"type": "string"}, "description": "object-fras-v2 entry lines for `upsert`"},
+                "entries_file": {"type": "string", "description": "Optional batch file of object-fras-v2 lines for `upsert`"},
+                "prune_only": {"type": "boolean", "default": False, "description": "Only prune deleted files in `upsert`"},
+                "no_prune": {"type": "boolean", "default": False, "description": "Skip pruning deleted files in `upsert`"},
+                "strict_size": {"type": "boolean", "default": False, "description": "Fail instead of auto-fixing Size tier in `upsert`"},
+                "drop_malformed": {"type": "boolean", "default": False, "description": "Allow dropping pre-existing malformed lines"},
+                "verify": {"type": "boolean", "default": True, "description": "Run trailing `verify` check (default: true)"},
+                "full_verify": {"type": "boolean", "default": False, "description": "Run full SHA-256 `verify` instead of `--fast`"},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview mutating stages without writing to disk"},
+            },
+            "required": ["root"],
+        },
+    },
+    {
+        "name": "aoci_symbol",
+        "description": (
+            "Search symbols across `.aoci/aoci.hubs.txt`, outline cache (or opt-in read-only `live` extraction), "
+            "and FRAS `A:` exports, returning spans, signatures, and FRAS graph dependencies/callers."
+        ),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "name": {"type": "string", "description": "Symbol name or substring to look up"},
+                "exact": {"type": "boolean", "default": False, "description": "Restrict to exact / qualified suffix matches"},
+                "depth": {"type": "integer", "default": 1, "description": "FRAS neighbor hops per matched file"},
+                "limit": {"type": "integer", "default": 20, "description": "Maximum matches to return (0 = unlimited)"},
+                "live": {"type": "boolean", "default": False, "description": "Read-only live outline fallback for files absent from outline cache"},
+            },
+            "required": ["root", "name"],
         },
     },
 ]
@@ -863,6 +943,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 max_depth=tests_depth,
                 parsed_entries=parsed_map,
                 preloaded_outline_files=_CACHE.get_outline_files(root),
+                live_imports=bool(args.get("live_test_imports", False)),
             )
             tests_for_set = {item["path"] for item in impacted_tests}
 
@@ -970,24 +1051,28 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 max_depth=max(3, depth),
                 parsed_entries=slot["parsed"],
                 preloaded_outline_files=_CACHE.get_outline_files(root),
+                live_imports=bool(args.get("live_test_imports", False)),
             )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
     if name == "aoci_diff":
         slot = _CACHE.get(root)
         depth = int(args["depth"]) if args.get("depth") is not None else 1
+        with_tests = bool(args.get("with_tests", False))
         brief = aoci_index.compute_diff_briefing(
             root,
             rev=args.get("rev"),
             staged=bool(args.get("staged", False)),
             depth=depth,
-            with_tests=bool(args.get("with_tests", False)),
+            with_tests=with_tests,
             cached_entries=slot["entries"] if slot is not None else None,
             cached_deps=slot["deps"] if slot is not None else None,
             cached_dependents=slot["dependents"] if slot is not None else None,
             cached_invariants=slot["invariants"] if slot is not None else None,
             cached_parsed=slot["parsed"] if slot is not None else None,
             cached_hub_records=_CACHE.get_hub_records(root),
+            preloaded_outline_files=_CACHE.get_outline_files(root) if with_tests else None,
+            live_test_imports=bool(args.get("live_test_imports", False)),
         )
         return (not brief.get("ok")), json.dumps(brief, indent=2, ensure_ascii=False)
 
@@ -1118,16 +1203,32 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
 
     if name == "aoci_ensure_git_exclude":
         rc, out = _run_cli_capture(["ensure-git-exclude", "--root", str(root), "--json"])
+        _CACHE.invalidate(root)
         return rc != 0, out
 
     if name == "aoci_lint":
+        slot = _CACHE.get(root)
         res = aoci_index.compute_lint(
             root,
             code_filter=args.get("code"),
+            cached_entries=slot["entries"] if slot is not None else None,
+            cached_parsed=slot["parsed"] if slot is not None else None,
+            cached_malformed=slot["malformed"] if slot is not None else None,
+            cached_duplicates=slot.get("duplicates") if slot is not None else None,
+            cached_domains=slot["domains"] if slot is not None else None,
         )
         if res.get("error"):
             return True, f"ERROR: {res['error']}"
-        is_err = bool(res["findings"] and args.get("strict"))
+        all_findings = res["findings"]
+        total_count = len(all_findings)
+        is_err = bool(all_findings and args.get("strict"))
+        raw_limit = args.get("limit", 100)
+        limit = 100 if raw_limit is None else int(raw_limit)
+        if limit > 0 and total_count > limit:
+            res = dict(res)
+            res["findings"] = all_findings[:limit]
+            res["total_findings"] = total_count
+            res["truncated"] = True
         return is_err, json.dumps(res, indent=2, ensure_ascii=False)
 
     if name == "aoci_verify":
@@ -1148,6 +1249,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             co_change_commits=int(args.get("co_change_commits", 200)),
             min_co_changes=int(args.get("min_co_changes", 3)),
             min_co_confidence=float(args.get("min_co_confidence", 0.6)),
+            exclude_tests=bool(args.get("exclude_tests", False)),
             forbid_spec=args.get("forbid"),
             use_default_rules=bool(args.get("use_default_rules", True)),
             cached_entries=slot["entries"] if slot is not None else None,
@@ -1248,6 +1350,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             hub_records=hub_records,
             live_anchors=bool(args.get("live_anchors", False)),
             with_tests=bool(args.get("with_tests", False)),
+            live_test_imports=bool(args.get("live_test_imports", False)),
         )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -1309,6 +1412,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 indent=2,
                 ensure_ascii=False,
             )
+        slot = _CACHE.get(root)
         git_info = aoci_index.detect_git_info(root)
         drift = aoci_index.compute_drift(
             root,
@@ -1324,8 +1428,57 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             scaffold_fn=aoci_index.scaffold_entries,
             run_git_fn=aoci_index.run_git,
             max_diff_lines=int(args.get("max_diff_lines", 40)),
+            cached_entries=slot["entries"] if slot is not None else None,
+            cached_parsed=slot["parsed"] if slot is not None else None,
+            cached_dependents=slot["dependents"] if slot is not None else None,
         )
         return False, json.dumps(brief, indent=2, ensure_ascii=False)
+
+    if name == "aoci_apply_sync":
+        dry_run = bool(args.get("dry_run", False))
+        res = aoci_index._apply_sync.run_apply_sync(
+            root,
+            _run_cli_capture,
+            restore=bool(args.get("restore", False)),
+            allow_sha_fallback=bool(args.get("allow_sha_fallback", False)),
+            migrate_renames=bool(args.get("migrate_renames", False)),
+            exact_only=bool(args.get("exact_only", False)),
+            ack_paths=[str(p) for p in (args.get("ack_paths") or [])],
+            ack_impl_only=bool(args.get("ack_impl_only", False)),
+            reviewed=bool(args.get("reviewed", False)),
+            entries=[str(e) for e in (args.get("entries") or [])],
+            entries_file=args.get("entries_file"),
+            prune_only=bool(args.get("prune_only", False)),
+            no_prune=bool(args.get("no_prune", False)),
+            strict_size=bool(args.get("strict_size", False)),
+            drop_malformed=bool(args.get("drop_malformed", False)),
+            verify=bool(args.get("verify", True)),
+            full_verify=bool(args.get("full_verify", False)),
+            dry_run=dry_run,
+        )
+        if not dry_run:
+            _CACHE.invalidate(root)
+        return (not res.get("ok")), json.dumps(res, indent=2, ensure_ascii=False)
+
+    if name == "aoci_symbol":
+        slot = _CACHE.get(root)
+        if slot is None:
+            return True, f"ERROR: `.aoci/aoci.code.txt` not found at {root}. Run `init` first."
+        res = aoci_index._symbols.lookup_symbol(
+            root,
+            slot["entries"],
+            slot["deps"],
+            slot["dependents"],
+            str(args.get("name", "")),
+            exact=bool(args.get("exact", False)),
+            depth=int(args["depth"]) if args.get("depth") is not None else 1,
+            limit=int(args["limit"]) if args.get("limit") is not None else 20,
+            live=bool(args.get("live", False)),
+            parsed_entries=slot["parsed"],
+            preloaded_outline_files=_CACHE.get_outline_files(root),
+            hub_records=_CACHE.get_hub_records(root),
+        )
+        return (not res.get("ok")), json.dumps(res, indent=2, ensure_ascii=False)
 
     return True, f"Unknown tool: `{name}`"
 

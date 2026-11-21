@@ -1,0 +1,8 @@
+#AOCI-HUBS-VOLUME: 1
+#Format: symbol-hubs-v1
+#Updated-At: 2026-11-20T00:00:00Z
+#Tracked-Sections: 3
+
+src/auth/jwt.py#verify_token[L1-L35]: F:Decodes JWT header/claims, selects KID signing key, and enforces exp/clock_skew | S:Reject alg=none explicitly and keep previous KID active >=24h
+src/order/service.py#create_order[L1-L40]: F:Validates int64 cents amount, reserves inventory row-locked, and persists idempotent order | S:Must hold idempotency_key lock; never call external HTTP inside DB tx
+src/order/service.py#cancel_order[L42-L75]: F:Transitions order to canceled state and releases reserved stock atomically | S:Only permitted from PENDING/CONFIRMED states

@@ -738,8 +738,9 @@ def _render_html_dependency_graph(
   header label {{ font-size:13px; color:var(--muted); display:flex; align-items:center; gap:5px; }}
   .stats {{ margin-left:auto; font-size:12px; color:var(--muted); }}
   main {{ flex:1; display:flex; min-height:0; }}
-  #canvas-wrap {{ flex:1; position:relative; overflow:auto; background:radial-gradient(circle at top left,#172554 0%,var(--bg) 55%); }}
-  svg {{ display:block; min-width:100%; min-height:100%; cursor:grab; }}
+  #canvas-wrap {{ flex:1; position:relative; overflow:hidden; background:radial-gradient(circle at top left,#172554 0%,var(--bg) 55%); }}
+  svg {{ display:block; width:100%; height:100%; cursor:grab; user-select:none; }}
+  svg.grabbing {{ cursor:grabbing; }}
   #drawer {{ width:340px; max-width:40vw; background:var(--panel); border-left:1px solid var(--border); padding:14px; overflow:auto; font-size:13px; line-height:1.45; }}
   .kv {{ margin:8px 0; }}
   .kv .k {{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }}
@@ -748,13 +749,17 @@ def _render_html_dependency_graph(
   .badge.risk {{ background:#451a03; color:var(--warn); }}
   .badge.cycle {{ background:#4c0519; color:var(--danger); }}
   .node-box {{ cursor:pointer; transition:opacity .15s; }}
+  .node-box.dim {{ opacity:0.18; }}
   .node-box rect {{ fill:#1e293b; stroke:#475569; stroke-width:1.4; rx:6; }}
   .node-box.selected rect {{ stroke:var(--accent); stroke-width:2.4; fill:#0f2942; }}
   .node-box.cycle rect {{ stroke:var(--danger); stroke-width:2; }}
   .node-box text {{ fill:var(--text); font-size:11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
-  .edge {{ fill:none; stroke:#475569; stroke-width:1.25; opacity:0.65; }}
+  .edge {{ fill:none; stroke:#475569; stroke-width:1.25; opacity:0.65; transition:opacity .15s; }}
   .edge.hi {{ stroke:var(--accent); stroke-width:2.2; opacity:1; }}
   .edge.cycle {{ stroke:var(--danger); stroke-width:1.9; opacity:0.9; }}
+  .edge.dim {{ opacity:0.18; }}
+  .nbr-btn {{ display:block; width:100%; text-align:left; background:var(--bg); color:var(--accent); border:1px solid var(--border); border-radius:4px; padding:4px 8px; margin:3px 0; font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; }}
+  .nbr-btn:hover {{ border-color:var(--accent); }}
 </style>
 </head>
 <body>
@@ -769,7 +774,14 @@ def _render_html_dependency_graph(
     <option value="7">Imp >= 7</option>
     <option value="9">Imp >= 9</option>
   </select>
+  <select id="layoutMode">
+    <option value="grouped">Grouped</option>
+    <option value="layered">Layered (E→A→D→P→C)</option>
+  </select>
   <label><input id="cyclesOnly" type="checkbox"> Cycles Only</label>
+  <button id="zoomIn" type="button" title="Zoom In">+</button>
+  <button id="zoomOut" type="button" title="Zoom Out">-</button>
+  <button id="zoomReset" type="button" title="Reset Zoom">100%</button>
   <button id="resetBtn" type="button">Reset</button>
   <span class="stats" id="stats"></span>
 </header>
@@ -787,14 +799,43 @@ def _render_html_dependency_graph(
   const layerEl = document.getElementById("layer");
   const domainEl = document.getElementById("domain");
   const minImpEl = document.getElementById("minImp");
+  const layoutEl = document.getElementById("layoutMode");
   const cyclesEl = document.getElementById("cyclesOnly");
   const statsEl = document.getElementById("stats");
+  const zoomInBtn = document.getElementById("zoomIn");
+  const zoomOutBtn = document.getElementById("zoomOut");
+  const zoomResetBtn = document.getElementById("zoomReset");
   const ns = "http://www.w3.org/2000/svg";
+  const LAYER_ORDER = ["E", "U", "M", "A", "D", "K", "P", "I", "C", "R", "T", "O"];
+  const isTD = data.direction === "TD" || data.direction === "TB";
+  const nodeById = new Map(data.nodes.map(n => [n.id, n]));
   const layers = Array.from(new Set(data.nodes.map(n => n.layer).filter(Boolean))).sort();
   const domains = Array.from(new Set(data.nodes.map(n => n.domain).filter(Boolean))).sort();
   layers.forEach(l => {{ const o = document.createElement("option"); o.value = l; o.textContent = "Layer " + l; layerEl.appendChild(o); }});
   domains.forEach(d => {{ const o = document.createElement("option"); o.value = d; o.textContent = "Domain " + d; domainEl.appendChild(o); }});
   let selectedId = null;
+  let panX = 0, panY = 0, scale = 1.0;
+  let viewportG = null;
+  let dragging = false, didDrag = false, dragSX = 0, dragSY = 0, basePX = 0, basePY = 0;
+
+  function applyTransform() {{
+    if (viewportG) {{
+      viewportG.setAttribute("transform", `translate(${{panX}} ${{panY}}) scale(${{scale}})`);
+    }}
+    zoomResetBtn.textContent = Math.round(scale * 100) + "%";
+  }}
+
+  function zoomAt(factor, clientX, clientY) {{
+    const next = Math.max(0.25, Math.min(3.0, scale * factor));
+    const ratio = next / scale;
+    const rect = svg.getBoundingClientRect();
+    const ox = (clientX !== undefined ? clientX - rect.left : rect.width / 2);
+    const oy = (clientY !== undefined ? clientY - rect.top : rect.height / 2);
+    panX = ox - (ox - panX) * ratio;
+    panY = oy - (oy - panY) * ratio;
+    scale = next;
+    applyTransform();
+  }}
 
   function addField(parent, k, v) {{
     if (!v || v === "-") return;
@@ -802,6 +843,26 @@ def _render_html_dependency_graph(
     const kl = document.createElement("div"); kl.className = "k"; kl.textContent = k;
     const vl = document.createElement("div"); vl.className = "v"; vl.textContent = v;
     wrap.appendChild(kl); wrap.appendChild(vl); parent.appendChild(wrap);
+  }}
+
+  function addNeighborButtons(parent, title, nodeList) {{
+    if (!nodeList.length) return;
+    const wrap = document.createElement("div"); wrap.className = "kv";
+    const kl = document.createElement("div"); kl.className = "k"; kl.textContent = title + " (" + nodeList.length + ")";
+    wrap.appendChild(kl);
+    nodeList.forEach(target => {{
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "nbr-btn";
+      btn.textContent = target.key;
+      btn.addEventListener("click", () => {{
+        selectedId = target.id;
+        showDetails(target);
+        render();
+      }});
+      wrap.appendChild(btn);
+    }});
+    parent.appendChild(wrap);
   }}
 
   function showDetails(n) {{
@@ -824,6 +885,10 @@ def _render_html_dependency_graph(
     addField(drawer, "Requires (R:)", n.r);
     addField(drawer, "API / Exports (A:)", n.a);
     addField(drawer, "Risk / Side-effects (S:)", n.s);
+    const outNodes = data.edges.filter(e => e.src === n.id).map(e => nodeById.get(e.dst)).filter(Boolean);
+    const inNodes = data.edges.filter(e => e.dst === n.id).map(e => nodeById.get(e.src)).filter(Boolean);
+    addNeighborButtons(drawer, "Dependencies (outgoing)", outNodes);
+    addNeighborButtons(drawer, "Callers (incoming)", inNodes);
   }}
 
   function render() {{
@@ -832,6 +897,7 @@ def _render_html_dependency_graph(
     const df = domainEl.value;
     const mi = parseInt(minImpEl.value || "0", 10);
     const cyc = cyclesEl.checked;
+    const layoutMode = layoutEl.value;
     const visible = data.nodes.filter(n => {{
       if (lf && n.layer !== lf) return false;
       if (df && n.domain !== df) return false;
@@ -841,34 +907,69 @@ def _render_html_dependency_graph(
       return true;
     }});
     const visSet = new Set(visible.map(n => n.id));
+    if (selectedId && !visSet.has(selectedId)) {{
+      selectedId = null;
+    }}
     const visEdges = data.edges.filter(e => visSet.has(e.src) && visSet.has(e.dst));
     statsEl.textContent = visible.length + " nodes | " + visEdges.length + " edges | " + data.cycles.length + " cycle(s)";
 
+    const focusSet = new Set();
+    if (selectedId) {{
+      focusSet.add(selectedId);
+      visEdges.forEach(e => {{
+        if (e.src === selectedId) focusSet.add(e.dst);
+        if (e.dst === selectedId) focusSet.add(e.src);
+      }});
+    }}
+
     const groups = new Map();
+    const groupTitle = new Map();
     visible.forEach(n => {{
-      const g = n.group || "ungrouped";
+      const g = layoutMode === "layered" ? (n.layer || "?") : (n.group || "ungrouped");
       if (!groups.has(g)) groups.set(g, []);
       groups.get(g).push(n);
+      if (!groupTitle.has(g)) {{
+        groupTitle.set(g, layoutMode === "layered" ? (g === "?" ? "Ungrouped" : "Layer " + g) : (n.groupLabel || g));
+      }}
     }});
-    const pos = {{}};
-    const colW = 280, rowH = 52, pad = 28;
-    let maxW = 900, maxH = 520, gx = 0;
-    const sortedGroups = Array.from(groups.keys()).sort();
-    sortedGroups.forEach(g => {{
-      const items = groups.get(g);
-      items.forEach((n, idx) => {{
-        const x = pad + gx * colW;
-        const y = pad + 26 + idx * rowH;
-        pos[n.id] = {{ x, y, w: 236, h: 36 }};
-        maxW = Math.max(maxW, x + 280);
-        maxH = Math.max(maxH, y + 70);
-      }});
-      gx += 1;
+    const sortedGroups = Array.from(groups.keys()).sort((a, b) => {{
+      if (layoutMode === "layered") {{
+        const ia = LAYER_ORDER.indexOf(a);
+        const ib = LAYER_ORDER.indexOf(b);
+        const ra = ia === -1 ? 99 : ia;
+        const rb = ib === -1 ? 99 : ib;
+        if (ra !== rb) return ra - rb;
+      }}
+      return a.localeCompare(b);
     }});
-    svg.setAttribute("width", String(maxW));
-    svg.setAttribute("height", String(maxH));
-    svg.textContent = "";
 
+    const pos = {{}};
+    const nodeW = 236, nodeH = 36, pad = 28;
+    const colW = 280, rowH = 52, colCardW = 256, rowGroupH = 96;
+    const hdrCoords = [];
+    sortedGroups.forEach((g, gi) => {{
+      const items = groups.get(g);
+      if (layoutMode === "layered") {{
+        items.sort((a, b) => (b.imp - a.imp) || a.key.localeCompare(b.key));
+      }}
+      if (isTD) {{
+        hdrCoords.push({{ x: pad, y: pad + gi * rowGroupH, label: groupTitle.get(g) || g }});
+        items.forEach((n, idx) => {{
+          const x = pad + idx * colCardW;
+          const y = pad + 18 + gi * rowGroupH;
+          pos[n.id] = {{ x, y, w: nodeW, h: nodeH }};
+        }});
+      }} else {{
+        hdrCoords.push({{ x: pad + gi * colW, y: 18, label: groupTitle.get(g) || g }});
+        items.forEach((n, idx) => {{
+          const x = pad + gi * colW;
+          const y = pad + 26 + idx * rowH;
+          pos[n.id] = {{ x, y, w: nodeW, h: nodeH }};
+        }});
+      }}
+    }});
+
+    svg.textContent = "";
     const defs = document.createElementNS(ns, "defs");
     const marker = document.createElementNS(ns, "marker");
     marker.setAttribute("id", "arrow"); marker.setAttribute("viewBox", "0 0 10 10");
@@ -879,31 +980,62 @@ def _render_html_dependency_graph(
     mp.setAttribute("d", "M 0 1 L 10 5 L 0 9 z"); mp.setAttribute("fill", "#64748b");
     marker.appendChild(mp); defs.appendChild(marker); svg.appendChild(defs);
 
+    viewportG = document.createElementNS(ns, "g");
+    viewportG.setAttribute("id", "viewport");
+    svg.appendChild(viewportG);
+    applyTransform();
+
     visEdges.forEach(e => {{
       const a = pos[e.src], b = pos[e.dst];
       if (!a || !b) return;
-      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
-      const mx = (x1 + x2) / 2;
+      let d = "";
+      if (isTD) {{
+        if (Math.abs(a.y - b.y) < 1) {{
+          const x1 = a.x + a.w / 2, y1 = a.y + a.h, x2 = b.x + b.w / 2, y2 = b.y + b.h;
+          const bend = 40 + Math.min(80, Math.abs(x2 - x1) * 0.15);
+          d = `M ${{x1}} ${{y1}} C ${{x1}} ${{y1 + bend}}, ${{x2}} ${{y2 + bend}}, ${{x2}} ${{y2}}`;
+        }} else if (b.y > a.y) {{
+          const x1 = a.x + a.w / 2, y1 = a.y + a.h, x2 = b.x + b.w / 2, y2 = b.y, my = (y1 + y2) / 2;
+          d = `M ${{x1}} ${{y1}} C ${{x1}} ${{my}}, ${{x2}} ${{my}}, ${{x2}} ${{y2}}`;
+        }} else {{
+          const x1 = a.x + a.w / 2, y1 = a.y, x2 = b.x + b.w / 2, y2 = b.y + b.h, my = (y1 + y2) / 2;
+          d = `M ${{x1}} ${{y1}} C ${{x1}} ${{my}}, ${{x2}} ${{my}}, ${{x2}} ${{y2}}`;
+        }}
+      }} else {{
+        if (Math.abs(a.x - b.x) < 1) {{
+          const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x + b.w, y2 = b.y + b.h / 2;
+          const bend = 45 + Math.min(90, Math.abs(y2 - y1) * 0.2);
+          d = `M ${{x1}} ${{y1}} C ${{x1 + bend}} ${{y1}}, ${{x2 + bend}} ${{y2}}, ${{x2}} ${{y2}}`;
+        }} else if (b.x > a.x) {{
+          const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2, mx = (x1 + x2) / 2;
+          d = `M ${{x1}} ${{y1}} C ${{mx}} ${{y1}}, ${{mx}} ${{y2}}, ${{x2}} ${{y2}}`;
+        }} else {{
+          const x1 = a.x, y1 = a.y + a.h / 2, x2 = b.x + b.w, y2 = b.y + b.h / 2, mx = (x1 + x2) / 2;
+          d = `M ${{x1}} ${{y1}} C ${{mx}} ${{y1}}, ${{mx}} ${{y2}}, ${{x2}} ${{y2}}`;
+        }}
+      }}
       const p = document.createElementNS(ns, "path");
-      p.setAttribute("d", `M ${{x1}} ${{y1}} C ${{mx}} ${{y1}}, ${{mx}} ${{y2}}, ${{x2}} ${{y2}}`);
+      p.setAttribute("d", d);
       p.setAttribute("marker-end", "url(#arrow)");
       const hi = selectedId && (e.src === selectedId || e.dst === selectedId);
-      p.setAttribute("class", "edge" + (e.inCycle ? " cycle" : "") + (hi ? " hi" : ""));
-      svg.appendChild(p);
+      const dim = selectedId && !hi;
+      p.setAttribute("class", "edge" + (e.inCycle ? " cycle" : "") + (hi ? " hi" : "") + (dim ? " dim" : ""));
+      viewportG.appendChild(p);
     }});
 
-    sortedGroups.forEach((g, gi) => {{
+    hdrCoords.forEach(h => {{
       const lbl = document.createElementNS(ns, "text");
-      lbl.setAttribute("x", String(pad + gi * colW)); lbl.setAttribute("y", "18");
+      lbl.setAttribute("x", String(h.x)); lbl.setAttribute("y", String(h.y));
       lbl.setAttribute("fill", "#94a3b8"); lbl.setAttribute("font-size", "12");
-      lbl.textContent = (groups.get(g)[0] && groups.get(g)[0].groupLabel) || g;
-      svg.appendChild(lbl);
+      lbl.textContent = h.label;
+      viewportG.appendChild(lbl);
     }});
 
     visible.forEach(n => {{
       const p = pos[n.id];
       const g = document.createElementNS(ns, "g");
-      g.setAttribute("class", "node-box" + (n.cycle ? " cycle" : "") + (n.id === selectedId ? " selected" : ""));
+      const dim = selectedId && !focusSet.has(n.id);
+      g.setAttribute("class", "node-box" + (n.cycle ? " cycle" : "") + (n.id === selectedId ? " selected" : "") + (dim ? " dim" : ""));
       const rect = document.createElementNS(ns, "rect");
       rect.setAttribute("x", String(p.x)); rect.setAttribute("y", String(p.y));
       rect.setAttribute("width", String(p.w)); rect.setAttribute("height", String(p.h));
@@ -914,14 +1046,45 @@ def _render_html_dependency_graph(
       const title = document.createElementNS(ns, "title");
       title.textContent = n.label;
       g.appendChild(rect); g.appendChild(txt); g.appendChild(title);
-      g.addEventListener("click", () => {{ selectedId = n.id; showDetails(n); render(); }});
-      svg.appendChild(g);
+      g.addEventListener("click", ev => {{ ev.stopPropagation(); selectedId = n.id; showDetails(n); render(); }});
+      viewportG.appendChild(g);
     }});
   }}
 
-  [qEl, layerEl, domainEl, minImpEl, cyclesEl].forEach(el => el.addEventListener("input", render));
+  svg.addEventListener("mousedown", ev => {{
+    if (ev.button !== 0 || ev.target.closest(".node-box")) return;
+    dragging = true; didDrag = false;
+    dragSX = ev.clientX; dragSY = ev.clientY;
+    basePX = panX; basePY = panY;
+    svg.classList.add("grabbing");
+  }});
+  window.addEventListener("mousemove", ev => {{
+    if (!dragging) return;
+    const dx = ev.clientX - dragSX, dy = ev.clientY - dragSY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) didDrag = true;
+    panX = basePX + dx; panY = basePY + dy;
+    applyTransform();
+  }});
+  window.addEventListener("mouseup", () => {{
+    if (dragging) {{ dragging = false; svg.classList.remove("grabbing"); }}
+  }});
+  svg.addEventListener("click", ev => {{
+    if (!didDrag && !ev.target.closest(".node-box") && selectedId !== null) {{
+      selectedId = null; render();
+    }}
+  }});
+  svg.addEventListener("wheel", ev => {{
+    ev.preventDefault();
+    zoomAt(ev.deltaY < 0 ? 1.12 : 1 / 1.12, ev.clientX, ev.clientY);
+  }}, {{ passive: false }});
+
+  zoomInBtn.addEventListener("click", () => zoomAt(1.2));
+  zoomOutBtn.addEventListener("click", () => zoomAt(1 / 1.2));
+  zoomResetBtn.addEventListener("click", () => {{ panX = 0; panY = 0; scale = 1.0; applyTransform(); }});
+  [qEl, layerEl, domainEl, minImpEl, layoutEl, cyclesEl].forEach(el => el.addEventListener("input", render));
   document.getElementById("resetBtn").addEventListener("click", () => {{
-    qEl.value = ""; layerEl.value = ""; domainEl.value = ""; minImpEl.value = "0"; cyclesEl.checked = false; selectedId = null; render();
+    qEl.value = ""; layerEl.value = ""; domainEl.value = ""; minImpEl.value = "0"; layoutEl.value = "grouped";
+    cyclesEl.checked = false; selectedId = null; panX = 0; panY = 0; scale = 1.0; render();
   }});
   render();
 }})();

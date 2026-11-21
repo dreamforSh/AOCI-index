@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from bisect import bisect_right
 import contextlib
 import os
 import re
@@ -19,7 +20,17 @@ from .constants import (
     normalize_relpath,
     utc_now_iso,
 )
-from .parsers import _CLEAN_SYM_RE, extract_file_outline
+from .parsers import (
+    _CLEAN_SYM_RE,
+    _JS_REGEX_PREV_CHARS,
+    _JS_REGEX_PREV_KW,
+    _find_matching_delim,
+    _skip_js_regex,
+    _skip_string_literal,
+    _strip_c_comments,
+    _strip_js_comments,
+    extract_file_outline,
+)
 
 HUB_ENTRY_RE = re.compile(
     r"^(?P<path>[^\s#:][^#:\r\n]*?)#(?P<symbol>[^\[\r\n]+?)\[L(?P<start>\d+)-L(?P<end>\d+)\]:\s*"
@@ -57,6 +68,47 @@ _OUTLINE_SPAN_EXTS: Set[str] = {
     ".cc",
     ".cxx",
 }
+
+
+_BRACE_SPAN_EXTS: Set[str] = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".mts",
+    ".cts",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".kts",
+    ".cs",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cxx",
+    ".proto",
+    ".graphql",
+    ".gql",
+    ".prisma",
+}
+
+_JS_SPAN_EXTS: Set[str] = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".mts",
+    ".cts",
+}
+
+_HASH_COMMENT_RX = re.compile(r'"[^"\\]*(?:\\[\s\S][^"\\]*)*(?:"|$)|#[^\n]*')
 
 
 def format_hub_entry(relpath: str, symbol: str, start: int, end: int, f_val: str, s_val: str) -> str:
@@ -164,6 +216,153 @@ def _clean_outline_symbol(core: str, ext: str) -> Tuple[str, str]:
     return "", "symbol"
 
 
+def _strip_hash_comments(src: str) -> str:
+    """Blank `#` line comments outside double-quoted strings while preserving exact offsets."""
+    if not src or "#" not in src:
+        return src
+    return _HASH_COMMENT_RX.sub(
+        lambda m: " " * len(m.group(0)) if m.group(0).startswith("#") else m.group(0),
+        src,
+    )
+
+
+def _build_line_offsets(text: str) -> List[int]:
+    """Return 1-based line start character offsets (`offsets[1..line_count]`)."""
+    offsets: List[int] = [0, 0]
+    pos = 0
+    n = len(text)
+    while True:
+        nl = text.find("\n", pos)
+        if nl == -1:
+            break
+        if nl + 1 < n:
+            offsets.append(nl + 1)
+        pos = nl + 1
+    return offsets
+
+
+def _offset_to_line(offsets: Sequence[int], pos: int, line_count: int) -> int:
+    idx = bisect_right(offsets, pos, lo=1) - 1
+    return max(1, min(idx, line_count))
+
+
+def _find_brace_span_end(
+    clean: str,
+    offsets: Sequence[int],
+    line_count: int,
+    start_line: int,
+    next_start: Optional[int],
+    ext: str,
+    kind: str,
+) -> Optional[int]:
+    if not clean or start_line < 1 or start_line >= len(offsets):
+        return None
+    n = len(clean)
+    i = offsets[start_line]
+    if next_start is not None and 1 <= next_start < len(offsets):
+        limit = min(n, offsets[next_start])
+    else:
+        limit = n
+    if i >= limit:
+        return None
+
+    js_mode = ext in _JS_SPAN_EXTS
+    allow_backtick = js_mode or ext == ".go"
+    single_quote_char_only = ext == ".rs"
+    paren_depth = 0
+    bracket_depth = 0
+    prev_tok = ""
+
+    while i < limit:
+        c = clean[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        if c in ('"', "'") or (allow_backtick and c == "`"):
+            nxt_i = _skip_string_literal(
+                clean, i, allow_backtick=allow_backtick, single_quote_char_only=single_quote_char_only
+            )
+            prev_tok = c if nxt_i > i + 1 or not single_quote_char_only else "'"
+            i = nxt_i
+            continue
+        if js_mode and c == "/":
+            if not prev_tok or prev_tok in _JS_REGEX_PREV_CHARS or prev_tok in _JS_REGEX_PREV_KW:
+                i = _skip_js_regex(clean, i)
+                prev_tok = "/"
+                continue
+            prev_tok = "/"
+            i += 1
+            continue
+        if c == "(":
+            paren_depth += 1
+            prev_tok = c
+            i += 1
+            continue
+        if c == ")":
+            paren_depth = max(0, paren_depth - 1)
+            prev_tok = c
+            i += 1
+            continue
+        if c == "[":
+            bracket_depth += 1
+            prev_tok = c
+            i += 1
+            continue
+        if c == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            prev_tok = c
+            i += 1
+            continue
+        if c == "{" and paren_depth == 0 and bracket_depth == 0:
+            close_b = _find_matching_delim(
+                clean,
+                i,
+                "{",
+                "}",
+                allow_backtick=allow_backtick,
+                single_quote_char_only=single_quote_char_only,
+                js_mode=js_mode,
+            )
+            if close_b >= n or clean[close_b] != "}":
+                return None
+            if (ext == ".go" and kind in ("func", "method")) or (js_mode and kind in ("function", "async")):
+                while True:
+                    j = close_b + 1
+                    while j < n and clean[j] in " \t":
+                        j += 1
+                    if j < n and clean[j] == "{":
+                        close_b = _find_matching_delim(
+                            clean,
+                            j,
+                            "{",
+                            "}",
+                            allow_backtick=allow_backtick,
+                            single_quote_char_only=single_quote_char_only,
+                            js_mode=js_mode,
+                        )
+                        if close_b >= n or clean[close_b] != "}":
+                            return None
+                    else:
+                        break
+            return _offset_to_line(offsets, close_b, line_count)
+        if c == ";" and paren_depth == 0 and bracket_depth == 0:
+            return _offset_to_line(offsets, i, line_count)
+        if js_mode and (c.isalpha() or c in "_$"):
+            j = i + 1
+            while j < limit and (clean[j].isalnum() or clean[j] in "_$"):
+                j += 1
+            prev_tok = clean[i:j]
+            i = j
+            continue
+        if js_mode and c in "+-" and i + 1 < limit and clean[i + 1] == c:
+            prev_tok = c * 2
+            i += 2
+            continue
+        prev_tok = c
+        i += 1
+    return None
+
+
 def _extract_outline_spans(full_path: Path, rel: str, ext: str) -> List[Dict[str, Any]]:
     outline = extract_file_outline(full_path, rel, max_items=500)
     line_count = int(outline.get("lines") or 0)
@@ -182,6 +381,27 @@ def _extract_outline_spans(full_path: Path, rel: str, ext: str) -> List[Dict[str
         start = max(1, min(start, line_count))
         raw_items.append((start, order_idx, sym, kind))
 
+    if not raw_items:
+        return []
+
+    clean_src: Optional[str] = None
+    offsets: List[int] = []
+    if ext in _BRACE_SPAN_EXTS:
+        norm_bytes = _read_norm_bytes(full_path)
+        if norm_bytes is not None:
+            raw_text = norm_bytes.decode("utf-8", errors="replace")
+            if ext in _JS_SPAN_EXTS:
+                clean_src = _strip_js_comments(raw_text)
+            elif ext in (".graphql", ".gql"):
+                clean_src = _strip_hash_comments(raw_text)
+            else:
+                clean_src = _strip_c_comments(
+                    raw_text,
+                    allow_backtick=(ext == ".go"),
+                    single_quote_char_only=(ext == ".rs"),
+                )
+            offsets = _build_line_offsets(clean_src)
+
     raw_items.sort(key=lambda row: (row[0], row[1]))
     spans: List[Dict[str, Any]] = []
     seen_syms: Set[str] = set()
@@ -195,7 +415,11 @@ def _extract_outline_spans(full_path: Path, rel: str, ext: str) -> List[Dict[str
             if raw_items[j][0] > start:
                 next_start = raw_items[j][0]
                 break
-        end = (next_start - 1) if next_start is not None else line_count
+        end: Optional[int] = None
+        if clean_src is not None and offsets:
+            end = _find_brace_span_end(clean_src, offsets, line_count, start, next_start, ext, kind)
+        if end is None:
+            end = (next_start - 1) if next_start is not None else line_count
         end = max(start, min(end, line_count))
         spans.append({"path": rel, "symbol": sym, "kind": kind, "start": start, "end": end})
 
@@ -762,6 +986,8 @@ def validate_hubs_volume(
     aoci_dir: Path,
     code_entries: Mapping[str, str],
     fingerprints: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    *,
+    check_live_symbols: bool = True,
 ) -> Tuple[List[str], List[Dict[str, str]]]:
     """
     Validate `.aoci/aoci.hubs.txt` for `verify` and `lint`.
@@ -835,32 +1061,33 @@ def validate_hubs_volume(
                 verify_issues.append(msg)
                 lint_findings.append({"path": hub_id, "code": "hub-span-oob", "message": msg})
 
-            full_k = root_res / rel
-            if rel not in live_sym_cache and full_k.is_file():
-                live_sym_cache[rel] = _extract_live_symbol_span_map(full_k, rel)
-            live_spans, clean_parse = live_sym_cache.get(rel, (None, False))
-            if clean_parse and live_spans is not None:
-                if sym not in live_spans:
-                    lint_findings.append(
-                        {
-                            "path": hub_id,
-                            "code": "hub-symbol-missing",
-                            "message": f"Symbol `{sym}` was not found in `{rel}`; update or run `zoom --prune-missing`.",
-                        }
-                    )
-                else:
-                    live_s, live_e = live_spans[sym]
-                    if (live_s, live_e) != (start, end):
+            if check_live_symbols:
+                full_k = root_res / rel
+                if rel not in live_sym_cache and full_k.is_file():
+                    live_sym_cache[rel] = _extract_live_symbol_span_map(full_k, rel)
+                live_spans, clean_parse = live_sym_cache.get(rel, (None, False))
+                if clean_parse and live_spans is not None:
+                    if sym not in live_spans:
                         lint_findings.append(
                             {
                                 "path": hub_id,
-                                "code": "hub-span-outdated",
-                                "message": (
-                                    f"Span `[L{start}-L{end}]` for `{hub_id}` differs from live span "
-                                    f"`[L{live_s}-L{live_e}]`; run `ack` or `upsert` to refresh."
-                                ),
+                                "code": "hub-symbol-missing",
+                                "message": f"Symbol `{sym}` was not found in `{rel}`; update or run `zoom --prune-missing`.",
                             }
                         )
+                    else:
+                        live_s, live_e = live_spans[sym]
+                        if (live_s, live_e) != (start, end):
+                            lint_findings.append(
+                                {
+                                    "path": hub_id,
+                                    "code": "hub-span-outdated",
+                                    "message": (
+                                        f"Span `[L{start}-L{end}]` for `{hub_id}` differs from live span "
+                                        f"`[L{live_s}-L{live_e}]`; run `ack` or `upsert` to refresh."
+                                    ),
+                                }
+                            )
 
     return verify_issues, lint_findings
 

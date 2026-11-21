@@ -44,13 +44,17 @@ Subcommands:
                       and synchronize `#Git-Excluded` in `aoci.txt`.
   audit               Cross-check FRAS graph vs static imports, Tarjan SCC
                       cycles, and forbidden `#Layer-Rules:` edges.
-  export              Export FRAS dependency graph in Mermaid or Graphviz DOT.
+  export              Export FRAS dependency graph in Mermaid, Graphviz DOT, or HTML.
   pool                Inspect, export, or import `.pool.sqlite3` semantic cache
                       entries and portable `aoci-semantic-pool-v1` bundles.
   install-git-hooks   Install or remove idempotent local Git hooks
                       (`post-checkout`/`post-merge`/`post-rewrite`/`pre-commit`).
+  prepare-sync        Single-pass agent drift briefing (scaffolds, outlines, diffs).
+  apply-sync          Execute ordered sync workflow (restore -> migrate-renames ->
+                      ack -> upsert -> verify) in one call.
   zoom                Read, scaffold, or upsert symbol-level H-tier sections
                       in `.aoci/aoci.hubs.txt`.
+  symbol              Search symbols across hubs, outlines, and FRAS A: exports.
 
 All index writers serialize through `.aoci/.lock` so parallel agents cannot lose
 updates.
@@ -64,6 +68,7 @@ import contextlib
 import fnmatch
 import hashlib
 import heapq
+import io
 import json
 import os
 import re
@@ -82,6 +87,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from aoci_core import apply_sync as _apply_sync  # noqa: E402
 from aoci_core import cochange as _cochange  # noqa: E402
 from aoci_core import githooks as _githooks  # noqa: E402
 from aoci_core import graph as _graph  # noqa: E402
@@ -91,8 +97,17 @@ from aoci_core import pack as _pack  # noqa: E402
 from aoci_core import parsers as _parsers  # noqa: E402
 from aoci_core import pool as _pool  # noqa: E402
 from aoci_core import shards as _shards  # noqa: E402
+from aoci_core import symbols as _symbols  # noqa: E402
 from aoci_core import sync_prep as _sync_prep  # noqa: E402
 from aoci_core import test_impact as _test_impact  # noqa: E402
+from aoci_core.batches import (  # noqa: E402
+    _build_pending_items,
+    _clear_batch_plan,
+    _load_batch_plan,
+    _save_batch_plan,
+    make_batches,
+    resolve_stable_batches,
+)
 from aoci_core.constants import (  # noqa: E402
     ALWAYS_SKIP_DIRS,
     AOCI_DIR_NAME,
@@ -210,6 +225,7 @@ from aoci_core.ignore import (  # noqa: E402
     matches_ignore,
     path_skip_reason,
 )
+from aoci_core.lock import IndexLock, _pid_is_alive  # noqa: E402
 from aoci_core.pack import PathMentionIndex, build_task_pack  # noqa: E402
 from aoci_core.parsers import (  # noqa: E402
     _CLEAN_SYM_RE,
@@ -269,124 +285,19 @@ from aoci_core.shards import (  # noqa: E402
     write_code_volume,
     write_shards,
 )
+from aoci_core.templates import (  # noqa: E402
+    parse_declared_domains,
+    parse_manifest_field,
+    render_ignore_template,
+    render_manifest_template,
+    render_meta_template,
+)
 from aoci_core.test_impact import find_impacted_tests  # noqa: E402
 
 __version__ = AOCI_VERSION
 
 
-# ---------------------------------------------------------------------------
-# Atomic file writes & cross-process index lock
-# ---------------------------------------------------------------------------
-
-
-def _pid_is_alive(pid: int) -> bool:
-    """Return True if a local OS process with `pid` still exists (never sends signals on Windows)."""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-            kernel32.OpenProcess.restype = ctypes.c_void_p
-            kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
-            kernel32.GetExitCodeProcess.restype = ctypes.c_int
-            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel32.CloseHandle.restype = ctypes.c_int
-
-            handle = kernel32.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-            if not handle:
-                return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED => alive under another user
-            try:
-                code = ctypes.c_ulong()
-                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                    return code.value == 259  # STILL_ACTIVE
-                return True
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:
-            return True
-
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-
-
-class IndexLock:
-    """Exclusive cross-process lock on `.aoci/.lock` (O_CREAT|O_EXCL, dead-PID & stale-lock recovery)."""
-
-    def __init__(self, aoci_dir: Path, timeout: float = LOCK_TIMEOUT_S, stale: float = LOCK_STALE_S) -> None:
-        self.path = aoci_dir / LOCK_FILE
-        self.timeout = timeout
-        self.stale = stale
-        self._fd: Optional[int] = None
-
-    def _is_stale(self) -> bool:
-        try:
-            age = time.time() - self.path.stat().st_mtime
-        except OSError:
-            return False
-        if age > self.stale:
-            return True
-        # Allow a newly created lock a brief window to finish writing its PID payload
-        if age < 0.25:
-            return False
-        try:
-            tokens = self.path.read_text(encoding="ascii", errors="replace").strip().split()
-            if tokens and not _pid_is_alive(int(tokens[0])):
-                return True
-        except (OSError, ValueError):
-            pass
-        return False
-
-    def __enter__(self) -> "IndexLock":
-        deadline = time.monotonic() + self.timeout
-        delay = 0.02
-        while True:
-            try:
-                self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self._fd, f"{os.getpid()} {utc_now_iso()}\n".encode("ascii"))
-                return self
-            except (FileExistsError, PermissionError) as exc:
-                if isinstance(exc, PermissionError) and not self.path.exists():
-                    # Read-only filesystem / sandbox: fail fast instead of spinning until timeout
-                    raise
-                if self._is_stale():
-                    try:
-                        self.path.unlink()
-                        continue
-                    except OSError:
-                        pass
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"Timed out after {self.timeout:.0f}s waiting for `{self.path}` "
-                        "(another aoci_index.py writer is running; delete the file if it is stale)."
-                    )
-                time.sleep(delay)
-                delay = min(delay * 1.5, 0.2)
-
-    def __exit__(self, *exc: Any) -> None:
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
-        for _ in range(10):
-            try:
-                self.path.unlink()
-                return
-            except FileNotFoundError:
-                return
-            except PermissionError:
-                time.sleep(0.02)
+# Cross-process lock (`_pid_is_alive`, `IndexLock`) is imported from `aoci_core.lock`.
 
 
 # `IgnoreMatcher` & `.aociignore` helpers are imported from `aoci_core.ignore`.
@@ -700,55 +611,7 @@ def ensure_git_exclusion(
     return post
 
 
-def parse_manifest_field(aoci_dir: Path, prefix: str) -> str:
-    manifest_path = aoci_dir / MANIFEST_FILE
-    if not manifest_path.exists():
-        return ""
-    lines = manifest_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    for idx, line in enumerate(lines):
-        if line.startswith(prefix):
-            parts: List[str] = []
-            first = line[len(prefix) :].strip()
-            if first:
-                parts.append(first)
-            for cont in lines[idx + 1 :]:
-                if not cont.strip() or re.match(r"^#[A-Za-z][A-Za-z0-9_-]*:", cont):
-                    break
-                m_comment = re.match(r"^#\s+(?:[-*]\s+|\d+[.)]\s+)?(\S.*)$", cont)
-                if m_comment:
-                    parts.append(m_comment.group(1).strip())
-                elif cont.startswith((" ", "\t")):
-                    cleaned = re.sub(r"^(?:[-*]\s+|\d+[.)]\s+)", "", cont.strip())
-                    if cleaned:
-                        parts.append(cleaned)
-                else:
-                    break
-            return "; ".join(parts)
-    return ""
-
-
-def parse_declared_domains(aoci_dir: Path) -> Dict[str, str]:
-    """Extract declared single-character Domain codes (`D=Name`, ASCII or Unicode/CJK) from `.aoci/aoci.meta.txt`."""
-    meta_path = aoci_dir / META_FILE
-    if not meta_path.exists():
-        return {}
-    domains: Dict[str, str] = {}
-    in_domain_section = False
-    for raw in meta_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if re.match(r"^#\s*D\s*\(Domain", line, re.IGNORECASE):
-            in_domain_section = True
-            continue
-        if in_domain_section:
-            if re.match(r"^#\s*[A-Z]\s*\(", line) or line.startswith("# ["):
-                in_domain_section = False
-                continue
-            low = line.lower()
-            if any(marker in low for marker in ("(example", "example:", "（示例", "示例:", "示例：")):
-                continue
-            for code, label in DOMAIN_TOKEN_RE.findall(line):
-                domains[code] = label
-    return domains
+# Manifest/meta parsing helpers are imported from `aoci_core.templates`.
 
 
 def _matches_nested_gitignore(
@@ -1840,6 +1703,7 @@ def import_semantic_pool(
 def parse_code_volume(
     code_path: Path,
     duplicates: Optional[List[str]] = None,
+    raw_text_out: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], List[Tuple[int, str]]]:
     """
     Parse `aoci.code.txt` into `{relpath: raw_line}` and list of `(lineno, malformed_line)`.
@@ -1850,7 +1714,10 @@ def parse_code_volume(
     if not code_path.exists():
         return entries, malformed
 
-    for lineno, raw in enumerate(code_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+    text = code_path.read_text(encoding="utf-8", errors="replace")
+    if raw_text_out is not None:
+        raw_text_out.append(text)
+    for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#") or (line.startswith("===") and line.endswith("===")):
             continue
@@ -1956,7 +1823,7 @@ class LiveFileSet:
         self._fresh: Dict[str, Dict[str, Any]] = {}
 
         if only_paths is not None:
-            self.fps, self.lower_map = self._init_targeted(only_paths, git_info)
+            self.fps, self.lower_map = self._init_targeted(only_paths, git_info, base_files=base_files)
         else:
             self.fps, _ = discover_and_fingerprint(
                 root,
@@ -1968,15 +1835,26 @@ class LiveFileSet:
                 skip_paths=None,
             )
             lower_map: Dict[str, Optional[str]] = {}
-            for rel in self.fps:
+            for rel, fp in self.fps.items():
                 low = rel.lower()
                 lower_map[low] = None if low in lower_map else rel
+                cached_b = base_files.get(rel)
+                if cached_b is not None and (cached_b.get("racy") or fp.get("sha256") != cached_b.get("sha256")):
+                    fresh_fp = dict(fp)
+                    if "_cur_sig_hash" in fresh_fp:
+                        cur_sig = fresh_fp.pop("_cur_sig_hash")
+                        if isinstance(cur_sig, str) and cur_sig:
+                            fresh_fp["sig_hash"] = cur_sig
+                        else:
+                            fresh_fp["_sig_checked"] = True
+                    self._fresh[rel] = fresh_fp
             self.lower_map = lower_map
 
     def _init_targeted(
         self,
         only_paths: Sequence[str],
         git_info: Dict[str, Any],
+        base_files: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Optional[str]]]:
         dir_cache: Dict[Path, List[Tuple[str, bool, bool, Path]]] = {}
         candidates: Dict[str, Dict[str, Any]] = {}
@@ -1995,13 +1873,27 @@ class LiveFileSet:
             if reason is not None:
                 self.skip_paths[canon] = reason
                 continue
-            _, fp, skip_r = inspect_and_fingerprint_one(self.root, canon, None, None, False, self.max_bytes)
+            cached_b = base_files.get(canon) if base_files is not None else None
+            _, fp, skip_r = inspect_and_fingerprint_one(self.root, canon, None, cached_b, False, self.max_bytes)
             if skip_r is not None:
                 self.skip_paths[canon] = skip_r
                 continue
             if fp is not None:
                 candidates[canon] = fp
-                self._fresh[canon] = fp
+                fresh_fp = dict(fp)
+                if "_cur_sig_hash" in fresh_fp:
+                    cur_sig = fresh_fp.pop("_cur_sig_hash")
+                    if isinstance(cur_sig, str) and cur_sig:
+                        fresh_fp["sig_hash"] = cur_sig
+                    else:
+                        fresh_fp["_sig_checked"] = True
+                elif (
+                    cached_b is not None
+                    and fp.get("sha256") == cached_b.get("sha256")
+                    and isinstance(cached_b.get("sig_hash"), str)
+                ):
+                    fresh_fp["sig_hash"] = cached_b["sig_hash"]
+                self._fresh[canon] = fresh_fp
 
         if is_git and candidates:
             known_tracked: Set[str] = set()
@@ -2059,10 +1951,12 @@ class LiveFileSet:
         if fp is None:
             fp = fingerprint_file(self.root / rel)
             self._fresh[rel] = fp
-        elif "sig_hash" not in fp:
+        elif "sig_hash" not in fp and not fp.get("_sig_checked"):
             sig_h = compute_signature_hash(self.root / rel, rel)
             if sig_h is not None:
                 fp["sig_hash"] = sig_h
+            else:
+                fp["_sig_checked"] = True
         return fp
 
     def explain_missing(self, rel: str) -> str:
@@ -2169,72 +2063,7 @@ def validate_and_normalize_entry(
     return rel, normalized, warnings, None
 
 
-def render_manifest_template(project: str, locale: str, git_excluded: bool) -> str:
-    git_line = "true (.git/info/exclude)" if git_excluded else "n/a (non-git workspace)"
-    return (
-        "#AOCI-ROOT-MANIFEST: 1\n"
-        "#Format-Version: cognition-volumes/v1\n"
-        f"#Locale: {locale}\n"
-        f"#Project: {project}\n"
-        f"#Git-Excluded: {git_line}\n"
-        "#Global-Invariants: -\n"
-        "\n"
-        f"#Volume: id=meta kind=meta path={META_FILE} format=meta-v1 depends=- state=enabled\n"
-        f"#Volume: id=code kind=code path={CODE_FILE} format=object-fras-v2 depends=meta state=enabled\n"
-        "\n"
-        "#Read-Order: aoci.txt -> aoci.meta.txt -> aoci.code.txt\n"
-        "#Protocol: Read-Whole-First before exploring source files; sync after code updates.\n"
-    )
-
-
-def render_meta_template() -> str:
-    return (
-        "#AOCI-META-VOLUME: 1\n"
-        "#Format: meta-v1\n"
-        "\n"
-        "# [Tag Dictionary: [LDIS] 4-char Symbolic Coordinate]\n"
-        "# L (Layer - architectural tier):\n"
-        "#   E=Entry  A=Application  D=Domain  K=Compute  P=Persistence  I=Integration\n"
-        "#   M=Middleware  U=UI  C=Common  R=Runtime  T=Test  O=Docs\n"
-        "#\n"
-        "# D (Domain - extend with project-specific single-character module codes during init):\n"
-        "#   G=Global  X=Core\n"
-        "#   (Example: A=Auth  B=Billing  N=Network  S=Storage  W=Workflow)\n"
-        "#\n"
-        "# I (Importance 1-9 and token length budget):\n"
-        "#   9-8=Core hub / high-risk critical path (80-150 tokens: rich F/R/A and strict S invariants)\n"
-        "#   7-5=Primary business module or public contract (45-80 tokens: complete FRAS)\n"
-        "#   4-3=Supporting utility or routine config (25-45 tokens: compact FRAS)\n"
-        "#   2-1=Peripheral script, boilerplate, or simple test (15-30 tokens: minimal FRAS)\n"
-        "#\n"
-        "# S (Size - auto-verified by aoci_index.py from actual line count):\n"
-        "#   T=<50L  S=50-199L  M=200-499L  L=500-999L  H=>=1000L\n"
-        "\n"
-        "# [FRAS Schema: object-fras-v2]\n"
-        "# Syntax: <relpath>[LDIS]: F:<Responsibility> | R:<Read-Along/Deps> | A:<API/Callers> | S:<Non-Obvious Constraints>\n"
-        "# Authoring Rules:\n"
-        "#   1. Strictly one line per managed file using POSIX relative paths (/).\n"
-        "#   2. F must state concrete responsibility; never use vague filler or `-`.\n"
-        "#   3. R lists files/schemas that must be read alongside edits; use `-` when none.\n"
-        "#   4. A lists key exported symbols/routes and primary upstream callers; use `-` when none.\n"
-        "#   5. S captures non-obvious invariants (concurrency, ordering, security, compatibility, side effects); use `-` when none.\n"
-        "#   6. Never guess semantics from filenames: read the actual source file before authoring.\n"
-        "\n"
-        "# [Glossary: Optional Bilingual / Domain Term Aliases for BM25 Search]\n"
-        "#   Syntax: `#   termA = aliasB, aliasC` (or single-line `#Glossary: A = B; C = D` or `.aoci/glossary.txt`)\n"
-        "#   (Example: 密钥轮换 = key rotation, kid rotation)\n"
-    )
-
-
-def render_ignore_template() -> str:
-    return (
-        "# Extra ignore patterns for AOCI codebase indexing (gitignore-like globs).\n"
-        "# `.aoci/`, `.git/`, standard dependency/build dirs, lockfiles, and binaries are already skipped.\n"
-        "# Examples:\n"
-        "# generated/\n"
-        "# *.pb.go\n"
-        "# docs/legacy/\n"
-    )
+# Template renderers are imported from `aoci_core.templates`.
 
 
 def _classify_modified_entry(
@@ -2273,7 +2102,10 @@ def compute_drift(
     baseline = load_baseline(aoci_dir)
     base_files: Dict[str, Any] = baseline.get("files", {})
     duplicate_entries: List[str] = []
-    code_entries, malformed = parse_code_volume(aoci_dir / CODE_FILE, duplicates=duplicate_entries)
+    raw_code_texts: List[str] = []
+    code_entries, malformed = parse_code_volume(
+        aoci_dir / CODE_FILE, duplicates=duplicate_entries, raw_text_out=raw_code_texts
+    )
 
     fingerprints, skipped = discover_and_fingerprint(
         root,
@@ -2541,6 +2373,7 @@ def compute_drift(
         "top_dirs": dict(sorted(dir_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "elapsed_ms": elapsed_ms,
         "_code_entries": code_entries,
+        "_code_text": raw_code_texts[0] if raw_code_texts else "",
         "_fingerprints": fingerprints,
     }
 
@@ -2567,170 +2400,7 @@ def public_drift(drift: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in drift.items() if not k.startswith("_")}
 
 
-def _build_pending_items(drift: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
-    """Build directory-coherent pending items, excluding similar-rename targets and exact renames."""
-    sim_to_set = {sr["to"] for sr in drift.get("similar_renames", ())}
-    sim_from_set = {sr["from"] for sr in drift.get("similar_renames", ())}
-    added_non_sim = [it for it in drift["added"] if it["path"] not in sim_to_set]
-    deleted_non_sim = [p for p in drift["deleted"] if p not in sim_from_set]
-    pending = added_non_sim + drift["modified"] + drift["missing_in_code"]
-    pending.sort(key=lambda it: (it["path"].rsplit("/", 1)[0] if "/" in it["path"] else "", it["path"]))
-    return pending, added_non_sim, deleted_non_sim
-
-
-def make_batches(
-    items: Sequence[Dict[str, Any]],
-    max_files: int,
-    max_lines: int = DEFAULT_MAX_BATCH_LINES,
-) -> List[List[Dict[str, Any]]]:
-    """Pack pending files into directory-coherent batches bounded by both file count and line budget."""
-    if max_files <= 0:
-        max_files = 20
-    if max_lines <= 0:
-        max_lines = DEFAULT_MAX_BATCH_LINES
-
-    batches: List[List[Dict[str, Any]]] = []
-    cur: List[Dict[str, Any]] = []
-    cur_lines = 0
-
-    for item in items:
-        item_lines = int(item.get("lines", 0))
-        if cur and (len(cur) >= max_files or (cur_lines + item_lines > max_lines)):
-            batches.append(cur)
-            cur = []
-            cur_lines = 0
-        cur.append(item)
-        cur_lines += item_lines
-
-    if cur:
-        batches.append(cur)
-    return batches
-
-
-def _load_batch_plan(aoci_dir: Path) -> Optional[Dict[str, Any]]:
-    plan_path = aoci_dir / CACHE_DIR / BATCH_PLAN_CACHE
-    try:
-        data = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if (
-        not isinstance(data, dict)
-        or data.get("schema_version") != 1
-        or not isinstance(data.get("batches"), list)
-        or int(data.get("max_files", 0) or 0) <= 0
-        or int(data.get("max_lines", 0) or 0) <= 0
-    ):
-        return None
-    return data
-
-
-def _save_batch_plan(aoci_dir: Path, max_files: int, max_lines: int, raw_batches: Sequence[Sequence[str]]) -> None:
-    if not aoci_dir.is_dir():
-        return
-    plan_path = aoci_dir / CACHE_DIR / BATCH_PLAN_CACHE
-    try:
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            plan_path,
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "max_files": max_files,
-                    "max_lines": max_lines,
-                    "batches": [list(b) for b in raw_batches],
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        )
-    except OSError:
-        pass
-
-
-def _clear_batch_plan(aoci_dir: Path) -> None:
-    try:
-        (aoci_dir / CACHE_DIR / BATCH_PLAN_CACHE).unlink()
-    except OSError:
-        pass
-
-
-def resolve_stable_batches(
-    aoci_dir: Path,
-    pending: Sequence[Dict[str, Any]],
-    max_files: Optional[int],
-    max_lines: Optional[int],
-    *,
-    persist: bool = True,
-    reset: bool = False,
-) -> Tuple[List[List[Dict[str, Any]]], Dict[str, Any]]:
-    """
-    Maintain stable 1-indexed batch slots in `.aoci/.cache/batch_plan.json` so indexing earlier
-    batches does not renumber later batches. Completed slots stay empty; newly added files append
-    as trailing batches; `--reset-batches` or changing batch limits rebuilds cleanly.
-    """
-    saved = None if reset else _load_batch_plan(aoci_dir)
-    req_files = int(max_files) if (max_files is not None and int(max_files) > 0) else None
-    req_lines = int(max_lines) if (max_lines is not None and int(max_lines) > 0) else None
-
-    if saved is not None:
-        eff_files = req_files if req_files is not None else int(saved["max_files"])
-        eff_lines = req_lines if req_lines is not None else int(saved["max_lines"])
-    else:
-        eff_files = req_files if req_files is not None else 20
-        eff_lines = req_lines if req_lines is not None else DEFAULT_MAX_BATCH_LINES
-
-    pending_by_path = {it["path"]: it for it in pending}
-    if not pending:
-        if persist:
-            _clear_batch_plan(aoci_dir)
-        return [], {
-            "max_files": eff_files,
-            "max_lines": eff_lines,
-            "total_batches": 0,
-            "completed_batches": [],
-            "remaining_batches": [],
-            "reused": False,
-        }
-
-    if (
-        saved is not None
-        and int(saved["max_files"]) == eff_files
-        and int(saved["max_lines"]) == eff_lines
-    ):
-        saved_batches = [list(b) for b in saved["batches"] if isinstance(b, list)]
-        scheduled_paths = {p for b in saved_batches for p in b}
-        if scheduled_paths & set(pending_by_path.keys()):
-            batches = [[pending_by_path[p] for p in b if p in pending_by_path] for b in saved_batches]
-            unscheduled = [it for it in pending if it["path"] not in scheduled_paths]
-            extra_batches: List[List[Dict[str, Any]]] = []
-            if unscheduled:
-                extra_batches = make_batches(unscheduled, eff_files, eff_lines)
-                batches.extend(extra_batches)
-                saved_batches.extend([[it["path"] for it in eb] for eb in extra_batches])
-            if persist and (extra_batches or reset):
-                _save_batch_plan(aoci_dir, eff_files, eff_lines, saved_batches)
-            completed = [idx for idx, b in enumerate(batches, start=1) if not b]
-            remaining = [idx for idx, b in enumerate(batches, start=1) if b]
-            return batches, {
-                "max_files": eff_files,
-                "max_lines": eff_lines,
-                "total_batches": len(batches),
-                "completed_batches": completed,
-                "remaining_batches": remaining,
-                "reused": True,
-            }
-
-    batches = make_batches(pending, eff_files, eff_lines)
-    if persist:
-        _save_batch_plan(aoci_dir, eff_files, eff_lines, [[it["path"] for it in b] for b in batches])
-    return batches, {
-        "max_files": eff_files,
-        "max_lines": eff_lines,
-        "total_batches": len(batches),
-        "completed_batches": [],
-        "remaining_batches": list(range(1, len(batches) + 1)),
-        "reused": False,
-    }
+# Batch planning helpers are imported from `aoci_core.batches`.
 
 
 # ---------------------------------------------------------------------------
@@ -3593,7 +3263,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     for inv in drift["invalid_entries"]:
         issues.append(inv["message"])
     hub_verify_issues, _ = _hubs.validate_hubs_volume(
-        root, aoci_dir, drift["_code_entries"], fingerprints=drift.get("_fingerprints")
+        root, aoci_dir, drift["_code_entries"], fingerprints=drift.get("_fingerprints"), check_live_symbols=False
     )
     issues.extend(hub_verify_issues)
 
@@ -3612,7 +3282,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             f"(e.g. {sample_rel} -> {sample_refs[0]}; run `lint`)"
         )
 
-    code_text = (aoci_dir / CODE_FILE).read_text(encoding="utf-8", errors="replace")
+    code_text = drift.get("_code_text") or (aoci_dir / CODE_FILE).read_text(encoding="utf-8", errors="replace")
     entries: Dict[str, str] = drift["_code_entries"]
 
     manifest_p = aoci_dir / MANIFEST_FILE
@@ -3638,13 +3308,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
     layer_dist: Dict[str, int] = {}
     domain_dist: Dict[str, int] = {}
     imp_high = 0
-    for line in entries.values():
-        m = ENTRY_RE.match(line)
-        if m:
-            layer_dist[m.group("layer")] = layer_dist.get(m.group("layer"), 0) + 1
-            domain_dist[m.group("domain")] = domain_dist.get(m.group("domain"), 0) + 1
-            if int(m.group("imp")) >= 8:
-                imp_high += 1
+    for pe in parse_entries_map(entries).values():
+        layer_dist[pe.layer] = layer_dist.get(pe.layer, 0) + 1
+        domain_dist[pe.domain] = domain_dist.get(pe.domain, 0) + 1
+        if pe.imp >= 8:
+            imp_high += 1
 
     elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     ok = len(issues) == 0
@@ -3777,6 +3445,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             [tests_for_target],
             max_depth=tests_depth,
             parsed_entries=parsed_map,
+            live_imports=bool(getattr(args, "live_test_imports", False)),
         )
         impacted_test_paths = {item["path"] for item in impacted_tests}
 
@@ -3910,6 +3579,7 @@ def cmd_context(args: argparse.Namespace) -> int:
             args.paths,
             max_depth=max(3, int(args.depth)),
             parsed_entries=parsed_map,
+            live_imports=bool(getattr(args, "live_test_imports", False)),
         )
 
     if args.json:
@@ -3952,7 +3622,8 @@ def cmd_overview(args: argparse.Namespace) -> int:
         print(f"ERROR: `{code_path}` not found. Run `init` first.", file=sys.stderr)
         return 2
 
-    entries, _ = parse_code_volume(code_path)
+    raw_code_texts: List[str] = []
+    entries, _ = parse_code_volume(code_path, raw_text_out=raw_code_texts)
     project = parse_manifest_field(aoci_dir, "#Project:") or root.name
     invariants = parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-"
     git_hdr = parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown"
@@ -3975,7 +3646,7 @@ def cmd_overview(args: argparse.Namespace) -> int:
     core_entries.sort(key=lambda item: (-item[0], item[1]))
     core_lines = [line for _, _, line in core_entries[: args.max_core]]
 
-    code_text = code_path.read_text(encoding="utf-8", errors="replace")
+    code_text = raw_code_texts[0] if raw_code_texts else ""
     est_tokens = estimate_tokens(code_text)
 
     if args.json:
@@ -4061,15 +3732,18 @@ def compute_outlines(
             rejected.append({"path": rel, "reason": f"too-large(>{max_bytes}B)"})
             continue
         try:
-            with full.open("rb") as fh:
-                head = fh.read(8192)
+            raw_bytes = full.read_bytes()
         except OSError:
             rejected.append({"path": rel, "reason": "unreadable"})
             continue
-        if is_probably_binary_bytes(head):
+        if is_probably_binary_bytes(raw_bytes[:8192]):
             rejected.append({"path": rel, "reason": "binary-content"})
             continue
-        outlines.append(extract_file_outline(full, rel, max_items=max_items))
+        if extract_file_outline is _parsers.extract_file_outline:
+            norm_bytes = raw_bytes.replace(b"\r\n", b"\n") if b"\r\n" in raw_bytes else raw_bytes
+            outlines.append(_parsers._extract_outline_from_bytes(norm_bytes, full.suffix.lower(), rel, max_items=max_items))
+        else:
+            outlines.append(extract_file_outline(full, rel, max_items=max_items))
 
     return {"outlines": outlines, "missing": missing, "rejected": rejected}
 
@@ -4152,7 +3826,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
                 git_info,
                 base_files,
                 args.max_bytes,
-                only_paths=None if (args.all_modified or impl_only) else targets,
+                only_paths=None if auto_select else targets,
             )
 
             skipped_contract_changed: List[Dict[str, str]] = []
@@ -4163,7 +3837,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
                     cached = base_files.get(cand_rel)
                     if cached is None or live.fps[cand_rel]["sha256"] != cached.get("sha256"):
                         if impl_only:
-                            ck = _classify_modified_entry(root, cand_rel, cached)
+                            ck = _classify_modified_entry(root, cand_rel, cached, cur_fp=live.fps.get(cand_rel))
                             if ck == "impl_only":
                                 targets.append(cand_rel)
                             else:
@@ -4193,7 +3867,9 @@ def cmd_ack(args: argparse.Namespace) -> int:
                     errors.append(f"{tag_errs[0][1]} Fix it with `upsert`.")
                     continue
                 if explicit_impl_check:
-                    ck = _classify_modified_entry(root, canon, base_files.get(canon))
+                    ck = _classify_modified_entry(
+                        root, canon, base_files.get(canon), cur_fp=live.fps.get(canon)
+                    )
                     if ck != "impl_only":
                         errors.append(
                             f"`{canon}` has change_kind `{ck}` (requires review via `upsert` or omit `--impl-only`)."
@@ -4514,6 +4190,8 @@ def compute_lint(
     cached_entries: Optional[Dict[str, str]] = None,
     cached_parsed: Optional[Dict[str, ParsedEntry]] = None,
     cached_malformed: Optional[Sequence[Tuple[int, str]]] = None,
+    cached_duplicates: Optional[Sequence[str]] = None,
+    cached_domains: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run FRAS L1 + L1.5 (`aoci.hubs.txt`) quality checks and return structured payload."""
     aoci_dir = root / AOCI_DIR_NAME
@@ -4525,6 +4203,8 @@ def compute_lint(
     if cached_entries is not None and cached_malformed is not None:
         entries = cached_entries
         malformed = list(cached_malformed)
+        if cached_duplicates is not None:
+            duplicates = list(cached_duplicates)
     else:
         entries, malformed = parse_code_volume(code_path, duplicates=duplicates)
 
@@ -4540,10 +4220,11 @@ def compute_lint(
         max_bytes=max_bytes,
     )
     parsed_map = cached_parsed if cached_parsed is not None else parse_entries_map(entries)
+    domains = cached_domains if cached_domains is not None else parse_declared_domains(aoci_dir)
     findings = lint_entries(
         root,
         entries,
-        parse_declared_domains(aoci_dir),
+        domains,
         fingerprints=fps,
         parsed_entries=parsed_map,
     )
@@ -4693,6 +4374,8 @@ def compute_diff_briefing(
     with_tests: bool = False,
     cached_parsed: Optional[Any] = None,
     cached_hub_records: Optional[Sequence[Dict[str, Any]]] = None,
+    preloaded_outline_files: Optional[Dict[str, Any]] = None,
+    live_test_imports: bool = False,
 ) -> Dict[str, Any]:
     """
     Build a focused architectural impact packet for Git working-tree or revision diffs:
@@ -4816,12 +4499,17 @@ def compute_diff_briefing(
         except OSError:
             lst = None
         if lst is not None:
-            if stat.S_ISLNK(lst.st_mode):
+            if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
                 continue
-            if stat.S_ISREG(lst.st_mode):
-                _, fp, skip_r = inspect_and_fingerprint_one(root, p, lst, None, False, max_bytes)
-                if skip_r is not None or fp is None:
-                    continue
+            if lst.st_size > max_bytes:
+                continue
+            try:
+                with full.open("rb") as fh:
+                    head = fh.read(8192)
+            except OSError:
+                continue
+            if is_probably_binary_bytes(head):
+                continue
         eligible_changed.append(p)
 
     parsed_map = cached_parsed if cached_parsed is not None else parse_entries_map(entries)
@@ -4893,6 +4581,8 @@ def compute_diff_briefing(
             seed_paths,
             max_depth=max(3, int(depth)),
             parsed_entries=parsed_map,
+            preloaded_outline_files=preloaded_outline_files,
+            live_imports=live_test_imports,
         )
     return brief
 
@@ -4907,6 +4597,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
         depth=args.depth,
         max_bytes=args.max_bytes,
         with_tests=with_tests,
+        live_test_imports=bool(getattr(args, "live_test_imports", False)),
     )
     if not brief.get("ok"):
         print(f"ERROR: {brief.get('error')}", file=sys.stderr)
@@ -5007,6 +4698,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
         parsed_entries=parsed_map,
         live_anchors=bool(getattr(args, "live_anchors", False)),
         with_tests=bool(getattr(args, "with_tests", False)),
+        live_test_imports=bool(getattr(args, "live_test_imports", False)),
     )
 
     if args.json:
@@ -5313,6 +5005,7 @@ def audit_architecture(
     co_change_commits: int = 200,
     min_co_changes: int = 3,
     min_co_confidence: float = 0.6,
+    exclude_tests: bool = False,
     forbid_spec: Optional[str] = None,
     use_default_rules: bool = True,
     max_bytes: int = DEFAULT_MAX_BYTES,
@@ -5356,6 +5049,7 @@ def audit_architecture(
         discovered = sorted(fps.keys())
         static_deps, _, outlines = build_static_import_graph(root, discovered, fps=fps, aoci_dir=aoci_dir)
         go_imported_dirs_by_file, go_files_by_dir = resolve_go_package_imports(root, outlines, discovered)
+        jvm_cs_resolved = _parsers.resolve_jvm_cs_package_imports(outlines, discovered)
         known = set(entries.keys())
 
         static_sets: Dict[str, Set[str]] = {k: set(v) for k, v in static_deps.items()}
@@ -5363,6 +5057,7 @@ def audit_architecture(
             s_deps = static_sets.get(rel, set())
             f_deps = fras_deps.get(rel, set())
             rel_dir = rel.rsplit("/", 1)[0] if "/" in rel else ""
+            rel_eco = _static_ecosystem(rel)
             if rel.endswith(".go"):
                 for imp_dir in sorted(go_imported_dirs_by_file.get(rel, ())):
                     if imp_dir == rel_dir:
@@ -5370,11 +5065,24 @@ def audit_architecture(
                     pkg_indexed = [f for f in go_files_by_dir.get(imp_dir, ()) if f in entries and f != rel]
                     if pkg_indexed and not (set(pkg_indexed) & f_deps):
                         missing_static_deps.append({"from": rel, "to": pkg_indexed[0], "code": "missing-static-dep"})
+            elif rel_eco in ("jvm", "cs") and rel in jvm_cs_resolved:
+                exact_hits, group_hits = jvm_cs_resolved[rel]
+                reported_missing: Set[str] = set()
+                for dep in sorted(set(exact_hits)):
+                    if dep in entries and dep not in f_deps and dep not in reported_missing:
+                        reported_missing.add(dep)
+                        missing_static_deps.append({"from": rel, "to": dep, "code": "missing-static-dep"})
+                for grp in group_hits:
+                    grp_indexed = [f for f in grp if f in entries and f != rel]
+                    if grp_indexed and not (set(grp_indexed) & f_deps):
+                        cand_to = grp_indexed[0]
+                        if cand_to not in reported_missing:
+                            reported_missing.add(cand_to)
+                            missing_static_deps.append({"from": rel, "to": cand_to, "code": "missing-static-dep"})
             else:
                 for dep in sorted(s_deps):
                     if dep in entries and dep not in f_deps:
                         missing_static_deps.append({"from": rel, "to": dep, "code": "missing-static-dep"})
-            rel_eco = _static_ecosystem(rel)
             if rel_eco is not None:
                 pe = parsed_map.get(rel)
                 if pe is not None:
@@ -5384,6 +5092,10 @@ def audit_architecture(
                         if rel.endswith(".go") and r_dep.endswith(".go"):
                             r_dir = r_dep.rsplit("/", 1)[0] if "/" in r_dep else ""
                             if r_dir == rel_dir or r_dir in go_imported_dirs_by_file.get(rel, ()):
+                                continue
+                        elif rel_eco in ("jvm", "cs"):
+                            r_dir = r_dep.rsplit("/", 1)[0] if "/" in r_dep else ""
+                            if r_dir == rel_dir:
                                 continue
                         if r_dep not in s_deps:
                             phantom_fras_deps.append(
@@ -5427,6 +5139,8 @@ def audit_architecture(
             max_commits=co_change_commits,
             min_co_changes=min_co_changes,
             min_confidence=min_co_confidence,
+            parsed_entries=parsed_map,
+            exclude_tests=exclude_tests,
         )
 
     ok = not (missing_static_deps or cycles or layer_violations)
@@ -5466,6 +5180,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         co_change_commits=int(getattr(args, "co_change_commits", 200)),
         min_co_changes=int(getattr(args, "min_co_changes", 3)),
         min_co_confidence=float(getattr(args, "min_co_confidence", 0.6)),
+        exclude_tests=bool(getattr(args, "exclude_tests", False)),
         forbid_spec=getattr(args, "forbid", None),
         use_default_rules=not getattr(args, "no_default_rules", False),
         max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
@@ -5507,9 +5222,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
         if res.get("co_change_unlinked"):
             print(f"\nCO-CHANGE UNLINKED PAIRS ({len(res['co_change_unlinked'])}):")
             for item in res["co_change_unlinked"][:30]:
+                hop_tag = " [2-hop]" if item.get("is_two_hop") else ""
                 print(
                     f"  ~ {item['file_a']} <-> {item['file_b']} "
-                    f"(co={item['co_changes']}, conf={item['confidence']})"
+                    f"(co={item['co_changes']}, conf={item['confidence']} "
+                    f"[{item.get('confidence_a_to_b', item['confidence'])}/{item.get('confidence_b_to_a', item['confidence'])}]){hop_tag}"
                 )
 
     return 1 if (getattr(args, "strict", False) and not res["ok"]) else 0
@@ -5560,6 +5277,120 @@ def cmd_prepare_sync(args: argparse.Namespace) -> int:
         )
         for act in brief["recommended_actions"]:
             print(f"  -> {act}")
+    return 0
+
+
+def _capture_internal_cli(argv: Sequence[str]) -> Tuple[int, str]:
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+        try:
+            rc = main(list(argv))
+        except SystemExit as exc:
+            if isinstance(exc.code, int):
+                rc = exc.code
+            elif exc.code is None:
+                rc = 0
+            else:
+                rc = 1
+                err_buf.write(f"\n{exc.code}")
+    out_txt = out_buf.getvalue().strip()
+    err_txt = err_buf.getvalue().strip()
+    return rc, (out_txt if out_txt else err_txt)
+
+
+def cmd_apply_sync(args: argparse.Namespace) -> int:
+    """Execute ordered sync workflow (`restore -> migrate-renames -> ack -> upsert -> verify`) in one pass."""
+    root = resolve_root(args.root)
+    res = _apply_sync.run_apply_sync(
+        root,
+        _capture_internal_cli,
+        restore=bool(getattr(args, "restore", False)),
+        allow_sha_fallback=bool(getattr(args, "allow_sha_fallback", False)),
+        migrate_renames=bool(getattr(args, "migrate_renames", False)),
+        exact_only=bool(getattr(args, "exact_only", False)),
+        ack_paths=getattr(args, "ack_path", None) or [],
+        ack_impl_only=bool(getattr(args, "ack_impl_only", False)),
+        reviewed=bool(getattr(args, "reviewed", False)),
+        entries=getattr(args, "entry", None) or [],
+        entries_file=getattr(args, "entries_file", None),
+        prune_only=bool(getattr(args, "prune_only", False)),
+        no_prune=bool(getattr(args, "no_prune", False)),
+        strict_size=bool(getattr(args, "strict_size", False)),
+        drop_malformed=bool(getattr(args, "drop_malformed", False)),
+        verify=not bool(getattr(args, "no_verify", False)),
+        full_verify=bool(getattr(args, "full_verify", False)),
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    else:
+        status = "DRY-RUN OK" if res["dry_run"] and res["ok"] else ("OK" if res["ok"] else f"FAILED ({res['failed_step']})")
+        print(f"[AOCI Apply-Sync] {status} | Steps={len(res['steps'])}")
+        for st in res["steps"]:
+            st_flag = "OK" if st["ok"] else f"ERR(rc={st['rc']})"
+            print(f"  * {st['step']}: {st_flag}")
+    return 0 if res["ok"] else 1
+
+
+def cmd_symbol(args: argparse.Namespace) -> int:
+    """Look up a symbol across `.aoci/aoci.hubs.txt`, outline cache (or `--live`), and FRAS `A:` exports."""
+    root = resolve_root(args.root)
+    aoci_dir = root / AOCI_DIR_NAME
+    code_path = aoci_dir / CODE_FILE
+    as_json = bool(getattr(args, "json", False))
+    if not code_path.exists():
+        msg = f"`{code_path}` not found. Run `init` first."
+        if as_json:
+            print(json.dumps({"ok": False, "error": msg}, indent=2, ensure_ascii=False))
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 2
+
+    entries, _ = parse_code_volume(code_path)
+    parsed_map = parse_entries_map(entries)
+    deps_adj, dependents_adj = build_fras_graph(entries, parsed_entries=parsed_map)
+    res = _symbols.lookup_symbol(
+        root,
+        entries,
+        deps_adj,
+        dependents_adj,
+        args.name,
+        exact=bool(getattr(args, "exact", False)),
+        depth=int(getattr(args, "depth", 1)),
+        limit=int(getattr(args, "limit", 20)),
+        live=bool(getattr(args, "live", False)),
+        parsed_entries=parsed_map,
+    )
+    if not res.get("ok"):
+        if as_json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        else:
+            print(f"ERROR: {res.get('error', 'Symbol lookup failed.')}", file=sys.stderr)
+        return 2
+
+    if as_json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"# AOCI Symbol Lookup: {res['query']} "
+            f"(matches={res['total_matches']}, showing={len(res['matches'])})"
+        )
+        for m in res["matches"]:
+            span_txt = f" [L{m['line_span'][0]}-L{m['line_span'][1]}]" if m.get("line_span") else ""
+            print(f"\n* {m['symbol']} @ {m['path']}{span_txt} [src={','.join(m['sources'])}, imp={m['importance']}]")
+            if m.get("signature"):
+                print(f"  sig: {m['signature']}")
+            if m.get("hub_f"):
+                print(f"  hub-F: {m['hub_f']}")
+            if m.get("hub_s"):
+                print(f"  hub-S: {m['hub_s']}")
+            if m.get("file_entry"):
+                print(f"  fras: {m['file_entry']}")
+            if m.get("dependencies"):
+                print(f"  deps: {', '.join(m['dependencies'])}")
+            if m.get("callers"):
+                print(f"  callers: {', '.join(m['callers'])}")
     return 0
 
 
@@ -5878,6 +5709,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_q.add_argument("--top", type=int, default=None, help="Maximum entries to return (default: 20 with --search; 0 = unlimited)")
     p_q.add_argument("--impact", help="Target file plus every entry that depends on it (via R: or A: callers)")
     p_q.add_argument("--tests-for", help="Target file to find impacted T-layer test files (FRAS + outline + naming)")
+    p_q.add_argument(
+        "--live-test-imports",
+        action="store_true",
+        help="Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+    )
     p_q.add_argument("--depth", type=int, default=None, help="Transitive hops (default: 1 for --impact, 3 for --tests-for)")
     p_q.add_argument("--json", action="store_true", help="Output JSON")
     p_q.set_defaults(func=cmd_query)
@@ -5888,6 +5724,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ctx.add_argument("--depth", type=int, default=1, help="Graph expansion hops (default: 1)")
     p_ctx.add_argument("--budget", type=int, default=0, help="Optional token budget ceiling (0 = unlimited)")
     p_ctx.add_argument("--with-tests", action="store_true", help="Attach impacted T-layer test files")
+    p_ctx.add_argument(
+        "--live-test-imports",
+        action="store_true",
+        help="Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+    )
     p_ctx.add_argument("--json", action="store_true", help="Output JSON")
     p_ctx.set_defaults(func=cmd_context)
 
@@ -5946,6 +5787,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("--staged", action="store_true", help="Inspect staged (`--cached`) diff")
     p_diff.add_argument("--depth", type=int, default=1, help="Upstream caller hops (default: 1)")
     p_diff.add_argument("--with-tests", action="store_true", help="Attach impacted T-layer test files")
+    p_diff.add_argument(
+        "--live-test-imports",
+        action="store_true",
+        help="Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+    )
     p_diff.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_diff.add_argument("--json", action="store_true", help="Output JSON")
     p_diff.set_defaults(func=cmd_diff)
@@ -5990,6 +5836,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud.add_argument("--co-change-commits", type=int, default=200, help="Max recent commits to scan for --co-change (default: 200)")
     p_aud.add_argument("--min-co-changes", type=int, default=3, help="Minimum co-change commit count (default: 3)")
     p_aud.add_argument("--min-co-confidence", type=float, default=0.6, help="Minimum co-change confidence in [0,1] (default: 0.6)")
+    p_aud.add_argument("--exclude-tests", action="store_true", help="Exclude T-layer test files from --co-change pairs")
     p_aud.add_argument("--strict", action="store_true", help="Exit 1 when any missing static dep, cycle, or layer violation exists")
     p_aud.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_aud.add_argument("--json", action="store_true", help="Output JSON")
@@ -6054,6 +5901,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--budget", type=int, default=2500, help="Token budget ceiling (default: 2500; 0 = unlimited)")
     p_pack.add_argument("--top-seeds", type=int, default=8, help="Maximum BM25 seed hits (default: 8)")
     p_pack.add_argument("--with-tests", action="store_true", help="Attach impacted T-layer test files for packed seeds")
+    p_pack.add_argument(
+        "--live-test-imports",
+        action="store_true",
+        help="Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+    )
     p_pack.add_argument("--live-anchors", action="store_true", help="Extract live symbol anchors in memory when outline cache misses")
     p_pack.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_pack.add_argument("--json", action="store_true", help="Output JSON")
@@ -6085,6 +5937,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_zoom.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_zoom.add_argument("--json", action="store_true", help="Output JSON")
     p_zoom.set_defaults(func=cmd_zoom)
+
+    p_as = sub.add_parser(
+        "apply-sync",
+        help="Run ordered sync workflow (restore -> migrate-renames -> ack -> upsert -> verify) in one pass",
+    )
+    p_as.add_argument("--root", help="Target codebase root")
+    p_as.add_argument("--restore", action="store_true", help="Run semantic pool restore (`--no-prune`) first")
+    p_as.add_argument("--allow-sha-fallback", action="store_true", help="Pass `--allow-sha-fallback` to `restore`")
+    p_as.add_argument("--migrate-renames", action="store_true", help="Migrate exact and similar renames")
+    p_as.add_argument("--exact-only", action="store_true", help="Pass `--exact-only` to `migrate-renames`")
+    p_as.add_argument("--ack-path", action="append", help="Path to acknowledge via `ack` (repeatable; requires --reviewed)")
+    p_as.add_argument("--ack-impl-only", action="store_true", help="Acknowledge `impl_only` modified files (requires --reviewed)")
+    p_as.add_argument("--reviewed", action="store_true", help="Confirm acknowledged files were read and verified")
+    p_as.add_argument("--entry", action="append", help="object-fras-v2 line to merge in `upsert` (repeatable)")
+    p_as.add_argument("--entries-file", help="File containing object-fras-v2 lines to merge in `upsert`")
+    p_as.add_argument("--prune-only", action="store_true", help="Pass `--prune-only` to `upsert`")
+    p_as.add_argument("--no-prune", action="store_true", help="Pass `--no-prune` to `upsert`")
+    p_as.add_argument("--strict-size", action="store_true", help="Pass `--strict-size` to `upsert`")
+    p_as.add_argument("--drop-malformed", action="store_true", help="Allow dropping pre-existing malformed lines")
+    p_as.add_argument("--no-verify", action="store_true", help="Skip trailing `verify` check")
+    p_as.add_argument("--full-verify", action="store_true", help="Run full `verify` instead of `verify --fast`")
+    p_as.add_argument("--dry-run", action="store_true", help="Preview mutating stages without writing to disk")
+    p_as.add_argument("--json", action="store_true", help="Output JSON")
+    p_as.set_defaults(func=cmd_apply_sync)
+
+    p_sym = sub.add_parser(
+        "symbol",
+        help="Search symbols across `.aoci/aoci.hubs.txt`, outline cache, and FRAS `A:` exports",
+    )
+    p_sym.add_argument("name", help="Symbol name or substring to look up")
+    p_sym.add_argument("--root", help="Target codebase root")
+    p_sym.add_argument("--exact", action="store_true", help="Restrict to exact / qualified suffix matches")
+    p_sym.add_argument("--depth", type=int, default=1, help="FRAS neighbor expansion hops per matched file (default: 1)")
+    p_sym.add_argument("--limit", type=int, default=20, help="Maximum matched symbols to return (default: 20; 0 = unlimited)")
+    p_sym.add_argument("--live", action="store_true", help="Read-only live outline fallback for files missing from outline cache")
+    p_sym.add_argument("--json", action="store_true", help="Output JSON")
+    p_sym.set_defaults(func=cmd_symbol)
 
     return p
 
