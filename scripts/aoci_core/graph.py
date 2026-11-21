@@ -1422,7 +1422,8 @@ def _query_contains_alias(query_text: str, camel_norm_query: str, alias: str) ->
     parts = [re.escape(p) for p in re.split(r"[\s_-]+", alias.strip()) if p]
     if not parts:
         return False
-    pat = re.compile(rf"(?<![A-Za-z0-9]){r'[\s_-]+'.join(parts)}(?![A-Za-z0-9])", re.IGNORECASE)
+    sep = r"[\s_-]+"
+    pat = re.compile(rf"(?<![A-Za-z0-9]){sep.join(parts)}(?![A-Za-z0-9])", re.IGNORECASE)
     return bool(pat.search(query_text) or (camel_norm_query != query_text and pat.search(camel_norm_query)))
 
 

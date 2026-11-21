@@ -20,7 +20,7 @@ from test_aoci import RepoTestCase, aoci_index, cli, cli_json  # noqa: E402
 class TestImpactTests(RepoTestCase):
     def _git(self, *args: str) -> str:
         r = subprocess.run(
-            ["git", *args],
+            ["git", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@e", *args],
             cwd=self.root,
             capture_output=True,
             text=True,

@@ -49,15 +49,26 @@ class _MemoryIndexCache:
         self._outline_slots: "OrderedDict[str, Tuple[Any, Dict[str, Any]]]" = OrderedDict()
         self._hub_slots: "OrderedDict[str, Tuple[Any, List[Dict[str, Any]]]]" = OrderedDict()
 
+    @staticmethod
+    def _canonical_root(root: Path) -> Tuple[Path, str]:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root
+        return resolved, str(resolved)
+
     def invalidate(self, root: Path) -> None:
-        root_key = str(root)
+        _, root_key = self._canonical_root(root)
+        raw_key = str(root)
         with self._lock:
-            self._slots.pop(root_key, None)
-            self._outline_slots.pop(root_key, None)
-            self._hub_slots.pop(root_key, None)
+            for key in (root_key, raw_key):
+                self._slots.pop(key, None)
+                self._outline_slots.pop(key, None)
+                self._hub_slots.pop(key, None)
 
     def get(self, root: Path) -> Optional[Dict[str, Any]]:
-        aoci_dir = root / aoci_index.AOCI_DIR_NAME
+        resolved, root_key = self._canonical_root(root)
+        aoci_dir = resolved / aoci_index.AOCI_DIR_NAME
         code_path = aoci_dir / aoci_index.CODE_FILE
         with self._lock:
             if not code_path.is_file():
@@ -69,7 +80,6 @@ class _MemoryIndexCache:
                 aoci_index._stat_key(aoci_dir / aoci_index.META_FILE),
                 aoci_index._stat_key(aoci_dir / aoci_index.GLOSSARY_FILE),
             )
-            root_key = str(root)
             cached = self._slots.get(root_key)
             if cached is not None and cached.get("key") == key:
                 self._slots.move_to_end(root_key)
@@ -92,7 +102,7 @@ class _MemoryIndexCache:
                 "mention_index": mention_index,
                 "bm25": None,
                 "glossary": aoci_index.parse_glossary(aoci_dir),
-                "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or root.name,
+                "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or resolved.name,
                 "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
                 "git_hdr": aoci_index.parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown",
                 "domains": aoci_index.parse_declared_domains(aoci_dir),
@@ -116,8 +126,8 @@ class _MemoryIndexCache:
             return idx
 
     def get_outline_files(self, root: Path) -> Optional[Dict[str, Any]]:
-        cache_path = root / aoci_index.AOCI_DIR_NAME / aoci_index.CACHE_DIR / aoci_index.OUTLINE_CACHE
-        root_key = str(root)
+        resolved, root_key = self._canonical_root(root)
+        cache_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.CACHE_DIR / aoci_index.OUTLINE_CACHE
         with self._lock:
             if not cache_path.is_file():
                 self._outline_slots.pop(root_key, None)
@@ -150,8 +160,8 @@ class _MemoryIndexCache:
             return files_obj
 
     def get_hub_records(self, root: Path) -> Optional[List[Dict[str, Any]]]:
-        hubs_path = root / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
-        root_key = str(root)
+        resolved, root_key = self._canonical_root(root)
+        hubs_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
         with self._lock:
             if not hubs_path.is_file():
                 self._hub_slots.pop(root_key, None)

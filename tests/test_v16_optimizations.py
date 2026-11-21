@@ -137,11 +137,12 @@ class V16OptimizationsTests(RepoTestCase):
                 err_ps, _ = aoci_mcp.call_tool("aoci_prepare_sync", {"root": str(self.root)})
             self.assertFalse(err_ps)
 
-        # aoci_ensure_git_exclude invalidates _CACHE for root
-        aoci_mcp._CACHE.get(self.root)
-        self.assertIn(str(self.root), aoci_mcp._CACHE._slots)
+        # aoci_ensure_git_exclude invalidates _CACHE for root (even if warmed via non-canonical path)
+        root_key = str(self.root.resolve())
+        aoci_mcp._CACHE.get(self.root / "src" / "..")
+        self.assertIn(root_key, aoci_mcp._CACHE._slots)
         aoci_mcp.call_tool("aoci_ensure_git_exclude", {"root": str(self.root)})
-        self.assertNotIn(str(self.root), aoci_mcp._CACHE._slots)
+        self.assertNotIn(root_key, aoci_mcp._CACHE._slots)
 
     def test_jvm_and_csharp_static_import_graph_and_audit(self):
         self.write("src/com/app/model/User.java", "package com.app.model;\npublic class User {}\n")
@@ -365,14 +366,12 @@ class V16OptimizationsTests(RepoTestCase):
             calls += 1
             return orig_sig(*a, **kw)
 
-        with (
-            mock.patch.object(aoci_index, "compute_signature_hash_from_bytes", side_effect=spy_sig_bytes),
-            mock.patch.object(aoci_index, "compute_signature_hash", side_effect=spy_sig),
-        ):
-            rc_dry, out_dry = aoci_index._capture_internal_cli(
-                ["ack", "--root", str(self.root), "--impl-only", "--dry-run", "--json"]
-            )
-            self.assertEqual(rc_dry, 0, out_dry)
+        with mock.patch.object(aoci_index, "compute_signature_hash_from_bytes", side_effect=spy_sig_bytes):
+            with mock.patch.object(aoci_index, "compute_signature_hash", side_effect=spy_sig):
+                rc_dry, out_dry = aoci_index._capture_internal_cli(
+                    ["ack", "--root", str(self.root), "--impl-only", "--dry-run", "--json"]
+                )
+                self.assertEqual(rc_dry, 0, out_dry)
         dry_obj = json.loads(out_dry)
         self.assertEqual(dry_obj["acked"], ["src/body.py"])
         self.assertEqual(calls, 2)  # exactly once per modified file, not twice
@@ -613,7 +612,9 @@ class V16OptimizationsTests(RepoTestCase):
         self.assertEqual([s["step"] for s in dry_obj["steps"]], ["migrate_renames", "ack", "upsert"])
 
         # 3) Warm cache first, then apply-sync via MCP to confirm cache invalidation + PASS verify
+        root_key = str(self.root.resolve())
         aoci_mcp._CACHE.get(self.root)
+        self.assertIn(root_key, aoci_mcp._CACHE._slots)
         err_as, out_as = aoci_mcp.call_tool(
             "aoci_apply_sync",
             {
@@ -629,7 +630,7 @@ class V16OptimizationsTests(RepoTestCase):
         self.assertTrue(as_obj["ok"])
         self.assertEqual([s["step"] for s in as_obj["steps"]], ["migrate_renames", "ack", "upsert", "verify"])
         self.assertTrue(as_obj["verify"]["ok"])
-        self.assertNotIn(str(self.root), aoci_mcp._CACHE._slots)
+        self.assertNotIn(root_key, aoci_mcp._CACHE._slots)
 
         # 4) Stop on failure halts before verify when upsert fails
         err_fail, out_fail = aoci_mcp.call_tool(
