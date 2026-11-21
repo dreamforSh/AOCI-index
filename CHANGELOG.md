@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **6-Host Ecosystem Installer (`cursor`, `windsurf`, `vscode`)**: Added `--host cursor | windsurf | vscode` (and expanded `--host all`) in `aoci_core.installer` / `scripts/install.py`, plus `--host cursor` lifecycle hook support in `scripts/aoci_hook.py`.
+- **Hub-Aware Semantic Pool**: Added `pool_hubs_by_symbol_sha` in `aoci_core.pool` & `aoci_core.hubs` for zero-token, line-shift-resilient `aoci.hubs.txt` restore across branch switches and `pool export/import` bundles.
+- **Subagent Batch Work-Pack & Pending Merge**: Added `batch-pack` / `aoci_batch_pack` (`--with-source`) and `upsert --pending-dir [--clean-pending]` with per-file batch provenance on validation errors.
+- **CI-Native Architecture Guard & GitHub Action**: Added `ci-check` / `aoci_ci_check` and root `action.yml`, supporting zero-index CI checkouts, `--pool-bundle`, `--base-rev` PR diff test derivation, SARIF 2.1.0, GitHub Actions workflow annotations, and PR Markdown reports.
+- **MCP `2025-06-18` Protocol Enhancements**: Added `roots/list` & `notifications/roots/list_changed` multi-root discovery, `outputSchema` + `structuredContent`, `resources/subscribe` / `notifications/resources/updated`, and `aoci_install_git_hooks` (27 MCP tools total).
+- **Optional `tree-sitter` Accelerator & Self-Hosting Seed Pool**: Added optional `aoci-index[treesitter]` AST acceleration (`aoci_core.ts_accel`), interactive HTML/Mermaid `--diff` / `--diff-rev` highlighting, and `examples/self-pool.json.gz`.
+
+### Changed
+- **Monorepo Scale Optimizations**: Added dual positive/negation union regexes in `IgnoreMatcher`, `O(1)` Python suffix index + single-pass comment stripping in `parsers.py`, zero-stat dangling-ref checks + single-parse `verify`, bucketed `TestImpactIndex`, composite PK row-value SQLite pool lookups, same-thread re-entrant `IndexLock` across `apply-sync`, and per-root locks + short-TTL diff caching in `aoci_mcp.py`.
+
+### Fixed
+- **Packaging, MCP & Sync Hardening**: Moved `install` into `aoci_core.installer` with embedded wheel `_skill_bundle` (`setup.py`), fixed Windows `%3A` file URIs and thread-safe stdio isolation in `aoci_mcp.py`, synced `aoci.hubs.txt` on `restore`, decoupled `apply-sync --ack-impl-only` + `--ack-path`, added UTF-8 BOM handling across volumes/parsers, and enforced read-only `?mode=ro` SQLite pool queries.
+
 ## [1.5.0] - 2026-11-20
 
 ### Added

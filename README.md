@@ -19,8 +19,8 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-64748B?style=flat" alt="Linux · macOS · Windows">
 </p>
 <p>
-  <img src="https://img.shields.io/badge/MCP-25%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 25 tools · stdio">
-  <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity%20%C2%B7%20Codex-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity · Codex">
+  <img src="https://img.shields.io/badge/MCP-27%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 27 tools · stdio">
+  <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity%20%C2%B7%20Codex%20%C2%B7%20Cursor%20%C2%B7%20Windsurf%20%C2%B7%20VS%20Code-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity · Codex · Cursor · Windsurf · VS Code">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22C55E?style=flat" alt="License: MIT"></a>
 </p>
 
@@ -38,7 +38,7 @@
 
 ---
 
-**`aoci-index`** is a zero-dependency Python 3.8+ **AI-Oriented Codebase Indexing** (`.aoci/`) engine — combining a BM25/FRAS graph reader, tri-host lifecycle guardrails, and a stdio MCP server for **Claude Code**, **Antigravity**, and **Codex**.
+**`aoci-index`** is a zero-dependency Python 3.8+ **AI-Oriented Codebase Indexing** (`.aoci/`) engine — combining a BM25/FRAS graph reader, multi-host lifecycle guardrails, and a stdio MCP `2025-06-18` server for **Claude Code**, **Antigravity**, **Codex**, **Cursor**, **Windsurf**, and **VS Code / GitHub Copilot**.
 
 A single read pass gives coding agents repository-wide architectural orientation, cross-file dependencies, and non-obvious invariants — while keeping `.aoci/` strictly local via `.git/info/exclude`.
 
@@ -46,8 +46,8 @@ A single read pass gives coding agents repository-wide architectural orientation
   <tr>
     <td width="25%" align="center"><b>Zero Dependencies</b><br><sub>Python 3.8+ stdlib only</sub></td>
     <td width="25%" align="center"><b>Local-Only <code>.aoci/</code></b><br><sub>Excluded via <code>.git/info/exclude</code></sub></td>
-    <td width="25%" align="center"><b>Sub-Second Sync</b><br><sub>LF SHA-256, <code>sig_hash</code> &amp; WAL pool</sub></td>
-    <td width="25%" align="center"><b>25 MCP Tools</b><br><sub>Warm in-memory stdio server</sub></td>
+    <td width="25%" align="center"><b>Sub-Second Sync</b><br><sub>LF SHA-256, <code>sig_hash</code> &amp; Hub WAL pool</sub></td>
+    <td width="25%" align="center"><b>27 MCP Tools</b><br><sub>Warm in-memory stdio server</sub></td>
   </tr>
 </table>
 
@@ -104,16 +104,16 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
       <p><img src="https://api.iconify.design/lucide/git-branch.svg?color=%236366F1" width="18" height="18" align="top" alt=""> <b>Sub-Second Drift &amp; Sync</b></p>
       <ul>
         <li><b>Drift &amp; Rich <code>sig_hash</code></b> — LF-normalized SHA-256 + <code>(mtime, size)</code> baseline (<code>baseline.json</code>, schema v2) classifies edits as <code>impl_only</code> vs <code>contract_changed</code> across Python, JS/TS/Vue/Svelte, Go, Rust, JVM/C#, C/C++, and Proto/GraphQL/Prisma/SQL.</li>
-        <li><b>Rename &amp; Branch Restore</b> — Exact and MinHash moved+edited rename migration (<code>migrate-renames</code>), plus zero-token <code>restore</code> from a cross-worktree SQLite WAL semantic pool (<code>&lt;git-common-dir&gt;/aoci-cache</code>).</li>
-        <li><b>Single-Pass Orchestrated Sync</b> — <code>prepare-sync</code> / <code>aoci_prepare_sync</code> aggregates restorable entries, renames, <code>impl_only</code> vs <code>contract_changed</code> diffs, scaffolds, and neighbors; <code>apply-sync</code> / <code>aoci_apply_sync</code> runs <code>restore -&gt; migrate-renames -&gt; ack -&gt; upsert -&gt; verify</code> in one call.</li>
+        <li><b>Rename &amp; Hub-Aware Branch Restore</b> — Exact and MinHash moved+edited rename migration (<code>migrate-renames</code>), plus zero-token <code>restore</code> of both file FRAS entries and line-shift-resilient L1.5 <code>aoci.hubs.txt</code> symbol entries from a cross-worktree SQLite WAL semantic pool (<code>&lt;git-common-dir&gt;/aoci-cache</code>).</li>
+        <li><b>Single-Pass &amp; Parallel Subagent Sync</b> — <code>prepare-sync</code> + <code>apply-sync</code> run ordered one-lock pipelines, while <code>batch-pack</code> / <code>aoci_batch_pack</code> and <code>upsert --pending-dir</code> enable parallel subagent batch fan-out and atomic merge.</li>
       </ul>
     </td>
     <td width="50%" valign="top">
-      <p><img src="https://api.iconify.design/lucide/shield-check.svg?color=%236366F1" width="18" height="18" align="top" alt=""> <b>MCP, Audit &amp; Guardrails</b></p>
+      <p><img src="https://api.iconify.design/lucide/shield-check.svg?color=%236366F1" width="18" height="18" align="top" alt=""> <b>MCP, CI Guard &amp; 6-Host Setup</b></p>
       <ul>
-        <li><b>Warm In-Memory Stdio MCP Server</b> — <code>aoci_mcp.py</code> serves <b>25 annotated tools</b> (lock-free <code>contextvars</code> CLI capture + thread-safe index/BM25/outline/hubs cache), <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 workflow prompts</b> over newline-delimited JSON-RPC 2.0 or <code>Content-Length</code> framing.</li>
-        <li><b>Architectural Audit &amp; Graph Export</b> — Cross-checks FRAS edges against static imports (including monorepo nested <code>tsconfig.json</code>/<code>go.mod</code>), finds Tarjan SCC cycles, enforces <code>#Layer-Rules:</code>, mines Git co-change coupling (<code>audit --co-change [--exclude-tests]</code>), and exports Mermaid, DOT, or standalone zero-CDN interactive HTML graphs (<code>export --format html</code>).</li>
-        <li><b>Tri-Host Guardrails &amp; Local Exclusion</b> — <code>SessionStart</code>, optional turn-start snapshot refresh, and convergent <code>Stop</code> gate for <b>Claude Code</b>, <b>Antigravity</b>, and <b>Codex</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
+        <li><b>Modern MCP <code>2025-06-18</code> Server</b> — <code>aoci_mcp.py</code> serves <b>27 annotated tools</b> (with <code>outputSchema</code> &amp; <code>structuredContent</code>), <code>roots/list</code> multi-root discovery, <code>resources/subscribe</code> live update notifications, <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 prompts</b>.</li>
+        <li><b>CI Guard &amp; Diff-Colored Graph Export</b> — <code>ci-check</code> / <code>aoci_ci_check</code> (plus root <code>action.yml</code>) checks layer rules, Tarjan cycles, and PR diff test impact even in zero-index CI runners, emitting SARIF 2.1.0, GitHub annotations, or PR Markdown; <code>export --format html --diff</code> highlights changed and affected nodes.</li>
+        <li><b>6-Host Installer &amp; Guardrails</b> — One-command setup and surgical uninstall for <b>Claude Code</b>, <b>Antigravity</b>, <b>Codex</b>, <b>Cursor</b>, <b>Windsurf</b>, and <b>VS Code / Copilot</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
       </ul>
     </td>
   </tr>
@@ -136,6 +136,9 @@ python scripts/aoci_index.py upsert --root <repo> --entries-file .aoci/pending/b
 python scripts/aoci_index.py pack --root <repo> --task "Fix JWT rotation skew" --budget 2500
 python scripts/aoci_index.py diff --root <repo> --with-tests
 python scripts/aoci_index.py verify --root <repo> && python scripts/aoci_index.py lint --root <repo>
+
+# Zero-token dogfooding bootstrap on AOCI-index itself:
+python scripts/aoci_index.py init --root . && python scripts/aoci_index.py pool import --root . --input examples/self-pool.json.gz && python scripts/aoci_index.py restore --root .
 ```
 
 ## <img src="https://api.iconify.design/lucide/download.svg?color=%236366F1" width="24" height="24" align="top" alt=""> Installation
@@ -166,17 +169,29 @@ python scripts/install.py --host codex --scope global --with-hooks --with-mcp
 # Project-scoped install (.agents/skills/ + .codex/hooks.json + AGENTS.md + .codex/config.toml)
 python scripts/install.py --host codex --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
 
-# Install for Claude Code + Antigravity (`both`) or all three hosts (`all`) at once
+### Cursor, Windsurf & VS Code Copilot
+
+```bash
+# Cursor (.cursor/skills + .cursor/rules/aoci-index.mdc + .cursor/hooks.json + .cursor/mcp.json)
+python scripts/install.py --host cursor --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
+
+# Windsurf & VS Code Copilot (.vscode/mcp.json `servers` + .github/copilot-instructions.md)
+python scripts/install.py --host windsurf --scope global --with-rules --with-mcp
+python scripts/install.py --host vscode --scope project --project-root <repo> --with-rules --with-mcp
+
+# Install across all 6 supported hosts at once (`claude-code`, `antigravity`, `codex`, `cursor`, `windsurf`, `vscode`)
 python scripts/install.py --host all --scope global --with-hooks --with-mcp
 ```
 
-### Optional Editable CLI Package
+### Optional Editable CLI Package & AST Extra
 
 ```bash
-pip install -e .
-aoci-index --version   # aoci-index 1.5.0
-aoci-mcp               # launches the stdio MCP server
-aoci-install --help    # cross-host skill/hook/MCP installer
+pip install -e .                  # zero runtime dependencies
+pip install -e ".[treesitter]"    # optional tree-sitter AST accelerator
+aoci-index --version              # aoci-index 1.5.0
+aoci-mcp                          # launches the stdio MCP server
+aoci-hook --help                  # multi-host lifecycle hook runner
+aoci-install --help               # cross-host skill/hook/MCP installer
 ```
 
 > [!TIP]
@@ -214,7 +229,7 @@ aoci-install --help    # cross-host skill/hook/MCP installer
 | Task-driven context pack | `pack --task "<description>" --root <repo> [--budget 2500] [--with-tests] [--live-anchors]` | `aoci_pack` |
 | Diff impact briefing | `diff [rev] --root <repo> [--with-tests]` | `aoci_diff` (`with_tests`) |
 | Static outline | `outline <paths...> --root <repo>` | `aoci_outline` |
-| Graph export (Mermaid/DOT/HTML) | `export --root <repo> --format mermaid\|dot\|html` | `aoci_export` |
+| Graph export (Mermaid/DOT/HTML) | `export --root <repo> --format mermaid\|dot\|html [--diff]` | `aoci_export` (`diff`, `diff_rev`, `output`) |
 
 ### Initialize, Build & Sync
 
@@ -224,20 +239,22 @@ aoci-install --help    # cross-host skill/hook/MCP installer
 | Drift & batch plan | `scan` / `status --root <repo> --batch-size 20` | `aoci_scan` |
 | Single-pass sync briefing | `prepare-sync --root <repo> [--max-diff-lines 40]` | `aoci_prepare_sync` |
 | One-shot ordered sync | `apply-sync --root <repo> [--restore] [--migrate-renames] ...` | `aoci_apply_sync` |
+| Subagent batch work-pack | `batch-pack --root <repo> --batch 1 [--with-source]` | `aoci_batch_pack` |
 | Pre-filled batch scaffold | `scaffold --root <repo> --batch 1` | `aoci_scaffold` |
 | H-tier symbol sub-volume | `zoom <path> --root <repo>` / `--scaffold` / `--upsert` | `aoci_zoom` |
-| Merge FRAS entries | `upsert --root <repo> --entries-file <file>` | `aoci_upsert` |
+| Merge FRAS entries | `upsert --root <repo> --entries-file <file>` / `--pending-dir <dir>` | `aoci_upsert` (`pending_dir`, `clean_pending`) |
 | Acknowledge clean edits | `ack <paths...> --root <repo>` | `aoci_ack` |
 | Rename migration | `migrate-renames --root <repo>` | `aoci_migrate_renames` |
 | Branch / worktree restore | `restore --root <repo>` | `aoci_restore` |
 
-### Verify, Audit, Scale & Setup
+### Verify, Audit, CI Guard & Setup
 
 | Action | CLI (`python scripts/aoci_index.py ...`) | MCP Tool (`scripts/aoci_mcp.py`) |
 | :--- | :--- | :--- |
 | Full health gate | `verify --root <repo>` | `aoci_verify` |
 | FRAS quality lint | `lint --root <repo> [--limit 100]` | `aoci_lint` (`limit`) |
 | Architecture & cycle audit | `audit --root <repo> [--co-change [--exclude-tests]]` | `aoci_audit` (`exclude_tests`) |
+| CI guard (SARIF/GitHub/PR) | `ci-check --root <repo> [--base-rev <rev>] [--format sarif\|github\|markdown]` | `aoci_ci_check` |
 | Per-directory shards | `shard --root <repo> [--depth 1 \| --clean]` | `aoci_shard` |
 | Semantic pool cache | `pool stats\|export\|import --root <repo>` | `aoci_pool` |
 | Repair Git exclusion | `ensure-git-exclude --root <repo>` | `aoci_ensure_git_exclude` |
