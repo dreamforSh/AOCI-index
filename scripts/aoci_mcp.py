@@ -26,7 +26,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.dont_write_bytecode = True
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -285,7 +285,86 @@ class _MemoryIndexCache:
 _CACHE = _MemoryIndexCache()
 _CLIENT_ROOT_HINT: Optional[str] = None
 _CLIENT_ROOT_HINTS: List[str] = []
+_NEGOTIATED_PROTOCOL: str = DEFAULT_PROTOCOL_VERSION
+_CLIENT_SUPPORTS_ROOTS: bool = False
+_SUBSCRIBED_URIS: Set[str] = set()
+_OUTBOUND_LOCK = threading.Lock()
+_OUTBOUND_QUEUE: List[Dict[str, Any]] = []
+_ROOTS_REQ_SEQ = 0
 MAX_CONTENT_LENGTH = 32 * 1024 * 1024
+
+
+def drain_outbound_messages() -> List[Dict[str, Any]]:
+    """Drain queued server-initiated notifications and requests (used by `serve_stdio` and tests)."""
+    with _OUTBOUND_LOCK:
+        items = list(_OUTBOUND_QUEUE)
+        _OUTBOUND_QUEUE.clear()
+        return items
+
+
+def _enqueue_outbound(msg: Dict[str, Any]) -> None:
+    with _OUTBOUND_LOCK:
+        _OUTBOUND_QUEUE.append(msg)
+
+
+def _enqueue_roots_list_request() -> None:
+    global _ROOTS_REQ_SEQ
+    with _OUTBOUND_LOCK:
+        _ROOTS_REQ_SEQ += 1
+        req_id = f"aoci-roots-{_ROOTS_REQ_SEQ}"
+        _OUTBOUND_QUEUE.append({"jsonrpc": "2.0", "id": req_id, "method": "roots/list", "params": {}})
+
+
+def update_client_roots(roots_items: Any) -> List[str]:
+    """Apply a client `roots` array (`[{"uri": "file:///...", "name": "..."}]`) to multi-root hints."""
+    global _CLIENT_ROOT_HINT
+    if not isinstance(roots_items, list):
+        return list(_CLIENT_ROOT_HINTS)
+    collected: List[str] = []
+    for item in roots_items:
+        uri_str = item.get("uri") if isinstance(item, dict) else (item if isinstance(item, str) else None)
+        if isinstance(uri_str, str) and uri_str.strip():
+            resolved = _file_uri_to_path(uri_str.strip())
+            if resolved and resolved not in collected:
+                collected.append(resolved)
+    if collected:
+        _CLIENT_ROOT_HINTS[:] = collected
+        _CLIENT_ROOT_HINT = _select_default_root_hint() or collected[0]
+    return list(_CLIENT_ROOT_HINTS)
+
+
+def _notify_resource_updates(mutated_root: Path) -> None:
+    """Queue `notifications/resources/updated` for any subscribed `aoci://` URIs matching `mutated_root`."""
+    if not _SUBSCRIBED_URIS:
+        return
+    try:
+        mut_resolved = mutated_root.resolve()
+    except OSError:
+        mut_resolved = mutated_root
+    for sub_uri in sorted(list(_SUBSCRIBED_URIS)):
+        parsed = urllib.parse.urlparse(sub_uri)
+        qs = urllib.parse.parse_qs(parsed.query)
+        raw_r = (qs.get("root") or [None])[0]
+        if raw_r is not None:
+            try:
+                sub_root = _resolve_mcp_root(raw_r).resolve()
+            except OSError:
+                sub_root = _resolve_mcp_root(raw_r)
+            if sub_root != mut_resolved:
+                continue
+        _enqueue_outbound(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/resources/updated",
+                "params": {"uri": sub_uri},
+            }
+        )
+
+
+def _on_root_mutated(root: Path, ok: bool = True) -> None:
+    _CACHE.invalidate(root)
+    if ok:
+        _notify_resource_updates(root)
 
 
 def _file_uri_to_path(uri: str, require_dir: bool = True) -> Optional[str]:
@@ -358,6 +437,10 @@ _MUTATE_IDEMPOTENT_ANNOTATIONS: Dict[str, bool] = {
     "destructiveHint": False,
     "idempotentHint": True,
     "openWorldHint": False,
+}
+_STRUCTURED_OBJECT_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": True,
 }
 
 
@@ -552,6 +635,15 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "root": {"type": "string", "description": "Target repository root path"},
                 "entries": {"type": "array", "items": {"type": "string"}, "description": "object-fras-v2 entry lines"},
                 "entries_file": {"type": "string", "description": "Optional path to a batch file containing object-fras-v2 lines"},
+                "pending_dir": {
+                    "type": "string",
+                    "description": "Optional directory of `*.txt` subagent batch files to validate and merge atomically",
+                },
+                "clean_pending": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Remove consumed `*.txt` files in `pending_dir` after a successful merge",
+                },
                 "prune_only": {"type": "boolean", "default": False, "description": "Only prune deleted files"},
                 "no_prune": {"type": "boolean", "default": False, "description": "Skip pruning deleted files"},
                 "strict_size": {"type": "boolean", "default": False, "description": "Fail instead of auto-fixing stale Size tier"},
@@ -696,6 +788,8 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "path": {"type": "string", "description": "Optional path glob filter"},
                 "focus": {"type": "string", "description": "Optional file path to extract neighborhood subgraph"},
                 "depth": {"type": "integer", "default": 1, "description": "Hops around `focus`"},
+                "diff": {"type": "boolean", "default": False, "description": "Highlight working-tree changed nodes and affected 1-hop callers"},
+                "diff_rev": {"type": "string", "description": "Optional Git revision (e.g. `origin/main`) to highlight changed/affected nodes against"},
                 "output": {"type": "string", "description": "Optional output file path (relative to `root` or absolute) to write the exported graph"},
             },
             "required": ["root"],
@@ -890,7 +984,83 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "required": ["root"],
         },
     },
+    {
+        "name": "aoci_batch_pack",
+        "description": (
+            "Assemble a self-contained subagent briefing work-pack for 1-indexed batch `batch` "
+            "(FRAS scaffolds + outlines + invariants + domains + optional bounded source excerpts)."
+        ),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+        "outputSchema": _STRUCTURED_OBJECT_OUTPUT_SCHEMA,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "batch": {"type": "integer", "description": "1-indexed pending batch number"},
+                "batch_size": {"type": "integer", "description": "Files per batch (inherits active batch_plan.json if omitted)"},
+                "max_batch_lines": {"type": "integer", "description": "Maximum line budget per batch"},
+                "reset_batches": {"type": "boolean", "default": False, "description": "Rebuild saved batch_plan.json before packing"},
+                "with_source": {"type": "boolean", "default": False, "description": "Embed bounded source code excerpts per file"},
+                "max_source_lines": {"type": "integer", "default": 200, "description": "Max source lines per file when `with_source` is true"},
+                "format": {"type": "string", "enum": ["json", "markdown"], "default": "json", "description": "Return structured JSON or Markdown prompt"},
+                "output": {"type": "string", "description": "Optional output file path relative to `root`"},
+            },
+            "required": ["root", "batch"],
+        },
+    },
+    {
+        "name": "aoci_ci_check",
+        "description": (
+            "Run CI-native architectural guard (layer redlines, Tarjan dependency cycles, static vs FRAS check, "
+            "PR diff impact & test derivation, and optional SARIF 2.1.0 / GitHub Actions / Markdown rendering)."
+        ),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+        "outputSchema": _STRUCTURED_OBJECT_OUTPUT_SCHEMA,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "sarif", "github", "markdown", "text"],
+                    "default": "json",
+                    "description": "Output format (default: json)",
+                },
+                "base_rev": {"type": "string", "description": "Optional base Git revision (e.g. `origin/main`) for PR diff impact"},
+                "pool_bundle": {"type": "string", "description": "Optional exported semantic pool bundle (`.json` or `.json.gz`)"},
+                "forbid": {"type": "string", "description": "Optional layer redline rules (e.g. `D!->E,U; P!->E`)"},
+                "use_default_rules": {"type": "boolean", "default": True, "description": "Apply built-in layer redlines when none declared"},
+                "check_static": {"type": "boolean", "default": True, "description": "Cross-check static imports vs FRAS"},
+                "check_cycles": {"type": "boolean", "default": True, "description": "Detect circular dependency cycles"},
+                "check_layers": {"type": "boolean", "default": True, "description": "Validate layer dependency rules"},
+                "check_drift": {"type": "boolean", "default": False, "description": "Also report unsynced `.aoci/` drift when initialized"},
+                "exclude_tests": {"type": "boolean", "default": False, "description": "Exclude T-layer test files from layer/cycle checks"},
+                "sarif_output": {"type": "string", "description": "Optional path to write SARIF 2.1.0 output"},
+                "strict": {"type": "boolean", "default": False, "description": "Return `isError=True` when any finding exists"},
+            },
+            "required": ["root"],
+        },
+    },
 ]
+
+_STRUCTURED_TOOL_NAMES = {
+    "aoci_overview",
+    "aoci_query",
+    "aoci_context",
+    "aoci_diff",
+    "aoci_lint",
+    "aoci_audit",
+    "aoci_export",
+    "aoci_pack",
+    "aoci_prepare_sync",
+    "aoci_apply_sync",
+    "aoci_symbol",
+    "aoci_batch_pack",
+}
+for _t_entry in TOOLS_SPEC:
+    if _t_entry["name"] in _STRUCTURED_TOOL_NAMES:
+        _t_entry.setdefault("outputSchema", _STRUCTURED_OBJECT_OUTPUT_SCHEMA)
+_TOOL_BY_NAME: Dict[str, Dict[str, Any]] = {t["name"]: t for t in TOOLS_SPEC}
 
 
 RESOURCES_SPEC: List[Dict[str, Any]] = [
@@ -1136,7 +1306,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if args.get("force"):
             cli_args.append("--force")
         rc, out = _run_cli_capture(cli_args)
-        _CACHE.invalidate(root)
+        _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_overview":
@@ -1424,13 +1594,17 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.extend(["--", *paths])
         rc, out = _run_cli_capture(cli_args)
         if not args.get("dry_run"):
-            _CACHE.invalidate(root)
+            _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_upsert":
         cli_args = ["upsert", "--root", str(root), "--json"]
         if args.get("entries_file"):
             cli_args.append(f"--entries-file={args['entries_file']}")
+        if args.get("pending_dir"):
+            cli_args.append(f"--pending-dir={args['pending_dir']}")
+        if args.get("clean_pending"):
+            cli_args.append("--clean-pending")
         if args.get("prune_only"):
             cli_args.append("--prune-only")
         if args.get("no_prune"):
@@ -1445,7 +1619,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.append(f"--entry={entry}")
         rc, out = _run_cli_capture(cli_args)
         if not args.get("dry_run"):
-            _CACHE.invalidate(root)
+            _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_migrate_renames":
@@ -1460,7 +1634,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
         if not args.get("dry_run"):
-            _CACHE.invalidate(root)
+            _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_restore":
@@ -1475,7 +1649,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
         if not args.get("dry_run"):
-            _CACHE.invalidate(root)
+            _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_shard":
@@ -1485,7 +1659,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         elif args.get("depth") is not None:
             cli_args.extend(["--depth", str(int(args["depth"]))])
         rc, out = _run_cli_capture(cli_args)
-        _CACHE.invalidate(root)
+        _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_ensure_git_exclude":
@@ -1555,6 +1729,25 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         slot = _CACHE.get(root)
         if slot is None:
             return True, f"ERROR: `.aoci/aoci.code.txt` not found at {root}. Run `init` first."
+        changed_exp: List[str] = []
+        affected_exp: List[str] = []
+        if args.get("diff") or args.get("diff_rev"):
+            dbrief = aoci_index.compute_diff_briefing(
+                root,
+                rev=args.get("diff_rev"),
+                depth=1,
+                cached_entries=slot["entries"],
+                cached_deps=slot["deps"],
+                cached_dependents=slot["dependents"],
+                cached_invariants=slot["invariants"],
+                cached_parsed=slot["parsed"],
+            )
+            if dbrief.get("ok"):
+                for ln in dbrief.get("changed_entries") or ():
+                    changed_exp.append(aoci_index.normalize_relpath(ln.split("[", 1)[0].strip()))
+                changed_exp.extend(aoci_index.normalize_relpath(u) for u in (dbrief.get("unindexed_changed") or ()))
+                for ln in dbrief.get("affected_neighbors") or ():
+                    affected_exp.append(aoci_index.normalize_relpath(ln.split("[", 1)[0].strip()))
         res = aoci_index.export_dependency_graph(
             slot["entries"],
             slot["deps"],
@@ -1571,12 +1764,14 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             focus=args.get("focus"),
             depth=int(args.get("depth", 1)),
             parsed_entries=slot["parsed"],
+            changed_paths=changed_exp,
+            affected_paths=affected_exp,
         )
         if args.get("output"):
             out_path = aoci_index._resolve_cli_file_path(root, str(args["output"]), must_exist=False)
             try:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                aoci_index.write_text_lf(out_path, str(res.get("graph", "")))
+                aoci_index.write_text_lf(out_path, str(res.get("content") or res.get("graph", "")))
                 res = dict(res)
                 res["output_path"] = str(out_path)
             except OSError as exc:
@@ -1696,7 +1891,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 cli_args.append(f"--upsert={entry}")
         rc, out = _run_cli_capture(cli_args)
         if mode == "upsert" and not args.get("dry_run"):
-            _CACHE.invalidate(root)
+            _on_root_mutated(root, ok=(rc == 0))
         return rc != 0, out
 
     if name == "aoci_prepare_sync":
@@ -1757,7 +1952,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             lock_cls=aoci_index.IndexLock,
         )
         if not dry_run:
-            _CACHE.invalidate(root)
+            _on_root_mutated(root, ok=bool(res.get("ok")))
         return (not res.get("ok")), json.dumps(res, indent=2, ensure_ascii=False)
 
     if name == "aoci_symbol":
@@ -1794,6 +1989,85 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.append("--dry-run")
         rc, out = _run_cli_capture(cli_args)
         return rc != 0, out
+
+    if name == "aoci_batch_pack":
+        aoci_dir = root / aoci_index.AOCI_DIR_NAME
+        if not (aoci_dir / aoci_index.CODE_FILE).is_file():
+            return True, json.dumps(
+                {"ok": False, "error": f"`{aoci_dir / aoci_index.CODE_FILE}` not found. Run `init` first."},
+                indent=2,
+                ensure_ascii=False,
+            )
+        if args.get("batch") is None:
+            return True, "ERROR: `batch` parameter is required for `aoci_batch_pack`."
+        git_info = aoci_index.detect_git_info(root)
+        drift = aoci_index.compute_drift(root, git_info, fast_mtime=True, allow_heal=False, save_scan_cache=False)
+        pack_res = aoci_index._batch_pack.build_batch_pack(
+            root,
+            drift,
+            int(args["batch"]),
+            scaffold_fn=aoci_index.scaffold_entries,
+            batch_size=int(args["batch_size"]) if args.get("batch_size") is not None else None,
+            max_batch_lines=int(args["max_batch_lines"]) if args.get("max_batch_lines") is not None else None,
+            reset_batches=bool(args.get("reset_batches", False)),
+            with_source=bool(args.get("with_source", False)),
+            max_source_lines=int(args.get("max_source_lines", 200)),
+        )
+        if not pack_res.get("ok"):
+            return True, json.dumps(pack_res, indent=2, ensure_ascii=False)
+        fmt_bp = str(args.get("format", "json")).lower()
+        rendered_md = aoci_index._batch_pack.render_batch_pack_markdown(pack_res)
+        if args.get("output"):
+            out_path = aoci_index._resolve_cli_file_path(root, str(args["output"]), must_exist=False)
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                aoci_index.write_text_lf(
+                    out_path,
+                    rendered_md if fmt_bp == "markdown" else (json.dumps(pack_res, indent=2, ensure_ascii=False) + "\n"),
+                )
+                pack_res = dict(pack_res)
+                pack_res["output_path"] = str(out_path)
+            except OSError as exc:
+                return True, f"ERROR: Cannot write batch pack to `{out_path}`: {exc}"
+        if fmt_bp == "markdown":
+            return False, rendered_md
+        return False, json.dumps(pack_res, indent=2, ensure_ascii=False)
+
+    if name == "aoci_ci_check":
+        fmt_ci = str(args.get("format", "json")).lower()
+        try:
+            report = aoci_index.run_ci_architecture_check(
+                root,
+                base_rev=args.get("base_rev"),
+                pool_bundle=args.get("pool_bundle"),
+                forbid_spec=args.get("forbid"),
+                use_default_rules=bool(args.get("use_default_rules", True)),
+                check_cycles=bool(args.get("check_cycles", True)),
+                check_layers=bool(args.get("check_layers", True)),
+                check_static=bool(args.get("check_static", True)),
+                check_drift=bool(args.get("check_drift", False)),
+                exclude_tests=bool(args.get("exclude_tests", False)),
+            )
+        except Exception as exc:
+            return True, json.dumps({"ok": False, "error": str(exc)}, indent=2, ensure_ascii=False)
+        if report.get("error"):
+            return True, json.dumps(report, indent=2, ensure_ascii=False)
+        if args.get("sarif_output"):
+            sarif_p = aoci_index._resolve_cli_file_path(root, str(args["sarif_output"]), must_exist=False)
+            try:
+                sarif_p.parent.mkdir(parents=True, exist_ok=True)
+                aoci_index.write_text_lf(sarif_p, aoci_index._ci_check.format_ci_sarif(report))
+                report["sarif_output_path"] = str(sarif_p)
+            except OSError as exc:
+                return True, f"ERROR: Cannot write SARIF output to `{sarif_p}`: {exc}"
+        is_ci_err = bool(args.get("strict") and not report.get("ok"))
+        if fmt_ci == "sarif":
+            return is_ci_err, aoci_index._ci_check.format_ci_sarif(report)
+        if fmt_ci == "github":
+            return is_ci_err, aoci_index._ci_check.format_ci_github_annotations(report)
+        if fmt_ci == "markdown":
+            return is_ci_err, aoci_index._ci_check.format_ci_markdown(report)
+        return is_ci_err, json.dumps(report, indent=2, ensure_ascii=False)
 
     return True, f"Unknown tool: `{name}`"
 
@@ -1876,13 +2150,28 @@ def _render_prompt(name: str, arguments: Dict[str, Any]) -> Tuple[Optional[Dict[
 
 
 def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    global _CLIENT_ROOT_HINT
+    global _CLIENT_ROOT_HINT, _NEGOTIATED_PROTOCOL, _CLIENT_SUPPORTS_ROOTS
+    # Client response to a server-initiated request (e.g. `roots/list`) carries `result` or `error`, not `method`
+    if "method" not in req and ("result" in req or "error" in req):
+        res_obj = req.get("result")
+        if isinstance(res_obj, dict) and isinstance(res_obj.get("roots"), list):
+            update_client_roots(res_obj["roots"])
+        return None
+
     method = req.get("method", "")
     req_id = req.get("id")
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
 
     # Notifications carry no `id` and expect no response
     if req_id is None:
+        if method == "notifications/initialized":
+            if _CLIENT_SUPPORTS_ROOTS and not _CLIENT_ROOT_HINTS:
+                _enqueue_roots_list_request()
+        elif method == "notifications/roots/list_changed":
+            if isinstance(params.get("roots"), list):
+                update_client_roots(params["roots"])
+            if _CLIENT_SUPPORTS_ROOTS:
+                _enqueue_roots_list_request()
         return None
 
     def _ok(result: Any) -> Dict[str, Any]:
@@ -1892,6 +2181,8 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
     if method == "initialize":
+        client_caps = params.get("capabilities")
+        _CLIENT_SUPPORTS_ROOTS = bool(isinstance(client_caps, dict) and isinstance(client_caps.get("roots"), dict))
         ws_folders = params.get("workspaceFolders")
         collected_hints: List[str] = []
         if isinstance(ws_folders, list):
@@ -1900,6 +2191,12 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     h_wf = _file_uri_to_path(wf["uri"].strip())
                     if h_wf and h_wf not in collected_hints:
                         collected_hints.append(h_wf)
+        if isinstance(params.get("roots"), list):
+            for rt in params["roots"]:
+                if isinstance(rt, dict) and isinstance(rt.get("uri"), str) and rt["uri"].strip():
+                    h_rt = _file_uri_to_path(rt["uri"].strip())
+                    if h_rt and h_rt not in collected_hints:
+                        collected_hints.append(h_rt)
         root_uri = params.get("rootUri")
         if isinstance(root_uri, str) and root_uri.strip():
             h_ru = _file_uri_to_path(root_uri.strip())
@@ -1910,10 +2207,15 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             _CLIENT_ROOT_HINT = _select_default_root_hint() or collected_hints[0]
         client_ver = str(params.get("protocolVersion", DEFAULT_PROTOCOL_VERSION))
         chosen_ver = client_ver if client_ver in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL_VERSION
+        _NEGOTIATED_PROTOCOL = chosen_ver
         return _ok(
             {
                 "protocolVersion": chosen_ver,
-                "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                    "resources": {"subscribe": True, "listChanged": True},
+                    "prompts": {"listChanged": False},
+                },
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             }
         )
@@ -1929,6 +2231,18 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if method == "resources/templates/list":
         return _ok({"resourceTemplates": RESOURCE_TEMPLATES_SPEC})
+
+    if method == "resources/subscribe":
+        uri = str(params.get("uri", "")).strip()
+        if not uri or not uri.startswith("aoci://"):
+            return _err(-32602, f"Invalid or unsupported resource URI for subscribe: `{uri}`")
+        _SUBSCRIBED_URIS.add(uri)
+        return _ok({})
+
+    if method == "resources/unsubscribe":
+        uri = str(params.get("uri", "")).strip()
+        _SUBSCRIBED_URIS.discard(uri)
+        return _ok({})
 
     if method == "resources/read":
         uri = str(params.get("uri", ""))
@@ -1955,7 +2269,16 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             is_err, text = call_tool(tool_name, tool_args)
         except (Exception, SystemExit) as exc:  # Isolation boundary for RPC server stability
             is_err, text = True, f"Internal error in `{tool_name}`: {exc}"
-        return _ok({"content": [{"type": "text", "text": text}], "isError": is_err})
+        call_result: Dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": is_err}
+        t_spec = _TOOL_BY_NAME.get(tool_name)
+        if not is_err and t_spec is not None and "outputSchema" in t_spec:
+            try:
+                parsed_obj = json.loads(text)
+                if isinstance(parsed_obj, dict):
+                    call_result["structuredContent"] = parsed_obj
+            except ValueError:
+                pass
+        return _ok(call_result)
 
     return _err(-32601, f"Method not found: {method}")
 
@@ -1967,6 +2290,11 @@ def _write_rpc_payload(raw_out: Any, payload: Any, use_headers: bool) -> None:
     else:
         raw_out.write(encoded + b"\n")
     raw_out.flush()
+
+
+def _flush_outbound_queue(raw_out: Any, use_headers: bool) -> None:
+    for msg in drain_outbound_messages():
+        _write_rpc_payload(raw_out, msg, use_headers)
 
 
 def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
@@ -2085,6 +2413,7 @@ def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
                         )
                 if batch_resps:
                     _write_rpc_payload(raw_out, batch_resps, use_headers)
+                _flush_outbound_queue(raw_out, use_headers)
                 continue
 
             if not isinstance(req, dict):
@@ -2096,9 +2425,9 @@ def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
                 continue
 
             resp = handle_rpc_request(req)
-            if resp is None:
-                continue
-            _write_rpc_payload(raw_out, resp, use_headers)
+            if resp is not None:
+                _write_rpc_payload(raw_out, resp, use_headers)
+            _flush_outbound_queue(raw_out, use_headers)
     finally:
         if redirected_stdout_fb and isinstance(sys.stdout, _StreamRouter):
             sys.stdout.set_fallback(prev_stdout_fb)

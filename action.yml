@@ -1,0 +1,81 @@
+name: "AOCI Architecture & PR Impact Guard"
+description: "Zero-dependency architectural layer-rule, cycle, SARIF 2.1.0, and PR diff impact check powered by AOCI-index."
+author: "CancriRecoleta"
+branding:
+  icon: "layers"
+  color: "blue"
+
+inputs:
+  root:
+    description: "Target repository root directory"
+    required: false
+    default: "."
+  base-rev:
+    description: "Optional base Git revision (e.g. origin/main) for PR diff impact & test derivation"
+    required: false
+    default: ""
+  pool-bundle:
+    description: "Optional exported semantic pool bundle (.json or .json.gz) for zero-index CI enrichment"
+    required: false
+    default: ""
+  forbid:
+    description: "Layer dependency rules (e.g. 'D!->E,U; P!->E,U')"
+    required: false
+    default: ""
+  format:
+    description: "Primary stdout report format (github, markdown, json, sarif, text)"
+    required: false
+    default: "github"
+  sarif-output:
+    description: "Optional output path to write a SARIF 2.1.0 file for GitHub Code Scanning"
+    required: false
+    default: ""
+  check-drift:
+    description: "Also check `.aoci/` drift when `.aoci/aoci.code.txt` is present ('true' or 'false')"
+    required: false
+    default: "false"
+  strict:
+    description: "Fail the step with exit code 1 when architectural findings exist ('true' or 'false')"
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run AOCI Architecture Guard
+      shell: bash
+      env:
+        INPUT_ROOT: ${{ inputs.root }}
+        INPUT_BASE_REV: ${{ inputs.base-rev }}
+        INPUT_POOL_BUNDLE: ${{ inputs.pool-bundle }}
+        INPUT_FORBID: ${{ inputs.forbid }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_SARIF_OUT: ${{ inputs.sarif-output }}
+        INPUT_CHECK_DRIFT: ${{ inputs.check-drift }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        ACTION_DIR: ${{ github.action_path }}
+      run: |
+        PY_BIN="$(command -v python3 || command -v python)"
+        ARGS=("ci-check" "--root" "$INPUT_ROOT" "--format" "$INPUT_FORMAT")
+        if [[ -n "$INPUT_BASE_REV" ]]; then
+          ARGS+=("--base-rev" "$INPUT_BASE_REV")
+        fi
+        if [[ -n "$INPUT_POOL_BUNDLE" ]]; then
+          ARGS+=("--pool-bundle" "$INPUT_POOL_BUNDLE")
+        fi
+        if [[ -n "$INPUT_FORBID" ]]; then
+          ARGS+=("--forbid" "$INPUT_FORBID")
+        fi
+        if [[ -n "$INPUT_SARIF_OUT" ]]; then
+          ARGS+=("--sarif-output" "$INPUT_SARIF_OUT")
+        fi
+        if [[ "$INPUT_CHECK_DRIFT" == "true" ]]; then
+          ARGS+=("--check-drift")
+        fi
+        if [[ "$INPUT_STRICT" == "true" ]]; then
+          ARGS+=("--strict")
+        fi
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          "$PY_BIN" -B "$ACTION_DIR/scripts/aoci_index.py" ci-check --root "$INPUT_ROOT" ${INPUT_BASE_REV:+--base-rev "$INPUT_BASE_REV"} ${INPUT_POOL_BUNDLE:+--pool-bundle "$INPUT_POOL_BUNDLE"} ${INPUT_FORBID:+--forbid "$INPUT_FORBID"} --format markdown >> "$GITHUB_STEP_SUMMARY" || true
+        fi
+        "$PY_BIN" -B "$ACTION_DIR/scripts/aoci_index.py" "${ARGS[@]}"

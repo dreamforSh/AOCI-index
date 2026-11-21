@@ -766,6 +766,179 @@ def _remove_mcp_server(mcp_json: Path, dry_run: bool, remove_if_empty: bool = Fa
         print(f"  [ok] removed MCP server `{SKILL_NAME}` from {mcp_json}")
 
 
+def _upsert_vscode_mcp_server(mcp_json: Path, py_cmd: str, mcp_args: List[str], dry_run: bool) -> None:
+    """Merge `aoci-index` into VS Code `.vscode/mcp.json` using the official `servers` + `type: stdio` schema."""
+    data = load_json_dict(mcp_json)
+    servers = data.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"`servers` key in `{mcp_json}` must be a JSON object.")
+    cmd_exe, prefix_args = _split_python_cmd(py_cmd)
+    servers[SKILL_NAME] = {
+        "type": "stdio",
+        "command": cmd_exe,
+        "args": [*prefix_args, *mcp_args],
+    }
+    save_json_dict(mcp_json, data, dry_run)
+    if not dry_run:
+        print(f"  [ok] merged VS Code MCP server `{SKILL_NAME}` -> {mcp_json}")
+
+
+def _remove_vscode_mcp_server(mcp_json: Path, dry_run: bool, remove_if_empty: bool = True) -> None:
+    if not mcp_json.exists():
+        print(f"  [skip] VS Code MCP config not present: {mcp_json}")
+        return
+    data = load_json_dict(mcp_json)
+    servers = data.get("servers")
+    if not isinstance(servers, dict) or SKILL_NAME not in servers:
+        print(f"  [skip] `{SKILL_NAME}` not found in {mcp_json}")
+        return
+    del servers[SKILL_NAME]
+    if not servers and list(data.keys()) == ["servers"]:
+        data.pop("servers", None)
+    if remove_if_empty and not data:
+        if dry_run:
+            print(f"  [dry-run] remove empty VS Code MCP config: {mcp_json}")
+            return
+        mcp_json.unlink()
+        print(f"  [ok] removed empty VS Code MCP config {mcp_json}")
+        return
+    save_json_dict(mcp_json, data, dry_run)
+    if not dry_run:
+        print(f"  [ok] removed VS Code MCP server `{SKILL_NAME}` from {mcp_json}")
+
+
+def _project_walk_expr(rel_script: str, emit_empty_json: bool = False) -> str:
+    if emit_empty_json:
+        return (
+            "import pathlib,runpy,sys;"
+            f"p=next((d/{rel_script!r} for d in (pathlib.Path.cwd(),*pathlib.Path.cwd().parents) "
+            f"if (d/{rel_script!r}).is_file()),None);"
+            "runpy.run_path(str(p),run_name='__main__') if p else sys.stdout.write('{}')"
+        )
+    return (
+        "import pathlib,runpy;"
+        f"p=next((d/{rel_script!r} for d in (pathlib.Path.cwd(),*pathlib.Path.cwd().parents) "
+        f"if (d/{rel_script!r}).is_file()),None);"
+        "p and runpy.run_path(str(p),run_name='__main__')"
+    )
+
+
+def upsert_cursor_hooks(
+    hooks_json: Path,
+    skill_dest: Path,
+    scope: str,
+    py_cmd: str,
+    dry_run: bool,
+    with_turn_hook: bool = True,
+) -> None:
+    """Merge AOCI lifecycle hooks into `.cursor/hooks.json` (`version: 1`, `sessionStart`, `beforeSubmitPrompt`, `stop`)."""
+    data = load_json_dict(hooks_json)
+    data.setdefault("version", 1)
+    hooks_obj = data.setdefault("hooks", {})
+    if not isinstance(hooks_obj, dict):
+        raise ValueError(f"`hooks` key in `{hooks_json}` must be a JSON object.")
+    runner = (
+        f'{py_cmd} -c "{_project_walk_expr(f".cursor/skills/{SKILL_NAME}/scripts/aoci_hook.py", emit_empty_json=True)}"'
+        if scope == "project"
+        else _global_hook_runner(skill_dest, py_cmd)
+    )
+    desired: Dict[str, str] = {
+        "sessionStart": f"{runner} --host cursor --event session-start",
+        "stop": f"{runner} --host cursor --event stop",
+    }
+    if with_turn_hook:
+        desired["beforeSubmitPrompt"] = f"{runner} --host cursor --event turn-start"
+    elif isinstance(hooks_obj.get("beforeSubmitPrompt"), list):
+        kept_turn = [h for h in hooks_obj["beforeSubmitPrompt"] if not _is_aoci_hook_handler(h)]
+        if kept_turn:
+            hooks_obj["beforeSubmitPrompt"] = kept_turn
+        else:
+            del hooks_obj["beforeSubmitPrompt"]
+
+    for ev_name, cmd_str in desired.items():
+        cur_list = hooks_obj.get(ev_name)
+        if not isinstance(cur_list, list):
+            cur_list = []
+        new_entry = {"command": cmd_str, "timeout": 10}
+        out_list: List[Any] = []
+        replaced = False
+        for item in cur_list:
+            if _is_aoci_hook_handler(item):
+                if not replaced:
+                    out_list.append(new_entry)
+                    replaced = True
+            else:
+                out_list.append(item)
+        if not replaced:
+            out_list.append(new_entry)
+        hooks_obj[ev_name] = out_list
+
+    save_json_dict(hooks_json, data, dry_run)
+    if not dry_run:
+        print(f"  [ok] merged Cursor hooks -> {hooks_json}")
+
+
+def remove_cursor_hooks(hooks_json: Path, dry_run: bool, remove_if_empty: bool = True) -> None:
+    if not hooks_json.exists():
+        print(f"  [skip] Cursor hooks file not present: {hooks_json}")
+        return
+    data = load_json_dict(hooks_json)
+    hooks_obj = data.get("hooks")
+    if not isinstance(hooks_obj, dict):
+        print(f"  [skip] no `hooks` block in {hooks_json}")
+        return
+    changed = False
+    for ev_name in list(hooks_obj.keys()):
+        cur_list = hooks_obj.get(ev_name)
+        if isinstance(cur_list, list):
+            kept = [h for h in cur_list if not _is_aoci_hook_handler(h)]
+            if len(kept) != len(cur_list):
+                changed = True
+                if kept:
+                    hooks_obj[ev_name] = kept
+                else:
+                    del hooks_obj[ev_name]
+    if not changed:
+        print(f"  [skip] no `aoci-index` hooks found in {hooks_json}")
+        return
+    if not hooks_obj:
+        data.pop("hooks", None)
+        if list(data.keys()) == ["version"]:
+            data.pop("version", None)
+    if remove_if_empty and not data:
+        if dry_run:
+            print(f"  [dry-run] remove empty Cursor hooks: {hooks_json}")
+            return
+        hooks_json.unlink()
+        print(f"  [ok] removed empty Cursor hooks {hooks_json}")
+        return
+    save_json_dict(hooks_json, data, dry_run)
+    if not dry_run:
+        print(f"  [ok] removed Cursor `aoci-index` hooks from {hooks_json}")
+
+
+def upsert_frontmatter_rule_file(rule_file: Path, frontmatter: str, snippet_path: Path, dry_run: bool) -> None:
+    snippet = snippet_path.read_text(encoding="utf-8-sig").strip()
+    content = f"{frontmatter.strip()}\n\n{RULE_BEGIN}\n{snippet}\n{RULE_END}\n"
+    if dry_run:
+        print(f"  [dry-run] write rule file: {rule_file}")
+        return
+    rule_file.parent.mkdir(parents=True, exist_ok=True)
+    write_text_lf(rule_file, content)
+    print(f"  [ok] wrote rule file -> {rule_file}")
+
+
+def remove_dedicated_rule_file(rule_file: Path, dry_run: bool) -> None:
+    if not rule_file.exists():
+        print(f"  [skip] rule file not present: {rule_file}")
+        return
+    if dry_run:
+        print(f"  [dry-run] remove rule file: {rule_file}")
+        return
+    rule_file.unlink()
+    print(f"  [ok] removed rule file {rule_file}")
+
+
 _TOML_FENCED_MCP_RE = re.compile(
     rf"(?ms)^[ \t]*{re.escape(TOML_MCP_BEGIN)}\r?\n.*?^[ \t]*{re.escape(TOML_MCP_END)}[ \t]*\r?\n?"
 )
@@ -1278,18 +1451,149 @@ def process_host(
                 else:
                     mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
                 upsert_codex_mcp_toml(mcp_file, py_cmd, mcp_args, dry_run)
+
+    elif host == "cursor":
+        base_dir = (home_dir / ".cursor") if scope == "global" else (project_root / ".cursor")
+        skill_dest = base_dir / "skills" / SKILL_NAME
+        hooks_file = base_dir / "hooks.json"
+        mcp_file = base_dir / "mcp.json"
+        rule_file = base_dir / "rules" / f"{SKILL_NAME}.mdc"
+        cursor_fm = "---\ndescription: AOCI Codebase Index Protocol\nglobs:\nalwaysApply: true\n---"
+
+        if uninstall:
+            remove_skill_tree(skill_dest, dry_run)
+            if with_hooks:
+                remove_cursor_hooks(hooks_file, dry_run, remove_if_empty=True)
+            if with_rules:
+                remove_dedicated_rule_file(rule_file, dry_run)
+            if with_mcp:
+                _remove_mcp_server(mcp_file, dry_run, remove_if_empty=True)
+            if not dry_run:
+                _prune_empty_dir(base_dir / "skills")
+                _prune_empty_dir(base_dir / "rules")
+                _prune_empty_dir(base_dir)
+        else:
+            try:
+                src_dir = _require_source_dir()
+            except RuntimeError as exc:
+                print(f"  [abort] {exc}", file=sys.stderr)
+                return False
+            snippet_path = src_dir / "resources" / "AGENTS.snippet.md"
+            if not copy_skill_tree(skill_dest, dry_run, force):
+                return False
+            if with_hooks:
+                upsert_cursor_hooks(
+                    hooks_file,
+                    skill_dest,
+                    scope,
+                    py_cmd,
+                    dry_run,
+                    with_turn_hook=not no_turn_hook,
+                )
+            if with_rules:
+                upsert_frontmatter_rule_file(rule_file, cursor_fm, snippet_path, dry_run)
+            if with_mcp:
+                if scope == "project":
+                    mcp_args = ["-c", _project_walk_expr(f".cursor/skills/{SKILL_NAME}/scripts/aoci_mcp.py")]
+                else:
+                    mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
+                _upsert_mcp_server(mcp_file, py_cmd, mcp_args, dry_run)
+
+    elif host == "windsurf":
+        base_dir = (home_dir / ".codeium" / "windsurf") if scope == "global" else (project_root / ".windsurf")
+        skill_dest = base_dir / "skills" / SKILL_NAME
+        mcp_file = base_dir / "mcp_config.json"
+        rule_file = (
+            (base_dir / "memories" / "global_rules.md")
+            if scope == "global"
+            else (base_dir / "rules" / f"{SKILL_NAME}.md")
+        )
+        ws_fm = "---\ntrigger: always_on\ndescription: AOCI Codebase Index Protocol\n---"
+
+        if uninstall:
+            remove_skill_tree(skill_dest, dry_run)
+            if with_rules:
+                if scope == "global":
+                    remove_rule_snippet(rule_file, dry_run)
+                else:
+                    remove_dedicated_rule_file(rule_file, dry_run)
+            if with_mcp:
+                _remove_mcp_server(mcp_file, dry_run, remove_if_empty=True)
+            if not dry_run:
+                _prune_empty_dir(base_dir / "skills")
+                _prune_empty_dir(base_dir / "rules")
+                _prune_empty_dir(base_dir / "memories")
+                _prune_empty_dir(base_dir)
+        else:
+            try:
+                src_dir = _require_source_dir()
+            except RuntimeError as exc:
+                print(f"  [abort] {exc}", file=sys.stderr)
+                return False
+            snippet_path = src_dir / "resources" / "AGENTS.snippet.md"
+            if not copy_skill_tree(skill_dest, dry_run, force):
+                return False
+            if with_rules:
+                if scope == "global":
+                    upsert_rule_snippet(rule_file, snippet_path, dry_run)
+                else:
+                    upsert_frontmatter_rule_file(rule_file, ws_fm, snippet_path, dry_run)
+            if with_mcp:
+                if scope == "project":
+                    mcp_args = ["-c", _project_walk_expr(f".windsurf/skills/{SKILL_NAME}/scripts/aoci_mcp.py")]
+                else:
+                    mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
+                _upsert_mcp_server(mcp_file, py_cmd, mcp_args, dry_run)
+
+    elif host == "vscode":
+        gh_base = (home_dir / ".copilot") if scope == "global" else (project_root / ".github")
+        vscode_dir = (home_dir / ".vscode") if scope == "global" else (project_root / ".vscode")
+        skill_dest = gh_base / "skills" / SKILL_NAME
+        rule_file = gh_base / "copilot-instructions.md"
+        mcp_file = vscode_dir / "mcp.json"
+
+        if uninstall:
+            remove_skill_tree(skill_dest, dry_run)
+            if with_rules:
+                remove_rule_snippet(rule_file, dry_run)
+            if with_mcp:
+                _remove_vscode_mcp_server(mcp_file, dry_run, remove_if_empty=True)
+            if not dry_run:
+                _prune_empty_dir(gh_base / "skills")
+                _prune_empty_dir(gh_base)
+                _prune_empty_dir(vscode_dir)
+        else:
+            try:
+                src_dir = _require_source_dir()
+            except RuntimeError as exc:
+                print(f"  [abort] {exc}", file=sys.stderr)
+                return False
+            snippet_path = src_dir / "resources" / "AGENTS.snippet.md"
+            if not copy_skill_tree(skill_dest, dry_run, force):
+                return False
+            if with_rules:
+                upsert_rule_snippet(rule_file, snippet_path, dry_run)
+            if with_mcp:
+                if scope == "project":
+                    mcp_args = ["-c", _project_walk_expr(f".github/skills/{SKILL_NAME}/scripts/aoci_mcp.py")]
+                else:
+                    mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
+                _upsert_vscode_mcp_server(mcp_file, py_cmd, mcp_args, dry_run)
     return True
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Install or uninstall the `aoci-index` skill for Claude Code, Antigravity, and Codex"
+        description="Install or uninstall the `aoci-index` skill for Claude Code, Antigravity, Codex, Cursor, Windsurf, and VS Code"
     )
     p.add_argument(
         "--host",
-        choices=("claude-code", "antigravity", "codex", "both", "all"),
+        choices=("claude-code", "antigravity", "codex", "cursor", "windsurf", "vscode", "both", "all"),
         required=True,
-        help="Target agent host(s) (`both` = Claude Code + Antigravity; `all` = Claude Code + Antigravity + Codex)",
+        help=(
+            "Target agent host(s) (`both` = Claude Code + Antigravity; "
+            "`all` = Claude Code + Antigravity + Codex + Cursor + Windsurf + VS Code)"
+        ),
     )
     p.add_argument(
         "--scope",
@@ -1351,7 +1655,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.host == "both":
         hosts: List[str] = ["claude-code", "antigravity"]
     elif args.host == "all":
-        hosts = ["claude-code", "antigravity", "codex"]
+        hosts = ["claude-code", "antigravity", "codex", "cursor", "windsurf", "vscode"]
     else:
         hosts = [args.host]
 

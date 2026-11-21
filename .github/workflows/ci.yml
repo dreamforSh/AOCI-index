@@ -39,7 +39,7 @@ jobs:
       - name: Run real-subprocess smoke suite
         env:
           AOCI_TEST_SUBPROCESS: "1"
-        run: python -B -m unittest tests/test_ext_pack.py tests/test_ext_tests.py tests/test_ext_zoom.py tests/test_v15_improvements.py tests/test_v16_optimizations.py tests/test_p0_p1_fixes.py tests/test_perf_scale.py -v
+        run: python -B -m unittest tests/test_ext_pack.py tests/test_ext_tests.py tests/test_ext_zoom.py tests/test_v15_improvements.py tests/test_v16_optimizations.py tests/test_p0_p1_fixes.py tests/test_perf_scale.py tests/test_feature_extensions.py -v
 
       - name: Verify CLI version
         run: python -B scripts/aoci_index.py --version

@@ -22,6 +22,7 @@ from .constants import (
     normalize_relpath,
     strip_utf8_bom_bytes,
 )
+from . import ts_accel as _ts_accel
 
 _JS_REGEX_PREV_CHARS: Set[str] = set("=([!&|?:;{},~^+-*%>")
 _JS_REGEX_PREV_KW: Set[str] = {"return", "typeof", "void", "case", "throw", "delete", "in", "of", "yield", "await"}
@@ -1491,7 +1492,11 @@ def _extract_outline_from_bytes(
     symbols: List[str] = []
     py_from_members: List[str] = []
 
-    if ext == ".py":
+    ts_res = _ts_accel.extract_outline_with_treesitter(clean_bytes, ext) if ext != ".py" else None
+    if ts_res is not None:
+        imports.extend(ts_res[0])
+        symbols.extend(ts_res[1])
+    elif ext == ".py":
         try:
             tree = preparsed_py_tree if preparsed_py_tree is not None else ast.parse(text)
             _extract_py_outline_from_tree(tree, imports, symbols, py_from_members)

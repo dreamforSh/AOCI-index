@@ -20,6 +20,7 @@ from .constants import (
     CACHE_DIR,
     CODE_FILE,
     ENTRY_RE,
+    HUBS_FILE,
     MAX_SEMANTIC_POOL_ENTRIES,
     MIN_RENAME_LINES,
     VALID_LAYERS,
@@ -28,6 +29,7 @@ from .constants import (
     utc_now_iso,
 )
 from .graph import validate_parsed_entry_tags
+from . import hubs as _hubs
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -110,10 +112,17 @@ def _open_semantic_pool(
             "CREATE TABLE IF NOT EXISTS pool_by_sha ("
             "sha256 TEXT PRIMARY KEY, entry TEXT NOT NULL, last_used INTEGER NOT NULL)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pool_hubs_by_symbol_sha ("
+            "relpath TEXT NOT NULL, symbol TEXT NOT NULL, span_sha256 TEXT NOT NULL, "
+            "f_val TEXT NOT NULL, s_val TEXT NOT NULL, last_used INTEGER NOT NULL, "
+            "PRIMARY KEY (relpath, symbol, span_sha256))"
+        )
         conn.execute("CREATE TABLE IF NOT EXISTS pool_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ps_sha ON pool_by_path_sha(sha256)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ps_last_used ON pool_by_path_sha(last_used)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_s_last_used ON pool_by_sha(last_used)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hubs_last_used ON pool_hubs_by_symbol_sha(last_used)")
 
         if legacy_json is not None and legacy_json.is_file():
             migrated_row = conn.execute(
@@ -185,8 +194,11 @@ def load_semantic_pool(root: Path, git_info: Dict[str, Any]) -> Dict[str, Dict[s
 
 
 def _evict_pool_excess(conn: sqlite3.Connection, max_entries: int) -> None:
-    for tbl in ("pool_by_path_sha", "pool_by_sha"):
-        cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+    for tbl in ("pool_by_path_sha", "pool_by_sha", "pool_hubs_by_symbol_sha"):
+        try:
+            cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        except sqlite3.Error:
+            continue
         if cnt > max_entries:
             excess = cnt - max_entries
             conn.execute(
@@ -427,11 +439,16 @@ def pool_stats(root: Path, git_info: Dict[str, Any], max_entries: int = MAX_SEMA
     size_bytes = db_path.stat().st_size if exists else 0
     ps_cnt = 0
     s_cnt = 0
+    hub_cnt = 0
     if exists:
         try:
             with contextlib.closing(_open_semantic_pool(db_path, readonly=True)) as conn:
                 ps_cnt = int(conn.execute("SELECT COUNT(*) FROM pool_by_path_sha").fetchone()[0])
                 s_cnt = int(conn.execute("SELECT COUNT(*) FROM pool_by_sha").fetchone()[0])
+                try:
+                    hub_cnt = int(conn.execute("SELECT COUNT(*) FROM pool_hubs_by_symbol_sha").fetchone()[0])
+                except sqlite3.Error:
+                    hub_cnt = 0
         except (sqlite3.Error, OSError):
             pass
     elif legacy_json.is_file():
@@ -446,8 +463,136 @@ def pool_stats(root: Path, git_info: Dict[str, Any], max_entries: int = MAX_SEMA
         "bytes": size_bytes,
         "by_path_sha_count": ps_cnt,
         "by_sha_count": s_cnt,
+        "by_hub_symbol_sha_count": hub_cnt,
         "max_entries": max_entries,
     }
+
+
+def record_hub_pool_entries(
+    root: Path,
+    git_info: Dict[str, Any],
+    rows: Sequence[Tuple[str, str, str, str, str]],
+    max_entries: int = MAX_SEMANTIC_POOL_ENTRIES,
+) -> None:
+    """Best-effort persist `(relpath, symbol, span_sha256, f_val, s_val)` into `pool_hubs_by_symbol_sha`."""
+    if not rows:
+        return
+    now_ns = time.time_ns()
+    db_rows: List[Tuple[str, str, str, str, str, int]] = []
+    for idx, (rel, sym, sha, f_val, s_val) in enumerate(rows):
+        norm_rel, path_err = _hubs.validate_hub_relpath(rel)
+        if path_err is not None or not norm_rel:
+            continue
+        sym_s = str(sym).strip()
+        f_s = str(f_val).strip()
+        s_s = str(s_val).strip()
+        if (
+            not sym_s
+            or not isinstance(sha, str)
+            or not _SHA256_HEX_RE.match(sha)
+            or not f_s
+            or f_s == "-"
+            or not s_s
+            or "<todo" in f_s.lower()
+            or "<todo" in s_s.lower()
+        ):
+            continue
+        db_rows.append((norm_rel, sym_s, sha, f_s, s_s, now_ns + idx))
+    if not db_rows:
+        return
+    db_path = semantic_pool_path(root, git_info)
+    legacy_json = _legacy_semantic_pool_json_path(root, git_info)
+    try:
+        with contextlib.closing(_open_semantic_pool(db_path, legacy_json=legacy_json)) as conn:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO pool_hubs_by_symbol_sha "
+                    "(relpath, symbol, span_sha256, f_val, s_val, last_used) VALUES (?, ?, ?, ?, ?, ?)",
+                    db_rows,
+                )
+                _evict_pool_excess(conn, max_entries)
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def list_pooled_hub_relpaths(root: Path, git_info: Dict[str, Any]) -> set:
+    """Return distinct `relpath` values stored in `pool_hubs_by_symbol_sha` (read-only)."""
+    db_path = semantic_pool_path(root, git_info)
+    if not db_path.is_file():
+        return set()
+    try:
+        with contextlib.closing(_open_semantic_pool(db_path, readonly=True)) as conn:
+            return {
+                normalize_relpath(str(r[0]))
+                for r in conn.execute("SELECT DISTINCT relpath FROM pool_hubs_by_symbol_sha")
+                if r and r[0]
+            }
+    except (sqlite3.Error, OSError):
+        return set()
+
+
+def lookup_hub_pool_entries(
+    root: Path,
+    git_info: Dict[str, Any],
+    queries: Sequence[Tuple[str, str, str]],
+    *,
+    touch_lru: bool = False,
+) -> Dict[Tuple[str, str, str], Tuple[str, str]]:
+    """Batch-lookup `(relpath, symbol, span_sha256) -> (f_val, s_val)` from `pool_hubs_by_symbol_sha`."""
+    hits: Dict[Tuple[str, str, str], Tuple[str, str]] = {}
+    if not queries:
+        return hits
+    db_path = semantic_pool_path(root, git_info)
+    if not db_path.is_file():
+        return hits
+    want = sorted({(normalize_relpath(r), str(s).strip(), str(h)) for r, s, h in queries if r and s and h})
+    if not want:
+        return hits
+    triple_chunk = 150
+    try:
+        with contextlib.closing(_open_semantic_pool(db_path, readonly=not touch_lru)) as conn:
+            row_val_ok = True
+            for i in range(0, len(want), triple_chunk):
+                sub = want[i : i + triple_chunk]
+                ph = ",".join("(?,?,?)" for _ in sub)
+                params = [v for tup in sub for v in tup]
+                try:
+                    for rel, sym, sha, fv, sv in conn.execute(
+                        f"SELECT relpath, symbol, span_sha256, f_val, s_val FROM pool_hubs_by_symbol_sha "
+                        f"WHERE (relpath, symbol, span_sha256) IN ({ph})",
+                        params,
+                    ):
+                        hits[(rel, sym, sha)] = (fv, sv)
+                except sqlite3.OperationalError:
+                    row_val_ok = False
+                    break
+            if not row_val_ok:
+                want_set = set(want)
+                shas = sorted({sha for _, _, sha in want})
+                for i in range(0, len(shas), 300):
+                    sc = shas[i : i + 300]
+                    ph = ",".join("?" for _ in sc)
+                    try:
+                        for rel, sym, sha, fv, sv in conn.execute(
+                            f"SELECT relpath, symbol, span_sha256, f_val, s_val FROM pool_hubs_by_symbol_sha "
+                            f"WHERE span_sha256 IN ({ph})",
+                            sc,
+                        ):
+                            if (rel, sym, sha) in want_set:
+                                hits[(rel, sym, sha)] = (fv, sv)
+                    except sqlite3.OperationalError:
+                        break
+            if touch_lru and hits:
+                now_ns = time.time_ns()
+                with conn:
+                    conn.executemany(
+                        "UPDATE pool_hubs_by_symbol_sha SET last_used = ? "
+                        "WHERE relpath = ? AND symbol = ? AND span_sha256 = ?",
+                        [(now_ns, r, s, h) for r, s, h in hits],
+                    )
+    except (sqlite3.Error, OSError):
+        pass
+    return hits
 
 
 def _validate_pool_entry_row(expected_rel: Optional[str], sha: Any, entry: Any) -> Optional[str]:
@@ -510,6 +655,7 @@ def export_semantic_pool(
     pool_data = load_semantic_pool(root, git_info)
     ps_valid: Dict[Tuple[str, str], str] = {}
     s_valid: Dict[str, str] = {}
+    hub_valid: Dict[Tuple[str, str, str], Tuple[str, str]] = {}
 
     for key_str, entry in pool_data.get("by_path_sha", {}).items():
         if "\t" not in key_str:
@@ -523,6 +669,27 @@ def export_semantic_pool(
         clean_e = _validate_pool_entry_row(None, sha, entry)
         if clean_e:
             s_valid[sha] = clean_e
+
+    db_path = semantic_pool_path(root, git_info)
+    if db_path.is_file():
+        try:
+            with contextlib.closing(_open_semantic_pool(db_path, readonly=True)) as conn:
+                for rel_h, sym_h, sha_h, f_h, s_h in conn.execute(
+                    "SELECT relpath, symbol, span_sha256, f_val, s_val FROM pool_hubs_by_symbol_sha ORDER BY last_used ASC"
+                ):
+                    norm_r, p_err = _hubs.validate_hub_relpath(str(rel_h))
+                    if (
+                        p_err is None
+                        and norm_r
+                        and str(sym_h).strip()
+                        and _SHA256_HEX_RE.match(str(sha_h))
+                        and str(f_h).strip()
+                        and str(f_h).strip() != "-"
+                        and str(s_h).strip()
+                    ):
+                        hub_valid[(norm_r, str(sym_h).strip(), str(sha_h))] = (str(f_h).strip(), str(s_h).strip())
+        except (sqlite3.Error, OSError):
+            pass
 
     if include_current:
         aoci_dir = root / AOCI_DIR_NAME
@@ -541,19 +708,29 @@ def export_semantic_pool(
                     ps_valid[(rel, sha)] = clean_e
                     if int(fp.get("lines", 0)) >= MIN_RENAME_LINES:
                         s_valid[sha] = clean_e
+        hubs_path = aoci_dir / HUBS_FILE
+        if hubs_path.is_file():
+            h_recs, _ = _hubs.parse_hubs_volume(hubs_path)
+            for rel_h, sym_h, sha_h, f_h, s_h in _hubs.collect_hub_pool_rows(root, h_recs):
+                hub_valid[(rel_h, sym_h, sha_h)] = (f_h, s_h)
 
     ps_list = [{"path": rel, "sha256": sha, "entry": line} for (rel, sha), line in sorted(ps_valid.items())]
     s_list = [{"sha256": sha, "entry": line} for sha, line in sorted(s_valid.items())]
+    hub_list = [
+        {"path": rel, "symbol": sym, "span_sha256": sha, "f": fv, "s": sv}
+        for (rel, sym, sha), (fv, sv) in sorted(hub_valid.items())
+    ]
     bundle = {
         "schema_version": 1,
         "format": "aoci-semantic-pool-v1",
         "exported_at": utc_now_iso(),
         "by_path_sha": ps_list,
         "by_sha": s_list,
+        "hubs_by_symbol_sha": hub_list,
     }
     raw_json = (json.dumps(bundle, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     use_gz = out_path.name.lower().endswith(".gz")
-    payload_bytes = gzip.compress(raw_json) if use_gz else raw_json
+    payload_bytes = gzip.compress(raw_json, mtime=0) if use_gz else raw_json
 
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -570,6 +747,7 @@ def export_semantic_pool(
         "bytes": len(payload_bytes),
         "exported_by_path_sha": len(ps_list),
         "exported_by_sha": len(s_list),
+        "exported_hubs": len(hub_list),
     }
 
 
@@ -593,13 +771,14 @@ def import_semantic_pool(
 
     if not isinstance(data, dict) or (
         data.get("format") not in (None, "aoci-semantic-pool-v1")
-        or ("by_path_sha" not in data and "by_sha" not in data)
+        or ("by_path_sha" not in data and "by_sha" not in data and "hubs_by_symbol_sha" not in data)
     ):
         return {"ok": False, "error": f"Unrecognized pool bundle schema in `{in_path}`."}
 
     now_ns = time.time_ns()
     ps_rows: List[Tuple[str, str, str, int]] = []
     s_rows: List[Tuple[str, str, int]] = []
+    hub_rows: List[Tuple[str, str, str, str, str, int]] = []
     rejected: List[Dict[str, str]] = []
 
     raw_ps = data.get("by_path_sha") or []
@@ -636,9 +815,42 @@ def import_semantic_pool(
             continue
         s_rows.append((str(sha), clean_e, now_ns + idx))
 
+    raw_hubs = data.get("hubs_by_symbol_sha") or []
+    if not isinstance(raw_hubs, list):
+        return {"ok": False, "error": "`hubs_by_symbol_sha` in pool bundle must be a list."}
+    for idx, item in enumerate(raw_hubs):
+        if not isinstance(item, dict):
+            rejected.append({"section": "hubs_by_symbol_sha", "reason": "non-object row"})
+            continue
+        rel_h = item.get("path")
+        sym_h = item.get("symbol")
+        sha_h = item.get("span_sha256")
+        f_h = item.get("f")
+        s_h = item.get("s")
+        norm_r, p_err = _hubs.validate_hub_relpath(str(rel_h or ""))
+        if (
+            not isinstance(rel_h, str)
+            or p_err is not None
+            or not norm_r
+            or not isinstance(sym_h, str)
+            or not sym_h.strip()
+            or not isinstance(sha_h, str)
+            or not _SHA256_HEX_RE.match(sha_h)
+            or not isinstance(f_h, str)
+            or not f_h.strip()
+            or f_h.strip() == "-"
+            or not isinstance(s_h, str)
+            or not s_h.strip()
+            or "<todo" in f_h.lower()
+            or "<todo" in s_h.lower()
+        ):
+            rejected.append({"section": "hubs_by_symbol_sha", "path": str(rel_h), "reason": "validation failed"})
+            continue
+        hub_rows.append((norm_r, sym_h.strip(), sha_h, f_h.strip(), s_h.strip(), now_ns + idx))
+
     db_path = semantic_pool_path(root, git_info)
     legacy_json = _legacy_semantic_pool_json_path(root, git_info)
-    if not dry_run and (ps_rows or s_rows):
+    if not dry_run and (ps_rows or s_rows or hub_rows):
         try:
             with contextlib.closing(_open_semantic_pool(db_path, legacy_json=legacy_json)) as conn:
                 with conn:
@@ -652,6 +864,12 @@ def import_semantic_pool(
                             "INSERT OR REPLACE INTO pool_by_sha (sha256, entry, last_used) VALUES (?, ?, ?)",
                             s_rows,
                         )
+                    if hub_rows:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO pool_hubs_by_symbol_sha "
+                            "(relpath, symbol, span_sha256, f_val, s_val, last_used) VALUES (?, ?, ?, ?, ?, ?)",
+                            hub_rows,
+                        )
                     _evict_pool_excess(conn, max_entries)
         except (sqlite3.Error, OSError) as exc:
             return {"ok": False, "error": f"Cannot write to semantic pool `{db_path}`: {exc}"}
@@ -663,6 +881,7 @@ def import_semantic_pool(
         "input_path": str(in_path),
         "imported_by_path_sha": len(ps_rows),
         "imported_by_sha": len(s_rows),
+        "imported_hubs": len(hub_rows),
         "rejected": len(rejected),
         "rejected_samples": rejected[:10],
     }

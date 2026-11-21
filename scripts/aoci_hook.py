@@ -50,13 +50,15 @@ SESSION_TTL_S = 7 * 24 * 3600
 
 
 def detect_host(host_arg: str, payload: Dict[str, Any]) -> str:
-    if host_arg in ("antigravity", "claude-code", "codex"):
+    if host_arg in ("antigravity", "claude-code", "codex", "cursor"):
         return host_arg
     if any(
         k in payload
         for k in ("hookEventName", "workspacePaths", "continuationActive", "terminationReason", "invocationNum", "conversationId")
     ):
         return "antigravity"
+    if "cursor_version" in payload or "workspace_roots" in payload:
+        return "cursor"
     if "turn_id" in payload:
         return "codex"
     if os.environ.get("CODEX_HOME") and not os.environ.get("CLAUDE_PROJECT_DIR"):
@@ -74,7 +76,7 @@ def detect_host(host_arg: str, payload: Dict[str, Any]) -> str:
 
 
 def session_id_of(payload: Dict[str, Any]) -> Optional[str]:
-    for key in ("session_id", "conversationId", "sessionId"):
+    for key in ("session_id", "conversationId", "sessionId", "conversation_id"):
         val = payload.get(key)
         if isinstance(val, str) and val.strip():
             return re.sub(r"[^A-Za-z0-9_.-]", "_", val.strip())[:120]
@@ -197,11 +199,12 @@ def discover_indexed_roots(payload: Dict[str, Any]) -> List[Tuple[Path, Dict[str
     if claude_dir and claude_dir.strip():
         raw_candidates.append(claude_dir.strip())
 
-    ws_paths = payload.get("workspacePaths")
-    if isinstance(ws_paths, list):
-        for item in ws_paths:
-            if isinstance(item, str) and item.strip():
-                raw_candidates.append(item.strip())
+    for list_key in ("workspacePaths", "workspace_roots"):
+        ws_paths = payload.get(list_key)
+        if isinstance(ws_paths, list):
+            for item in ws_paths:
+                if isinstance(item, str) and item.strip():
+                    raw_candidates.append(item.strip())
 
     seen_dirs: Set[Path] = set()
     found_roots: List[Path] = []
@@ -296,6 +299,8 @@ def handle_session_start(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
                 "additionalContext": message,
             }
         }
+    if host == "cursor":
+        return {"additional_context": message}
 
     return {
         "injectSteps": [
@@ -622,6 +627,12 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     if ignored_total:
         reason += f" ({ignored_total} drifted path(s) that pre-date this session and are unchanged were not counted.)"
 
+    if host == "cursor":
+        return {
+            "followup_message": reason,
+            "decision": "block",
+            "reason": reason,
+        }
     decision = "block" if host in ("claude-code", "codex") else "continue"
     return {
         "decision": decision,
@@ -646,10 +657,12 @@ def _log_failure() -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     aoci_index.configure_utf8_streams()
-    parser = argparse.ArgumentParser(description="Tri-host lifecycle hook runner (Claude Code, Antigravity & Codex)")
+    parser = argparse.ArgumentParser(
+        description="Multi-host lifecycle hook runner (Claude Code, Antigravity, Codex & Cursor)"
+    )
     parser.add_argument(
         "--host",
-        choices=("auto", "antigravity", "claude-code", "codex"),
+        choices=("auto", "antigravity", "claude-code", "codex", "cursor"),
         default="auto",
         help="Target host protocol (default: auto-detect from stdin JSON)",
     )
@@ -673,7 +686,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ev_name = str(payload.get("hookEventName") or payload.get("hook_event_name") or "").lower()
             if "sessionstart" in ev_name or "session_start" in ev_name:
                 event = "session-start"
-            elif any(k in ev_name for k in ("userpromptsubmit", "user_prompt_submit", "preinvocation", "pre_invocation")):
+            elif any(
+                k in ev_name
+                for k in ("userpromptsubmit", "user_prompt_submit", "preinvocation", "pre_invocation", "beforesubmitprompt")
+            ):
                 event = "turn-start"
             elif "stop" in ev_name:
                 event = "stop"

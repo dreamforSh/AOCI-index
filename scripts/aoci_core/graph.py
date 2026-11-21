@@ -767,6 +767,7 @@ def _render_html_dependency_graph(
     sorted_edges: Sequence[Tuple[Tuple[str, str], int]],
     parsed_sel: Mapping[str, ParsedEntry],
     declared_domains: Mapping[str, str],
+    diff_status_map: Optional[Mapping[str, str]] = None,
 ) -> str:
     proj_adj: Dict[str, Set[str]] = {nk: set() for nk in sorted_nodes}
     for (src, dst), _ in sorted_edges:
@@ -777,6 +778,7 @@ def _render_html_dependency_graph(
         for nk in comp:
             cycle_node_to_idx[nk] = c_idx
 
+    dmap = diff_status_map or {}
     nodes_payload: List[Dict[str, Any]] = []
     for nk in sorted_nodes:
         pe = parsed_sel.get(nk) if level == "file" else None
@@ -799,6 +801,7 @@ def _render_html_dependency_graph(
                 "a": pe.a if pe is not None else "",
                 "s": pe.s if pe is not None else "",
                 "cycle": cycle_node_to_idx.get(nk, 0),
+                "diff": dmap.get(nk, ""),
             }
         )
 
@@ -854,9 +857,13 @@ def _render_html_dependency_graph(
   .badge {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:11px; background:#0c4a6e; color:var(--accent); margin-right:4px; }}
   .badge.risk {{ background:#451a03; color:var(--warn); }}
   .badge.cycle {{ background:#4c0519; color:var(--danger); }}
+  .badge.changed {{ background:#3f2d06; color:#fbbf24; }}
+  .badge.affected {{ background:#083344; color:#22d3ee; }}
   .node-box {{ cursor:pointer; transition:opacity .15s; }}
   .node-box.dim {{ opacity:0.18; }}
   .node-box rect {{ fill:#1e293b; stroke:#475569; stroke-width:1.4; rx:6; }}
+  .node-box.changed rect {{ stroke:#f59e0b; stroke-width:2.3; fill:#291f0c; }}
+  .node-box.affected rect {{ stroke:#22d3ee; stroke-width:1.9; stroke-dasharray:4 2; }}
   .node-box.selected rect {{ stroke:var(--accent); stroke-width:2.4; fill:#0f2942; }}
   .node-box.cycle rect {{ stroke:var(--danger); stroke-width:2; }}
   .node-box text {{ fill:var(--text); font-size:11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }}
@@ -885,6 +892,7 @@ def _render_html_dependency_graph(
     <option value="layered">Layered (E→A→D→P→C)</option>
   </select>
   <label><input id="cyclesOnly" type="checkbox"> Cycles Only</label>
+  <label><input id="diffOnly" type="checkbox"> Diff Only</label>
   <button id="zoomIn" type="button" title="Zoom In">+</button>
   <button id="zoomOut" type="button" title="Zoom Out">-</button>
   <button id="zoomReset" type="button" title="Reset Zoom">100%</button>
@@ -907,6 +915,7 @@ def _render_html_dependency_graph(
   const minImpEl = document.getElementById("minImp");
   const layoutEl = document.getElementById("layoutMode");
   const cyclesEl = document.getElementById("cyclesOnly");
+  const diffEl = document.getElementById("diffOnly");
   const statsEl = document.getElementById("stats");
   const zoomInBtn = document.getElementById("zoomIn");
   const zoomOutBtn = document.getElementById("zoomOut");
@@ -982,6 +991,13 @@ def _render_html_dependency_graph(
       const bc = document.createElement("span"); bc.className = "badge cycle";
       bc.textContent = "SCC Cycle #" + n.cycle; drawer.appendChild(bc);
     }}
+    if (n.diff === "changed") {{
+      const bd = document.createElement("span"); bd.className = "badge changed";
+      bd.textContent = "Diff: Changed"; drawer.appendChild(bd);
+    }} else if (n.diff === "affected") {{
+      const bd = document.createElement("span"); bd.className = "badge affected";
+      bd.textContent = "Diff: Affected Caller"; drawer.appendChild(bd);
+    }}
     if (n.s && n.s !== "-") {{
       const br = document.createElement("span"); br.className = "badge risk";
       br.textContent = "Has S: risk/invariant"; drawer.appendChild(br);
@@ -1003,12 +1019,14 @@ def _render_html_dependency_graph(
     const df = domainEl.value;
     const mi = parseInt(minImpEl.value || "0", 10);
     const cyc = cyclesEl.checked;
+    const diffOnly = diffEl.checked;
     const layoutMode = layoutEl.value;
     const visible = data.nodes.filter(n => {{
       if (lf && n.layer !== lf) return false;
       if (df && n.domain !== df) return false;
       if (n.imp < mi) return false;
       if (cyc && !n.cycle) return false;
+      if (diffOnly && !n.diff) return false;
       if (q && !(n.key + " " + n.f + " " + n.s + " " + n.a).toLowerCase().includes(q)) return false;
       return true;
     }});
@@ -1141,7 +1159,7 @@ def _render_html_dependency_graph(
       const p = pos[n.id];
       const g = document.createElementNS(ns, "g");
       const dim = selectedId && !focusSet.has(n.id);
-      g.setAttribute("class", "node-box" + (n.cycle ? " cycle" : "") + (n.id === selectedId ? " selected" : "") + (dim ? " dim" : ""));
+      g.setAttribute("class", "node-box" + (n.diff ? " " + n.diff : "") + (n.cycle ? " cycle" : "") + (n.id === selectedId ? " selected" : "") + (dim ? " dim" : ""));
       const rect = document.createElementNS(ns, "rect");
       rect.setAttribute("x", String(p.x)); rect.setAttribute("y", String(p.y));
       rect.setAttribute("width", String(p.w)); rect.setAttribute("height", String(p.h));
@@ -1192,11 +1210,11 @@ def _render_html_dependency_graph(
     if (qTimer !== null) clearTimeout(qTimer);
     qTimer = setTimeout(() => {{ qTimer = null; render(); }}, 120);
   }});
-  [layerEl, domainEl, minImpEl, layoutEl, cyclesEl].forEach(el => el.addEventListener("input", render));
+  [layerEl, domainEl, minImpEl, layoutEl, cyclesEl, diffEl].forEach(el => el.addEventListener("input", render));
   document.getElementById("resetBtn").addEventListener("click", () => {{
     if (qTimer !== null) {{ clearTimeout(qTimer); qTimer = null; }}
     qEl.value = ""; layerEl.value = ""; domainEl.value = ""; minImpEl.value = "0"; layoutEl.value = "grouped";
-    cyclesEl.checked = false; selectedId = null; panX = 0; panY = 0; scale = 1.0; render();
+    cyclesEl.checked = false; diffEl.checked = false; selectedId = null; panX = 0; panY = 0; scale = 1.0; render();
   }});
   render();
 }})();
@@ -1223,6 +1241,8 @@ def export_dependency_graph(
     focus: Optional[str] = None,
     depth: int = 1,
     parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+    changed_paths: Optional[Sequence[str]] = None,
+    affected_paths: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Export filtered or aggregated FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML."""
     fmt_l = fmt.lower().strip()
@@ -1333,6 +1353,33 @@ def export_dependency_graph(
     group_ids = {g: f"sg_{idx}" for idx, g in enumerate(sorted_groups)}
     sorted_edges = sorted(edge_counts.items(), key=lambda kv: kv[0])
 
+    diff_status_map: Dict[str, str] = {}
+    chg_norm = {normalize_relpath(p) for p in (changed_paths or ()) if str(p).strip()}
+    aff_norm = {normalize_relpath(p) for p in (affected_paths or ()) if str(p).strip()} - chg_norm
+    if chg_norm or aff_norm:
+        if level_l == "file":
+            for nk in sorted_nodes:
+                if nk in chg_norm:
+                    diff_status_map[nk] = "changed"
+                elif nk in aff_norm:
+                    diff_status_map[nk] = "affected"
+        elif level_l == "dir":
+            chg_dirs = {(r.rsplit("/", 1)[0] + "/") if "/" in r else "./" for r in chg_norm}
+            aff_dirs = {(r.rsplit("/", 1)[0] + "/") if "/" in r else "./" for r in aff_norm}
+            for nk in sorted_nodes:
+                if nk in chg_dirs:
+                    diff_status_map[nk] = "changed"
+                elif nk in aff_dirs:
+                    diff_status_map[nk] = "affected"
+        else:
+            chg_doms = {parsed_sel[r].domain for r in chg_norm if r in parsed_sel}
+            aff_doms = {parsed_sel[r].domain for r in aff_norm if r in parsed_sel}
+            for nk in sorted_nodes:
+                if nk in chg_doms:
+                    diff_status_map[nk] = "changed"
+                elif nk in aff_doms:
+                    diff_status_map[nk] = "affected"
+
     rendered: str
     if fmt_l == "html":
         out_dir = "TD" if dir_u in ("TD", "TB") else "LR"
@@ -1348,6 +1395,7 @@ def export_dependency_graph(
             sorted_edges=sorted_edges,
             parsed_sel=parsed_sel,
             declared_domains=declared_domains,
+            diff_status_map=diff_status_map,
         )
     elif fmt_l == "mermaid":
         m_dir = "TD" if dir_u in ("TD", "TB") else "LR"
@@ -1370,6 +1418,11 @@ def export_dependency_graph(
                 lines_out.append(f"  {node_ids[src]} -->|{cnt}| {node_ids[dst]}")
             else:
                 lines_out.append(f"  {node_ids[src]} --> {node_ids[dst]}")
+        if diff_status_map:
+            lines_out.append("  classDef changed fill:#451a03,stroke:#f59e0b,stroke-width:2px;")
+            lines_out.append("  classDef affected fill:#083344,stroke:#22d3ee,stroke-dasharray: 4 2;")
+            for nk, dstat in sorted(diff_status_map.items()):
+                lines_out.append(f"  class {node_ids[nk]} {dstat};")
         out_dir = m_dir
         rendered = "\n".join(lines_out) + "\n"
     else:

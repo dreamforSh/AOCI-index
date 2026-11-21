@@ -88,6 +88,8 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from aoci_core import apply_sync as _apply_sync  # noqa: E402
+from aoci_core import batch_pack as _batch_pack  # noqa: E402
+from aoci_core import ci_check as _ci_check  # noqa: E402
 from aoci_core import cochange as _cochange  # noqa: E402
 from aoci_core import githooks as _githooks  # noqa: E402
 from aoci_core import graph as _graph  # noqa: E402
@@ -1701,6 +1703,15 @@ def restore_from_semantic_pool(
             if hubs_path.is_file() and (restored or hub_orphan_paths):
                 hub_sync = _hubs.sync_hubs_on_upsert(root, aoci_dir, restored, hub_orphan_paths)
 
+        restored_hubs = _hubs.restore_hubs_from_pool(
+            root,
+            aoci_dir,
+            sorted(entries.keys()),
+            lambda: _pool.list_pooled_hub_relpaths(root, git_info),
+            lambda q, touch: _pool.lookup_hub_pool_entries(root, git_info, q, touch_lru=touch),
+            dry_run=dry_run,
+        )
+
         res_payload: Dict[str, Any] = {
             "ok": True,
             "dry_run": dry_run,
@@ -1712,6 +1723,8 @@ def restore_from_semantic_pool(
             "pruned": pruned,
             "total_indexed": len(entries),
         }
+        if restored_hubs:
+            res_payload["restored_hubs"] = restored_hubs
         if migrated_hubs:
             res_payload["migrated_hubs"] = migrated_hubs
         if hub_sync.get("refreshed"):
@@ -2790,24 +2803,65 @@ def cmd_upsert(args: argparse.Namespace) -> int:
             return _fail("Failed to exclude `.aoci/` from Git. Aborting upsert.", 2)
 
     raw_lines: List[str] = []
+    line_sources: List[Optional[str]] = []
+    pending_files_to_clean: List[Path] = []
+    if getattr(args, "pending_dir", None):
+        pdir = _resolve_cli_file_path(root, args.pending_dir, must_exist=True)
+        if not pdir.is_dir():
+            return _fail(f"`--pending-dir` `{pdir}` is not a directory.", 2)
+        txt_files = sorted(f for f in pdir.glob("*.txt") if f.is_file())
+        if not txt_files and not args.entries_file and not args.entry and not args.stdin and not args.prune_only:
+            return _fail(f"No `*.txt` batch files found in `--pending-dir` `{pdir}`.", 2)
+        for tf in txt_files:
+            try:
+                tf_lines = tf.read_text(encoding="utf-8-sig").splitlines()
+            except OSError as exc:
+                return _fail(f"Cannot read batch file `{tf}`: {exc}", 2)
+            for lno, ltxt in enumerate(tf_lines, start=1):
+                raw_lines.append(ltxt)
+                line_sources.append(f"{tf.name}:L{lno}")
+            pending_files_to_clean.append(tf)
     if args.entries_file:
         ep = _resolve_cli_file_path(root, args.entries_file, must_exist=True)
         try:
-            raw_lines.extend(ep.read_text(encoding="utf-8-sig").splitlines())
+            ef_lines = ep.read_text(encoding="utf-8-sig").splitlines()
+            raw_lines.extend(ef_lines)
+            line_sources.extend([None] * len(ef_lines))
         except OSError as exc:
             return _fail(f"Cannot read `--entries-file` `{ep}`: {exc}", 2)
     if args.entry:
         raw_lines.extend(args.entry)
+        line_sources.extend([None] * len(args.entry))
     if args.stdin:
-        raw_lines.extend(sys.stdin.read().splitlines())
+        st_lines = sys.stdin.read().splitlines()
+        raw_lines.extend(st_lines)
+        line_sources.extend([None] * len(st_lines))
 
     if not raw_lines and not args.prune_only:
-        return _fail("Provide entries via `--entries-file`, `--entry`, `--stdin`, or use `--prune-only`.", 2)
+        return _fail(
+            "Provide entries via `--entries-file`, `--pending-dir`, `--entry`, `--stdin`, or use `--prune-only`.",
+            2,
+        )
 
     lock_ctx: Any = contextlib.nullcontext() if args.dry_run else IndexLock(aoci_dir)
     try:
         with lock_ctx:
-            return _upsert_locked(args, root, aoci_dir, code_path, git_info, raw_lines)
+            rc = _upsert_locked(
+                args,
+                root,
+                aoci_dir,
+                code_path,
+                git_info,
+                raw_lines,
+                line_sources=line_sources,
+            )
+            if rc == 0 and not args.dry_run and getattr(args, "clean_pending", False) and pending_files_to_clean:
+                for pf in pending_files_to_clean:
+                    try:
+                        pf.unlink()
+                    except OSError:
+                        pass
+            return rc
     except TimeoutError as exc:
         return _fail(str(exc), 3)
 
@@ -2829,6 +2883,7 @@ def _upsert_locked(
     code_path: Path,
     git_info: Dict[str, Any],
     raw_lines: List[str],
+    line_sources: Optional[Sequence[Optional[str]]] = None,
 ) -> int:
     as_json = bool(getattr(args, "json", False))
     # Re-read everything under the lock so concurrent writers never lose each other's updates
@@ -2853,7 +2908,7 @@ def _upsert_locked(
     upserted_paths: List[str] = []
     seen_in_input: Set[str] = set()
 
-    for raw in raw_lines:
+    for idx_line, raw in enumerate(raw_lines):
         rel, norm, warns, err = validate_and_normalize_entry(
             raw,
             root,
@@ -2862,7 +2917,8 @@ def _upsert_locked(
             live=live,
         )
         if err is not None:
-            errors.append(err)
+            src_tag = line_sources[idx_line] if (line_sources and idx_line < len(line_sources)) else None
+            errors.append(f"[{src_tag}] {err}" if src_tag else err)
             continue
         if rel is None or norm is None:
             continue
@@ -4227,6 +4283,16 @@ def cmd_zoom(args: argparse.Namespace) -> int:
                     print(f"  - {err}", file=sys.stderr)
             return 1
 
+        if not args.dry_run and res.get("upserted"):
+            hubs_file = aoci_dir / HUBS_FILE
+            if hubs_file.is_file():
+                h_recs, _ = _hubs.parse_hubs_volume(hubs_file)
+                up_keys = set(res["upserted"])
+                changed_recs = [r for r in h_recs if f"{r['relpath']}#{r['symbol']}" in up_keys]
+                hub_rows = _hubs.collect_hub_pool_rows(root, changed_recs)
+                if hub_rows:
+                    _pool.record_hub_pool_entries(root, git_info, hub_rows)
+
         if as_json:
             print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
@@ -5547,6 +5613,25 @@ def cmd_export(args: argparse.Namespace) -> int:
     parsed_map = parse_entries_map(entries)
     deps_adj, dependents_adj = build_fras_graph(entries, parsed_entries=parsed_map)
     declared_domains = parse_declared_domains(aoci_dir)
+    changed_paths_exp: List[str] = []
+    affected_paths_exp: List[str] = []
+    if getattr(args, "diff", False) or getattr(args, "diff_rev", None):
+        dbrief = compute_diff_briefing(
+            root,
+            rev=getattr(args, "diff_rev", None),
+            depth=1,
+            cached_entries=entries,
+            cached_deps=deps_adj,
+            cached_dependents=dependents_adj,
+            cached_parsed=parsed_map,
+        )
+        if dbrief.get("ok"):
+            for ln in dbrief.get("changed_entries") or ():
+                changed_paths_exp.append(normalize_relpath(ln.split("[", 1)[0].strip()))
+            changed_paths_exp.extend(normalize_relpath(u) for u in (dbrief.get("unindexed_changed") or ()))
+            for ln in dbrief.get("affected_neighbors") or ():
+                affected_paths_exp.append(normalize_relpath(ln.split("[", 1)[0].strip()))
+
     res = export_dependency_graph(
         entries,
         deps_adj,
@@ -5563,6 +5648,8 @@ def cmd_export(args: argparse.Namespace) -> int:
         focus=args.focus,
         depth=args.depth,
         parsed_entries=parsed_map,
+        changed_paths=changed_paths_exp,
+        affected_paths=affected_paths_exp,
     )
 
     if args.output:
@@ -5596,7 +5683,8 @@ def cmd_pool(args: argparse.Namespace) -> int:
         else:
             print(
                 f"[AOCI Pool] Exists={res['exists']} | Path={res['pool_path']} | "
-                f"Bytes={res['bytes']} | ByPathSha={res['by_path_sha_count']} | BySha={res['by_sha_count']}"
+                f"Bytes={res['bytes']} | ByPathSha={res['by_path_sha_count']} | "
+                f"BySha={res['by_sha_count']} | ByHubs={res.get('by_hub_symbol_sha_count', 0)}"
             )
         return 0
 
@@ -5608,7 +5696,8 @@ def cmd_pool(args: argparse.Namespace) -> int:
         else:
             print(
                 f"[AOCI Pool Export] OK | ByPathSha={res['exported_by_path_sha']} | "
-                f"BySha={res['exported_by_sha']} | Bytes={res['bytes']} -> {res['output_path']}"
+                f"BySha={res['exported_by_sha']} | Hubs={res.get('exported_hubs', 0)} | "
+                f"Bytes={res['bytes']} -> {res['output_path']}"
             )
         return 0
 
@@ -5627,7 +5716,7 @@ def cmd_pool(args: argparse.Namespace) -> int:
             mode = " DRY-RUN" if res["dry_run"] else ""
             print(
                 f"[AOCI Pool Import{mode}] OK | ByPathSha={res['imported_by_path_sha']} | "
-                f"BySha={res['imported_by_sha']} | Rejected={res['rejected']}"
+                f"BySha={res['imported_by_sha']} | Hubs={res.get('imported_hubs', 0)} | Rejected={res['rejected']}"
             )
         return 0
 
@@ -5704,6 +5793,153 @@ def cmd_install_git_hooks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_batch_pack(args: argparse.Namespace) -> int:
+    """Assemble a self-contained subagent briefing work-pack for 1-indexed batch N."""
+    root = resolve_root(args.root)
+    aoci_dir = root / AOCI_DIR_NAME
+    as_json = bool(getattr(args, "json", False))
+    if not (aoci_dir / CODE_FILE).exists():
+        return _emit_cli_error(as_json, f"`{aoci_dir / CODE_FILE}` not found. Run `init` first.", 2)
+
+    git_info = detect_git_info(root)
+    drift = compute_drift(
+        root,
+        git_info,
+        fast_mtime=True,
+        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+        allow_heal=False,
+        save_scan_cache=False,
+    )
+    pack = _batch_pack.build_batch_pack(
+        root,
+        drift,
+        int(args.batch),
+        scaffold_fn=scaffold_entries,
+        batch_size=getattr(args, "batch_size", None),
+        max_batch_lines=getattr(args, "max_batch_lines", None),
+        reset_batches=bool(getattr(args, "reset_batches", False)),
+        with_source=bool(getattr(args, "with_source", False)),
+        max_source_lines=int(getattr(args, "max_source_lines", 200)),
+        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+    )
+    if not pack.get("ok"):
+        return _emit_cli_error(as_json, str(pack.get("error", "Batch pack failed.")), 2, extra=pack)
+
+    rendered_md = _batch_pack.render_batch_pack_markdown(pack)
+    if getattr(args, "output", None):
+        out_p = _resolve_cli_file_path(root, args.output, must_exist=False)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        write_text_lf(out_p, json.dumps(pack, indent=2, ensure_ascii=False) + "\n" if as_json else rendered_md)
+        pack = dict(pack)
+        pack["output_path"] = str(out_p)
+
+    if as_json:
+        print(json.dumps(pack, indent=2, ensure_ascii=False))
+    elif getattr(args, "output", None):
+        print(
+            f"[AOCI Batch-Pack] OK | Batch={pack['batch']}/{pack['total_batches']} | "
+            f"Files={pack.get('total_files', 0)} -> {pack['output_path']}"
+        )
+    else:
+        print(rendered_md, end="")
+    return 0
+
+
+def run_ci_architecture_check(
+    root: Path,
+    *,
+    base_rev: Optional[str] = None,
+    pool_bundle: Optional[str] = None,
+    forbid_spec: Optional[str] = None,
+    use_default_rules: bool = True,
+    check_cycles: bool = True,
+    check_layers: bool = True,
+    check_static: bool = True,
+    check_drift: bool = False,
+    exclude_tests: bool = False,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> Dict[str, Any]:
+    bundle_p = _resolve_cli_file_path(root, pool_bundle, must_exist=True) if pool_bundle else None
+    return _ci_check.run_ci_check(
+        root,
+        detect_git_info_fn=detect_git_info,
+        load_ignore_matcher_fn=load_ignore_matcher,
+        discover_and_fingerprint_fn=discover_and_fingerprint,
+        build_static_import_graph_fn=build_static_import_graph,
+        infer_layer_and_domain_fn=_infer_layer_and_domain,
+        compute_drift_fn=compute_drift,
+        audit_architecture_fn=audit_architecture,
+        compute_diff_briefing_fn=compute_diff_briefing,
+        run_git_fn=run_git,
+        base_rev=base_rev,
+        pool_bundle=bundle_p,
+        forbid_spec=forbid_spec,
+        use_default_rules=use_default_rules,
+        check_cycles=check_cycles,
+        check_layers=check_layers,
+        check_static=check_static,
+        check_drift=check_drift,
+        exclude_tests=exclude_tests,
+        max_bytes=max_bytes,
+    )
+
+
+def cmd_ci_check(args: argparse.Namespace) -> int:
+    """CI-native architecture guard supporting JSON, GitHub Actions annotations, SARIF 2.1.0, and PR Markdown."""
+    root = resolve_root(args.root)
+    fmt = "json" if getattr(args, "json", False) else str(getattr(args, "format", "text")).lower()
+    try:
+        report = run_ci_architecture_check(
+            root,
+            base_rev=getattr(args, "base_rev", None),
+            pool_bundle=getattr(args, "pool_bundle", None),
+            forbid_spec=getattr(args, "forbid", None),
+            use_default_rules=not bool(getattr(args, "no_default_rules", False)),
+            check_cycles=not bool(getattr(args, "no_cycles", False)),
+            check_layers=not bool(getattr(args, "no_layers", False)),
+            check_static=not bool(getattr(args, "no_static", False)),
+            check_drift=bool(getattr(args, "check_drift", False)),
+            exclude_tests=bool(getattr(args, "exclude_tests", False)),
+            max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+        )
+    except Exception as exc:
+        return _emit_cli_error(fmt == "json", str(exc), 2)
+
+    if report.get("error"):
+        return _emit_cli_error(fmt == "json", str(report["error"]), 2, extra=report)
+
+    if getattr(args, "sarif_output", None):
+        sarif_path = _resolve_cli_file_path(root, args.sarif_output, must_exist=False)
+        sarif_path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_lf(sarif_path, _ci_check.format_ci_sarif(report))
+        report["sarif_output_path"] = str(sarif_path)
+
+    if fmt == "json":
+        rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    elif fmt == "sarif":
+        rendered = _ci_check.format_ci_sarif(report)
+    elif fmt == "github":
+        rendered = _ci_check.format_ci_github_annotations(report)
+    elif fmt == "markdown":
+        rendered = _ci_check.format_ci_markdown(report)
+    else:
+        sm = report["summary"]
+        st_lbl = "CLEAN" if report["ok"] else f"ISSUES ({report['total_findings']})"
+        rendered = (
+            f"[AOCI CI-Check] {st_lbl} | Mode={report['mode']} | Files={report['indexed_files']} | "
+            f"LayerViolations={sm['layer_violations']} | Cycles={sm['cycles']} | "
+            f"MissingStaticDeps={sm['missing_static_deps']} | Drift={sm['drift_issues']}\n"
+        )
+
+    if getattr(args, "output", None):
+        out_p = _resolve_cli_file_path(root, args.output, must_exist=False)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        write_text_lf(out_p, rendered)
+
+    print(rendered, end="")
+    return 1 if (getattr(args, "strict", False) and not report["ok"]) else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="AOCI Fast Codebase Index Manager")
     p.add_argument("-V", "--version", action="version", version=f"%(prog)s {AOCI_VERSION}")
@@ -5760,6 +5996,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_up = sub.add_parser("upsert", help="Validate & merge FRAS entries into `aoci.code.txt` and `baseline.json`")
     p_up.add_argument("--root", help="Target codebase root")
     p_up.add_argument("--entries-file", help="Path to a text file containing object-fras-v2 lines")
+    p_up.add_argument(
+        "--pending-dir",
+        help="Directory containing `*.txt` subagent batch entry files to validate and merge atomically",
+    )
+    p_up.add_argument(
+        "--clean-pending",
+        action="store_true",
+        help="Remove consumed `*.txt` files in `--pending-dir` after a successful non-dry-run merge",
+    )
     p_up.add_argument("--entry", action="append", help="Single object-fras-v2 line (repeatable)")
     p_up.add_argument("--stdin", action="store_true", help="Read object-fras-v2 lines from stdin")
     p_up.add_argument("--prune-only", action="store_true", help="Only prune deleted/ignored files from index")
@@ -5991,6 +6236,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp.add_argument("--path", help="Glob filter on relative file paths")
     p_exp.add_argument("--focus", help="Center subgraph on a target file and its neighbors")
     p_exp.add_argument("--depth", type=int, default=1, help="Neighborhood hops around `--focus` (default: 1)")
+    p_exp.add_argument("--diff", action="store_true", help="Highlight working-tree changed nodes and affected 1-hop callers")
+    p_exp.add_argument("--diff-rev", help="Highlight changed nodes and affected callers against Git revision (e.g. `origin/main`)")
     p_exp.add_argument("--output", help="Optional output file path relative to `--root`")
     p_exp.add_argument("--json", action="store_true", help="Output JSON")
     p_exp.set_defaults(func=cmd_export)
@@ -6113,6 +6360,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_sym.add_argument("--live", action="store_true", help="Read-only live outline fallback for files missing from outline cache")
     p_sym.add_argument("--json", action="store_true", help="Output JSON")
     p_sym.set_defaults(func=cmd_symbol)
+
+    p_bp = sub.add_parser(
+        "batch-pack",
+        help="Assemble a self-contained subagent work-pack (scaffolds + outlines + optional source) for batch N",
+    )
+    p_bp.add_argument("--batch", type=int, required=True, help="1-indexed batch number to pack")
+    p_bp.add_argument("--root", help="Target codebase root")
+    p_bp.add_argument("--batch-size", type=int, default=None, help="Files per batch (inherits active batch_plan.json if omitted)")
+    p_bp.add_argument("--max-batch-lines", type=int, default=None, help="Line budget per batch")
+    p_bp.add_argument("--reset-batches", action="store_true", help="Rebuild `.aoci/.cache/batch_plan.json` before packing")
+    p_bp.add_argument("--with-source", action="store_true", help="Embed bounded source excerpts per file")
+    p_bp.add_argument("--max-source-lines", type=int, default=200, help="Maximum source lines per file with `--with-source` (default: 200)")
+    p_bp.add_argument("--output", help="Optional output file path")
+    p_bp.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_bp.add_argument("--json", action="store_true", help="Output JSON")
+    p_bp.set_defaults(func=cmd_batch_pack)
+
+    p_ci = sub.add_parser(
+        "ci-check",
+        help="CI-native architecture guard (layer rules, cycles, PR diff impact, GitHub annotations & SARIF 2.1.0)",
+    )
+    p_ci.add_argument("--root", help="Target codebase root")
+    p_ci.add_argument(
+        "--format",
+        choices=["text", "json", "github", "sarif", "markdown"],
+        default="text",
+        help="Report output format (default: text)",
+    )
+    p_ci.add_argument("--base-rev", help="Base Git revision (e.g. `origin/main`) for PR diff impact & test derivation")
+    p_ci.add_argument("--pool-bundle", help="Optional exported semantic pool bundle (`.json` or `.json.gz`) for zero-index CI")
+    p_ci.add_argument("--forbid", help="Extra layer redlines (e.g. `D!->E,U; P!->E`)")
+    p_ci.add_argument("--no-default-rules", action="store_true", help="Disable built-in layer redline defaults")
+    p_ci.add_argument("--no-static", action="store_true", help="Skip static import vs FRAS cross-check")
+    p_ci.add_argument("--no-cycles", action="store_true", help="Skip dependency cycle detection")
+    p_ci.add_argument("--no-layers", action="store_true", help="Skip layer redline validation")
+    p_ci.add_argument("--check-drift", action="store_true", help="Also report unsynced `.aoci/` drift when `.aoci/` exists")
+    p_ci.add_argument("--exclude-tests", action="store_true", help="Exclude T-layer test files from layer/cycle checks")
+    p_ci.add_argument("--sarif-output", help="Optional file path to write SARIF 2.1.0 output alongside stdout")
+    p_ci.add_argument("--output", help="Optional file path to write formatted report")
+    p_ci.add_argument("--strict", action="store_true", help="Exit with code 1 when any architectural finding exists")
+    p_ci.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_ci.add_argument("--json", action="store_true", help="Shortcut for `--format json`")
+    p_ci.set_defaults(func=cmd_ci_check)
 
     return p
 

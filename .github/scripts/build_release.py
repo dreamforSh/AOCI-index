@@ -146,8 +146,26 @@ def _file_mode(fpath: Path, data: bytes) -> int:
     return 0o644
 
 
+_BINARY_ARCHIVE_SUFFIXES = {
+    ".gz",
+    ".tgz",
+    ".zip",
+    ".whl",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".pdf",
+    ".sqlite3",
+}
+
+
 def _read_normalized_archive_bytes(fpath: Path) -> bytes:
     data = fpath.read_bytes()
+    if fpath.suffix.lower() in _BINARY_ARCHIVE_SUFFIXES or data[:2] == b"\x1f\x8b":
+        return data
     if b"\x00" not in data[:8192]:
         if data.startswith(b"\xef\xbb\xbf#!"):
             data = data[3:]

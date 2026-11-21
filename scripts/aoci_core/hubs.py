@@ -5,11 +5,12 @@ from __future__ import annotations
 import ast
 from bisect import bisect_right
 import contextlib
+import hashlib
 import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .constants import (
     AOCI_DIR_NAME,
@@ -1155,3 +1156,164 @@ def lookup_hub_sections(
                 }
             )
     return out
+
+
+def compute_span_body_sha256(norm_bytes: bytes, start: int, end: int) -> Optional[str]:
+    """Compute a line-shift-invariant SHA-256 over 1-based lines `[start..end]` (trailing whitespace stripped)."""
+    if not norm_bytes or start < 1 or end < start:
+        return None
+    text = norm_bytes.decode("utf-8", errors="replace")
+    lines = text[:-1].split("\n") if text.endswith("\n") else text.split("\n")
+    if start > len(lines):
+        return None
+    seg = lines[start - 1 : min(end, len(lines))]
+    norm_body = "\n".join(ln.rstrip() for ln in seg).strip()
+    if not norm_body:
+        return None
+    return hashlib.sha256(norm_body.encode("utf-8")).hexdigest()
+
+
+def collect_hub_pool_rows(
+    root: Path,
+    hub_records: Sequence[Mapping[str, Any]],
+) -> List[Tuple[str, str, str, str, str]]:
+    """
+    Build `(relpath, symbol, span_sha256, f_val, s_val)` rows for live files so hub semantics survive
+    branch switches, rebases, and line-number shifts inside the same file.
+    """
+    if not hub_records:
+        return []
+    root_res = Path(root).resolve()
+    by_rel: Dict[str, List[Mapping[str, Any]]] = {}
+    for rec in hub_records:
+        rel = normalize_relpath(str(rec.get("relpath", "")))
+        sym = str(rec.get("symbol", "")).strip()
+        f_val = str(rec.get("f", "")).strip()
+        s_val = str(rec.get("s", "")).strip()
+        if not rel or not sym or not f_val or f_val == "-" or not s_val:
+            continue
+        by_rel.setdefault(rel, []).append(rec)
+
+    rows: List[Tuple[str, str, str, str, str]] = []
+    seen_keys: Set[Tuple[str, str, str]] = set()
+    for rel, recs in sorted(by_rel.items()):
+        full = root_res / rel
+        if not _is_within_root(root_res, full):
+            continue
+        try:
+            st = os.lstat(full)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                continue
+        except OSError:
+            continue
+        norm_bytes = _read_norm_bytes(full)
+        if not norm_bytes:
+            continue
+        live_map, clean_parse = _extract_live_symbol_span_map(full, rel)
+        for rec in recs:
+            sym = str(rec["symbol"]).strip()
+            f_val = str(rec["f"]).strip()
+            s_val = str(rec["s"]).strip()
+            candidate_spans: List[Tuple[int, int]] = [(int(rec["start"]), int(rec["end"]))]
+            if clean_parse and live_map and sym in live_map:
+                live_sp = live_map[sym]
+                if live_sp not in candidate_spans:
+                    candidate_spans.append(live_sp)
+            for sp_s, sp_e in candidate_spans:
+                sha = compute_span_body_sha256(norm_bytes, sp_s, sp_e)
+                if sha and (rel, sym, sha) not in seen_keys:
+                    seen_keys.add((rel, sym, sha))
+                    rows.append((rel, sym, sha, f_val, s_val))
+    return rows
+
+
+def restore_hubs_from_pool(
+    root: Path,
+    aoci_dir: Path,
+    candidate_paths: Sequence[str],
+    list_pooled_rels_fn: Callable[[], Set[str]],
+    lookup_fn: Callable[[Sequence[Tuple[str, str, str]], bool], Dict[Tuple[str, str, str], Tuple[str, str]]],
+    *,
+    dry_run: bool = False,
+) -> List[str]:
+    """
+    Zero-token restore missing `aoci.hubs.txt` entries whose `(relpath, symbol, span_sha256)` matches
+    the live symbol body on disk, automatically computing updated `[Lstart-Lend]` spans.
+    Caller must hold `.aoci/.lock` when `not dry_run`.
+    """
+    if not candidate_paths:
+        return []
+    pooled_rels = list_pooled_rels_fn()
+    if not pooled_rels:
+        return []
+    cand_set = {normalize_relpath(str(p)) for p in candidate_paths if str(p).strip()} & pooled_rels
+    if not cand_set:
+        return []
+
+    aoci_path = Path(aoci_dir)
+    hubs_path = aoci_path / HUBS_FILE
+    existing_records, malformed = parse_hubs_volume(hubs_path) if hubs_path.is_file() else ([], [])
+    if malformed:
+        return []
+    existing_keys = {(rec["relpath"], rec["symbol"]) for rec in existing_records}
+
+    root_res = Path(root).resolve()
+    pending_spans: List[Tuple[str, str, int, int, str]] = []
+    for rel in sorted(cand_set):
+        full = root_res / rel
+        if not _is_within_root(root_res, full):
+            continue
+        try:
+            st = os.lstat(full)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                continue
+        except OSError:
+            continue
+        norm_bytes = _read_norm_bytes(full)
+        if not norm_bytes:
+            continue
+        live_map, clean_parse = _extract_live_symbol_span_map(full, rel)
+        if not clean_parse or not live_map:
+            continue
+        for sym, (live_s, live_e) in sorted(live_map.items()):
+            if (rel, sym) in existing_keys:
+                continue
+            sha = compute_span_body_sha256(norm_bytes, live_s, live_e)
+            if sha:
+                pending_spans.append((rel, sym, live_s, live_e, sha))
+
+    if not pending_spans:
+        return []
+
+    queries = [(rel, sym, sha) for rel, sym, _, _, sha in pending_spans]
+    hits = lookup_fn(queries, not dry_run)
+    if not hits:
+        return []
+
+    merged: Dict[Tuple[str, str], Dict[str, Any]] = {
+        (rec["relpath"], rec["symbol"]): rec for rec in existing_records
+    }
+    restored_labels: List[str] = []
+    for rel, sym, live_s, live_e, sha in pending_spans:
+        fs_pair = hits.get((rel, sym, sha))
+        if fs_pair is None:
+            continue
+        f_val, s_val = fs_pair
+        if not f_val or f_val == "-" or not s_val or "<todo" in f_val.lower() or "<todo" in s_val.lower():
+            continue
+        merged[(rel, sym)] = {
+            "relpath": rel,
+            "symbol": sym,
+            "start": live_s,
+            "end": live_e,
+            "f": f_val,
+            "s": s_val,
+            "line": format_hub_entry(rel, sym, live_s, live_e, f_val, s_val),
+        }
+        restored_labels.append(f"{rel}#{sym}")
+
+    if restored_labels and not dry_run:
+        ordered = sorted(merged.values(), key=_record_sort_key)
+        write_hubs_volume(hubs_path, ordered)
+        sync_manifest_hubs_volume(aoci_path)
+    return restored_labels
