@@ -33,6 +33,7 @@ def run_apply_sync(
     allow_sha_fallback: bool = False,
     migrate_renames: bool = False,
     exact_only: bool = False,
+    no_rewrite_refs: bool = False,
     ack_paths: Optional[Sequence[str]] = None,
     ack_impl_only: bool = False,
     reviewed: bool = False,
@@ -44,13 +45,14 @@ def run_apply_sync(
     drop_malformed: bool = False,
     verify: bool = True,
     full_verify: bool = False,
+    max_bytes: Optional[int] = None,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute requested sync stages in canonical order (`restore -> migrate-renames -> ack -> upsert -> verify`).
     Halts immediately on the first failing step (`rc != 0`) and returns per-step structured outcomes.
     """
-    ack_list = [str(p) for p in (ack_paths or ()) if str(p).strip()]
+    ack_list = list(dict.fromkeys(str(p) for p in (ack_paths or ()) if str(p).strip()))
     entry_list = [str(e) for e in (entries or ()) if str(e).strip()]
     want_ack = bool(ack_impl_only or ack_list)
     want_upsert = bool(entry_list or entries_file or prune_only)
@@ -73,10 +75,19 @@ def run_apply_sync(
             "verify": None,
         }
 
+    def _with_max_bytes(cmd: List[str]) -> List[str]:
+        if max_bytes is not None:
+            cmd.extend(["--max-bytes", str(int(max_bytes))])
+        return cmd
+
     plan: List[Tuple[str, List[str]]] = []
 
     if restore:
-        cmd_r = ["restore", "--root", str(root), "--no-prune", "--json"]
+        cmd_r = _with_max_bytes(["restore", "--root", str(root), "--json"])
+        # Keep deleted entries during `restore` only when `no_prune`, `migrate_renames` (which needs
+        # deleted origin entries), or a subsequent pruning `upsert` will handle them.
+        if no_prune or migrate_renames or want_upsert:
+            cmd_r.append("--no-prune")
         if allow_sha_fallback:
             cmd_r.append("--allow-sha-fallback")
         if dry_run:
@@ -84,34 +95,44 @@ def run_apply_sync(
         plan.append(("restore", cmd_r))
 
     if migrate_renames:
-        cmd_m = ["migrate-renames", "--root", str(root), "--json"]
+        cmd_m = _with_max_bytes(["migrate-renames", "--root", str(root), "--json"])
         if exact_only:
             cmd_m.append("--exact-only")
+        if no_rewrite_refs:
+            cmd_m.append("--no-rewrite-refs")
         if drop_malformed:
             cmd_m.append("--drop-malformed")
         if dry_run:
             cmd_m.append("--dry-run")
         plan.append(("migrate_renames", cmd_m))
 
-    if want_ack:
-        cmd_a = ["ack", "--root", str(root), "--json"]
-        if ack_impl_only:
-            cmd_a.append("--impl-only")
+    # Split `ack_impl_only` auto-selection from explicit `ack_paths` so passing both neither
+    # suppresses `impl_only` discovery nor rejects reviewed contract-changed paths in `ack_paths`.
+    if ack_impl_only:
+        cmd_ai = _with_max_bytes(["ack", "--root", str(root), "--impl-only", "--json"])
         if reviewed:
-            cmd_a.append("--reviewed")
+            cmd_ai.append("--reviewed")
         if dry_run:
-            cmd_a.append("--dry-run")
-        if ack_list:
-            cmd_a.extend(["--", *ack_list])
-        plan.append(("ack", cmd_a))
+            cmd_ai.append("--dry-run")
+        plan.append(("ack_impl_only" if ack_list else "ack", cmd_ai))
 
-    if want_upsert:
-        cmd_u = ["upsert", "--root", str(root), "--json"]
+    if ack_list:
+        cmd_ap = _with_max_bytes(["ack", "--root", str(root), "--json"])
+        if reviewed:
+            cmd_ap.append("--reviewed")
+        if dry_run:
+            cmd_ap.append("--dry-run")
+        cmd_ap.extend(["--", *ack_list])
+        plan.append(("ack", cmd_ap))
+
+    need_trailing_prune = bool((restore and migrate_renames) and not want_upsert and not no_prune)
+    if want_upsert or need_trailing_prune:
+        cmd_u = _with_max_bytes(["upsert", "--root", str(root), "--json"])
         if entries_file:
             cmd_u.append(f"--entries-file={entries_file}")
-        if prune_only:
+        if prune_only or (need_trailing_prune and not want_upsert):
             cmd_u.append("--prune-only")
-        if no_prune and not prune_only:
+        elif no_prune:
             cmd_u.append("--no-prune")
         if strict_size:
             cmd_u.append("--strict-size")
@@ -124,7 +145,7 @@ def run_apply_sync(
         plan.append(("upsert", cmd_u))
 
     if verify and not dry_run:
-        cmd_v = ["verify", "--root", str(root), "--json"]
+        cmd_v = _with_max_bytes(["verify", "--root", str(root), "--json"])
         if not full_verify:
             cmd_v.append("--fast")
         plan.append(("verify", cmd_v))

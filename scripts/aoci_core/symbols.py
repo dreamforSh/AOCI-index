@@ -12,7 +12,7 @@ from .constants import AOCI_DIR_NAME, DEFAULT_MAX_BYTES, HUBS_FILE, _is_within_r
 from .graph import ParsedEntry, bfs_neighbors, parse_entries_map
 from .hubs import _OUTLINE_LINE_RE, _clean_outline_symbol, parse_hubs_volume
 from .parsers import extract_file_outline
-from .test_impact import _load_outline_cache
+from .test_impact import _load_outline_cache, is_outline_record_fresh
 
 _HTTP_VERB_PREFIX_RE = re.compile(r"^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+", re.IGNORECASE)
 _FRAS_SYM_TOKEN_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.:#-]*$")
@@ -195,7 +195,7 @@ def lookup_symbol(
 
     for rel in target_paths:
         raw_rec = outline_files.get(rel) if outline_files else None
-        if isinstance(raw_rec, dict):
+        if isinstance(raw_rec, dict) and is_outline_record_fresh(root, rel, raw_rec):
             out_obj = raw_rec.get("outline") if isinstance(raw_rec.get("outline"), dict) else raw_rec
             syms_list = out_obj.get("symbols") if isinstance(out_obj, dict) else None
             if isinstance(syms_list, list):

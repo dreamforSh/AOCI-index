@@ -1382,15 +1382,25 @@ def fingerprint_file(full_path: Path) -> Dict[str, Any]:
 
 def load_baseline(aoci_dir: Path) -> Dict[str, Any]:
     bp = aoci_dir / BASELINE_FILE
+    empty = {"schema_version": 1, "root_name": aoci_dir.parent.name, "updated_at": None, "files": {}}
     if not bp.exists():
-        return {"schema_version": 1, "root_name": aoci_dir.parent.name, "updated_at": None, "files": {}}
+        return empty
     try:
-        data = json.loads(bp.read_text(encoding="utf-8"))
+        raw = bp.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        print(f"WARN: Cannot read `{bp}` ({exc}); treating baseline as empty.", file=sys.stderr)
+        return empty
+    if not raw.strip():
+        return empty
+    try:
+        data = json.loads(raw)
         if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
-            return {"schema_version": 1, "root_name": aoci_dir.parent.name, "updated_at": None, "files": {}}
+            print(f"WARN: Invalid schema in `{bp}`; treating baseline as empty.", file=sys.stderr)
+            return empty
         return data
-    except json.JSONDecodeError:
-        return {"schema_version": 1, "root_name": aoci_dir.parent.name, "updated_at": None, "files": {}}
+    except ValueError as exc:
+        print(f"WARN: Corrupt JSON in `{bp}` ({exc}); treating baseline as empty.", file=sys.stderr)
+        return empty
 
 
 def save_baseline(
@@ -1592,7 +1602,10 @@ def restore_from_semantic_pool(
                             )
             if cand is None:
                 continue
-            m = ENTRY_RE.match(cand)
+            validated_cand = _pool._validate_pool_entry_row(None if via_sha else rel, sha, cand)
+            if validated_cand is None:
+                continue
+            m = ENTRY_RE.match(validated_cand)
             if not m or m.group("layer") not in VALID_LAYERS or m.group("size") not in VALID_SIZES:
                 continue
             entries[rel] = (
@@ -1644,13 +1657,33 @@ def restore_from_semantic_pool(
                     )
                     rewritten_refs.append(rel_e)
 
-        if not dry_run and (restored or pruned or rewritten_refs):
-            write_code_volume(code_path, entries)
-            sync_shards_if_enabled(aoci_dir, entries)
-            baseline["files"] = base_files
-            save_baseline(aoci_dir, baseline, touched_paths=restored + pruned)
+        migrated_hubs: List[str] = []
+        if sha_rename_map:
+            migrated_hubs = _hubs.migrate_hubs_renames(root, aoci_dir, sha_rename_map, dry_run=dry_run)
 
-        return {
+        hub_sync: Dict[str, List[str]] = {"refreshed": [], "pruned": []}
+        hubs_path = aoci_dir / HUBS_FILE
+        if not dry_run:
+            hub_orphan_paths: List[str] = list(pruned)
+            if prune_deleted and hubs_path.is_file():
+                hub_recs, hub_mal = _hubs.parse_hubs_volume(hubs_path)
+                if not hub_mal:
+                    for hr in hub_recs:
+                        h_rel = hr["relpath"]
+                        if h_rel not in fps and h_rel not in hub_orphan_paths:
+                            hub_orphan_paths.append(h_rel)
+            if restored or pruned or rewritten_refs:
+                write_code_volume(code_path, entries)
+                sync_shards_if_enabled(aoci_dir, entries)
+                baseline["files"] = base_files
+                save_baseline(aoci_dir, baseline, touched_paths=restored + pruned)
+                _parsers.invalidate_outline_cache(
+                    root, aoci_dir, touched_paths=restored, pruned_paths=pruned, rename_map=sha_rename_map
+                )
+            if hubs_path.is_file() and (restored or hub_orphan_paths):
+                hub_sync = _hubs.sync_hubs_on_upsert(root, aoci_dir, restored, hub_orphan_paths)
+
+        res_payload: Dict[str, Any] = {
             "ok": True,
             "dry_run": dry_run,
             "pool_path": str(pool_file),
@@ -1661,6 +1694,13 @@ def restore_from_semantic_pool(
             "pruned": pruned,
             "total_indexed": len(entries),
         }
+        if migrated_hubs:
+            res_payload["migrated_hubs"] = migrated_hubs
+        if hub_sync.get("refreshed"):
+            res_payload["hubs_refreshed"] = hub_sync["refreshed"]
+        if hub_sync.get("pruned"):
+            res_payload["hubs_pruned"] = hub_sync["pruned"]
+        return res_payload
 
 
 def pool_stats(root: Path, git_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -1714,7 +1754,7 @@ def parse_code_volume(
     if not code_path.exists():
         return entries, malformed
 
-    text = code_path.read_text(encoding="utf-8", errors="replace")
+    text = code_path.read_text(encoding="utf-8-sig", errors="replace")
     if raw_text_out is not None:
         raw_text_out.append(text)
     for lineno, raw in enumerate(text.splitlines(), start=1):
@@ -1909,12 +1949,20 @@ class LiveFileSet:
                     pass
             unchecked = [c for c in candidates if c not in known_tracked]
             if unchecked:
-                res = run_git(
-                    ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", *unchecked],
-                    self.root,
-                )
-                if res.returncode == 0:
-                    allowed = {normalize_relpath(it) for it in res.stdout.split("\0") if it}
+                allowed: Set[str] = set()
+                git_ok = True
+                chunk_sz = 200
+                for idx in range(0, len(unchecked), chunk_sz):
+                    chunk = unchecked[idx : idx + chunk_sz]
+                    res = run_git(
+                        ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", *chunk],
+                        self.root,
+                    )
+                    if res.returncode != 0:
+                        git_ok = False
+                        break
+                    allowed.update(normalize_relpath(it) for it in res.stdout.split("\0") if it)
+                if git_ok:
                     for c in unchecked:
                         if c not in allowed:
                             candidates.pop(c, None)
@@ -2933,6 +2981,7 @@ def _upsert_locked(
         (rel, base_files[rel], entries[rel]) for rel in upserted_paths if rel in entries
     ]
     record_semantic_pool_entries(root, git_info, pool_records)
+    _parsers.invalidate_outline_cache(root, aoci_dir, touched_paths=upserted_paths, pruned_paths=pruned)
     hub_sync = _hubs.sync_hubs_on_upsert(root, aoci_dir, upserted_paths, pruned)
 
     if as_json:
@@ -3123,6 +3172,9 @@ def _migrate_renames_locked(
     migrated_hubs = _hubs.migrate_hubs_renames(
         root, aoci_dir, rename_map, dry_run=bool(args.dry_run)
     )
+    if not args.dry_run and rename_map:
+        sim_dirty = [n for _, n, _ in migrated_similar]
+        _parsers.invalidate_outline_cache(root, aoci_dir, touched_paths=sim_dirty, rename_map=rename_map)
 
     if args.dry_run:
         if as_json:
@@ -3405,12 +3457,22 @@ def _print_impacted_tests(impacted_tests: Sequence[Dict[str, Any]]) -> None:
         print(f"  [{item['reason']}, hop={item['hop']}, via={item['via']}] {item['entry']}")
 
 
+def _emit_cli_error(as_json: bool, msg: str, rc: int = 2, extra: Optional[Dict[str, Any]] = None) -> int:
+    if as_json:
+        payload: Dict[str, Any] = dict(extra) if isinstance(extra, dict) else {}
+        payload["ok"] = False
+        payload.setdefault("error", msg)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"ERROR: {msg}", file=sys.stderr)
+    return rc
+
+
 def cmd_query(args: argparse.Namespace) -> int:
     root = resolve_root(args.root)
     code_path = root / AOCI_DIR_NAME / CODE_FILE
     if not code_path.exists():
-        print(f"ERROR: `{code_path}` not found.", file=sys.stderr)
-        return 2
+        return _emit_cli_error(bool(getattr(args, "json", False)), f"`{code_path}` not found.", 2)
 
     entries, _ = parse_code_volume(code_path)
     parsed_map = parse_entries_map(entries)
@@ -3455,9 +3517,9 @@ def cmd_query(args: argparse.Namespace) -> int:
         pe = parsed_map.get(rel)
         if pe is None:
             continue
-        if layer_set and pe.layer not in layer_set:
+        if layer_set is not None and pe.layer not in layer_set:
             continue
-        if domain_set and pe.domain not in domain_set:
+        if domain_set is not None and pe.domain not in domain_set:
             continue
         if args.min_importance and pe.imp < args.min_importance:
             continue
@@ -3543,8 +3605,11 @@ def cmd_context(args: argparse.Namespace) -> int:
     aoci_dir = root / AOCI_DIR_NAME
     code_path = aoci_dir / CODE_FILE
     if not code_path.exists():
-        print(f"ERROR: `{code_path}` not found. Run `init` first.", file=sys.stderr)
-        return 2
+        return _emit_cli_error(
+            bool(getattr(args, "json", False)),
+            f"`{code_path}` not found. Run `init` first.",
+            2,
+        )
 
     entries, _ = parse_code_volume(code_path)
     parsed_map = parse_entries_map(entries)
@@ -3568,11 +3633,10 @@ def cmd_context(args: argparse.Namespace) -> int:
         for ln in (payload["targets"] + payload["dependencies"])
         if ln
     ]
-    hub_secs = _hubs.lookup_hub_sections(aoci_dir, ctx_hub_paths)
-    if hub_secs:
-        payload["hub_sections"] = hub_secs
+    raw_hub_secs = _hubs.lookup_hub_sections(aoci_dir, ctx_hub_paths)
+    raw_tests: Optional[List[Dict[str, Any]]] = None
     if with_tests:
-        payload["impacted_tests"] = _test_impact.find_impacted_tests(
+        raw_tests = _test_impact.find_impacted_tests(
             root,
             entries,
             dependents_adj,
@@ -3581,6 +3645,8 @@ def cmd_context(args: argparse.Namespace) -> int:
             parsed_entries=parsed_map,
             live_imports=bool(getattr(args, "live_test_imports", False)),
         )
+    _graph.attach_budgeted_context_extras(payload, raw_hub_secs, raw_tests, args.paths, budget)
+    hub_secs = payload.get("hub_sections") or []
 
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -3619,8 +3685,11 @@ def cmd_overview(args: argparse.Namespace) -> int:
     aoci_dir = root / AOCI_DIR_NAME
     code_path = aoci_dir / CODE_FILE
     if not code_path.exists():
-        print(f"ERROR: `{code_path}` not found. Run `init` first.", file=sys.stderr)
-        return 2
+        return _emit_cli_error(
+            bool(getattr(args, "json", False)),
+            f"`{code_path}` not found. Run `init` first.",
+            2,
+        )
 
     raw_code_texts: List[str] = []
     entries, _ = parse_code_volume(code_path, raw_text_out=raw_code_texts)
@@ -3945,6 +4014,7 @@ def cmd_ack(args: argparse.Namespace) -> int:
                 )
                 if (aoci_dir / HUBS_FILE).is_file() and not args.dry_run:
                     hubs_refreshed = _hubs.refresh_hub_spans_for_paths(root, aoci_dir, acked)
+                _parsers.invalidate_outline_cache(root, aoci_dir, touched_paths=acked)
     except TimeoutError as exc:
         return _fail(str(exc), 3)
 
@@ -4254,8 +4324,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
     )
     if res.get("error"):
-        print(f"ERROR: {res['error']}", file=sys.stderr)
-        return 2
+        return _emit_cli_error(bool(getattr(args, "json", False)), str(res["error"]), 2, extra=res)
 
     findings = res["findings"]
     by_code = res["counts"]
@@ -4280,8 +4349,11 @@ def cmd_shard(args: argparse.Namespace) -> int:
     aoci_dir = root / AOCI_DIR_NAME
     code_path = aoci_dir / CODE_FILE
     if not code_path.exists():
-        print(f"ERROR: `{code_path}` not found. Run `init` first.", file=sys.stderr)
-        return 2
+        return _emit_cli_error(
+            bool(getattr(args, "json", False)),
+            f"`{code_path}` not found. Run `init` first.",
+            2,
+        )
 
     shards_dir = aoci_dir / SHARDS_DIR
     try:
@@ -4299,8 +4371,7 @@ def cmd_shard(args: argparse.Namespace) -> int:
             entries, _ = parse_code_volume(code_path)
             manifest = write_shards(aoci_dir, entries, depth=args.depth)
     except TimeoutError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 3
+        return _emit_cli_error(bool(getattr(args, "json", False)), str(exc), 3)
 
     if args.json:
         print(json.dumps(manifest, indent=2, ensure_ascii=False))
@@ -4334,12 +4405,11 @@ def cmd_restore(args: argparse.Namespace) -> int:
             max_bytes=args.max_bytes,
         )
     except TimeoutError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 3
+        return _emit_cli_error(bool(getattr(args, "json", False)), str(exc), 3)
 
     if not res.get("ok"):
-        print(f"ERROR: {res.get('error')}", file=sys.stderr)
-        return 2 if "not found" in str(res.get("error")) else 1
+        rc_err = 2 if "not found" in str(res.get("error")) else 1
+        return _emit_cli_error(bool(getattr(args, "json", False)), str(res.get("error")), rc_err, extra=res)
 
     if args.json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
@@ -4600,8 +4670,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
         live_test_imports=bool(getattr(args, "live_test_imports", False)),
     )
     if not brief.get("ok"):
-        print(f"ERROR: {brief.get('error')}", file=sys.stderr)
-        return 2
+        return _emit_cli_error(bool(getattr(args, "json", False)), str(brief.get("error")), 2, extra=brief)
 
     if args.json:
         print(json.dumps(brief, indent=2, ensure_ascii=False))
@@ -4757,12 +4826,13 @@ def build_static_import_graph(
     fps: Optional[Dict[str, Dict[str, Any]]] = None,
     aoci_dir: Optional[Path] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
+    custom_fn = None if extract_file_outline is _parsers.extract_file_outline else extract_file_outline
     return _parsers.build_static_import_graph(
         root,
         discovered_files,
         fps=fps,
         aoci_dir=aoci_dir,
-        outline_fn=extract_file_outline,
+        outline_fn=custom_fn,
     )
 
 
@@ -4933,8 +5003,11 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
                     print("# All pending files are already indexed; no remaining batches to scaffold.")
                 return 0
             if args.batch < 1 or args.batch > len(batches):
-                print(f"ERROR: Batch {args.batch} out of range (1..{len(batches)}).", file=sys.stderr)
-                return 2
+                return _emit_cli_error(
+                    bool(getattr(args, "json", False)),
+                    f"Batch {args.batch} out of range (1..{len(batches)}).",
+                    2,
+                )
             selected = batches[args.batch - 1]
             if not selected:
                 rem_list = (batch_plan_meta or {}).get("remaining_batches", [])
@@ -4964,8 +5037,11 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
 
     targets = list(dict.fromkeys(targets))
     if not targets:
-        print("ERROR: Specify file paths, `--unindexed`, or `--batch N`.", file=sys.stderr)
-        return 2
+        return _emit_cli_error(
+            bool(getattr(args, "json", False)),
+            "Specify file paths, `--unindexed`, or `--batch N`.",
+            2,
+        )
 
     drafts = scaffold_entries(root, targets, max_bytes=args.max_bytes, precomputed_fps=precomputed_fps)
     out_path_str: Optional[str] = None
@@ -5309,6 +5385,7 @@ def cmd_apply_sync(args: argparse.Namespace) -> int:
         allow_sha_fallback=bool(getattr(args, "allow_sha_fallback", False)),
         migrate_renames=bool(getattr(args, "migrate_renames", False)),
         exact_only=bool(getattr(args, "exact_only", False)),
+        no_rewrite_refs=bool(getattr(args, "no_rewrite_refs", False)),
         ack_paths=getattr(args, "ack_path", None) or [],
         ack_impl_only=bool(getattr(args, "ack_impl_only", False)),
         reviewed=bool(getattr(args, "reviewed", False)),
@@ -5320,6 +5397,7 @@ def cmd_apply_sync(args: argparse.Namespace) -> int:
         drop_malformed=bool(getattr(args, "drop_malformed", False)),
         verify=not bool(getattr(args, "no_verify", False)),
         full_verify=bool(getattr(args, "full_verify", False)),
+        max_bytes=getattr(args, "max_bytes", None),
         dry_run=bool(getattr(args, "dry_run", False)),
     )
     if getattr(args, "json", False):
@@ -5947,6 +6025,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_as.add_argument("--allow-sha-fallback", action="store_true", help="Pass `--allow-sha-fallback` to `restore`")
     p_as.add_argument("--migrate-renames", action="store_true", help="Migrate exact and similar renames")
     p_as.add_argument("--exact-only", action="store_true", help="Pass `--exact-only` to `migrate-renames`")
+    p_as.add_argument("--no-rewrite-refs", action="store_true", help="Pass `--no-rewrite-refs` to `migrate-renames`")
     p_as.add_argument("--ack-path", action="append", help="Path to acknowledge via `ack` (repeatable; requires --reviewed)")
     p_as.add_argument("--ack-impl-only", action="store_true", help="Acknowledge `impl_only` modified files (requires --reviewed)")
     p_as.add_argument("--reviewed", action="store_true", help="Confirm acknowledged files were read and verified")
@@ -5958,6 +6037,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_as.add_argument("--drop-malformed", action="store_true", help="Allow dropping pre-existing malformed lines")
     p_as.add_argument("--no-verify", action="store_true", help="Skip trailing `verify` check")
     p_as.add_argument("--full-verify", action="store_true", help="Run full `verify` instead of `verify --fast`")
+    p_as.add_argument("--max-bytes", type=int, default=None, help="Override max source file size in bytes across stages")
     p_as.add_argument("--dry-run", action="store_true", help="Preview mutating stages without writing to disk")
     p_as.add_argument("--json", action="store_true", help="Output JSON")
     p_as.set_defaults(func=cmd_apply_sync)
@@ -5979,7 +6059,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    configure_utf8_streams()
+    configure_utf8_streams(include_stdin=(argv is None))
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

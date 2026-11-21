@@ -124,7 +124,7 @@ def _load_outline_cache(root: Path) -> Dict[str, Dict[str, Any]]:
     if not cache_path.is_file():
         return {}
     try:
-        loaded = json.loads(cache_path.read_text(encoding="utf-8", errors="replace"))
+        loaded = json.loads(cache_path.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError, TypeError):
         return {}
     if not isinstance(loaded, dict):
@@ -137,6 +137,30 @@ def _load_outline_cache(root: Path) -> Dict[str, Dict[str, Any]]:
             return {}
     files = loaded.get("files")
     return files if isinstance(files, dict) else {}
+
+
+def is_outline_record_fresh(root: Path, rel: str, rec: Any) -> bool:
+    """
+    Verify a cached `outline_cache.json` entry still matches the file's `(st_mtime_ns, st_size)` on disk.
+    Synthetic test fixtures without `(mtime_ns, bytes)` metadata are treated as fresh.
+    """
+    if not isinstance(rec, Mapping):
+        return False
+    if "mtime_ns" not in rec or "bytes" not in rec:
+        return True
+    full = root / rel
+    if not _is_within_root(root, full):
+        return False
+    try:
+        st = os.lstat(full)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return False
+    try:
+        return st.st_mtime_ns == int(rec["mtime_ns"]) and st.st_size == int(rec["bytes"])
+    except (TypeError, ValueError):
+        return False
 
 
 def _extract_cached_imports(rec: Any) -> Tuple[List[str], List[str]]:
@@ -566,7 +590,7 @@ def find_impacted_tests(
         ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
         for test_rel in sorted(test_entries.keys()):
             cached_rec = cache_files.get(test_rel) if cache_files else None
-            if cached_rec is not None:
+            if cached_rec is not None and (not live_imports or is_outline_record_fresh(root, test_rel, cached_rec)):
                 imports, py_members = _extract_cached_imports(cached_rec)
             elif live_imports:
                 imports, py_members = _extract_live_test_imports(root, test_rel)

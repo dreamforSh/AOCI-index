@@ -22,27 +22,50 @@ def _glob_to_regex(glob: str) -> str:
     while i < n:
         c = glob[i]
         if c == "*":
-            if glob[i : i + 3] == "**/":
+            prev_is_slash = (i == 0) or (glob[i - 1] == "/")
+            if prev_is_slash and glob[i : i + 3] == "**/":
                 out.append("(?:.*/)?")
                 i += 3
                 continue
             if glob[i : i + 2] == "**":
-                out.append(".*")
+                next_is_end_or_slash = (i + 2 >= n) or (glob[i + 2] == "/")
+                out.append(".*" if (prev_is_slash and next_is_end_or_slash) else "[^/]*")
                 i += 2
                 continue
             out.append("[^/]*")
         elif c == "?":
             out.append("[^/]")
         elif c == "[":
-            j = glob.find("]", i + 1)
-            if j == -1:
+            k = i + 1
+            neg_cls = False
+            if k < n and glob[k] in ("!", "^"):
+                neg_cls = True
+                k += 1
+            cls_start = k
+            if k < n and glob[k] == "]":
+                k += 1
+            while k < n:
+                if glob[k] == "\\" and k + 1 < n:
+                    k += 2
+                    continue
+                if glob[k] == "]":
+                    break
+                k += 1
+            if k >= n:
                 out.append(re.escape(c))
             else:
-                body = glob[i + 1 : j]
-                if body.startswith("!"):
-                    body = "^" + body[1:]
-                out.append(f"[{body}]")
-                i = j
+                raw_body = glob[cls_start:k]
+                if raw_body.startswith("]"):
+                    safe_body = r"\]" + raw_body[1:]
+                else:
+                    safe_body = raw_body
+                cand_cls = f"[{'^' if neg_cls else ''}{safe_body}]"
+                try:
+                    re.compile(cand_cls)
+                    out.append(cand_cls)
+                except re.error:
+                    out.append(re.escape(glob[i : k + 1]))
+                i = k
         elif c == "\\" and i + 1 < n:
             i += 1
             out.append(re.escape(glob[i]))
@@ -85,7 +108,11 @@ class IgnoreMatcher:
         anchored = body.startswith("/") or "/" in body.lstrip("/")
         body = body.lstrip("/")
         prefix = "^" if anchored else "^(?:.*/)?"
-        self._rules.append((re.compile(prefix + _glob_to_regex(body) + "$"), negate, dir_only))
+        try:
+            compiled = re.compile(prefix + _glob_to_regex(body) + "$")
+        except re.error:
+            compiled = re.compile(prefix + re.escape(body) + "$")
+        self._rules.append((compiled, negate, dir_only))
         self.patterns.append(raw.strip())
         self._dir_cache.clear()
         self._fast_file_rx = None
@@ -157,7 +184,7 @@ def _read_ignore_lines(path: Path) -> List[str]:
     if not path.exists():
         return []
     try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
     except OSError:
         return []
 

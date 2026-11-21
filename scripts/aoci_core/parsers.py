@@ -20,6 +20,7 @@ from .constants import (
     atomic_write_text,
     compute_size_tier,
     normalize_relpath,
+    strip_utf8_bom_bytes,
 )
 
 _JS_REGEX_PREV_CHARS: Set[str] = set("=([!&|?:;{},~^+-*%>")
@@ -374,28 +375,57 @@ def _ast_type_str(node: Optional[ast.AST]) -> str:
     return type(node).__name__
 
 
+def _ast_default_str(node: Optional[ast.AST]) -> str:
+    if node is None:
+        return ""
+    if isinstance(node, ast.Constant):
+        return repr(node.value)[:64]
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _ast_type_str(node)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign = "-" if isinstance(node.op, ast.USub) else "+"
+        inner = _ast_default_str(node.operand)
+        return f"{sign}{inner}" if inner else ast.dump(node)[:64]
+    return ast.dump(node)[:96]
+
+
 def _py_fn_sig(fn_node: ast.AST) -> str:
     args_obj = getattr(fn_node, "args", None)
     if args_obj is None:
         return getattr(fn_node, "name", "")
 
-    def _fmt_arg(a: ast.arg) -> str:
+    def _fmt_arg(a: ast.arg, default_node: Optional[ast.AST] = None) -> str:
         ann = _ast_type_str(a.annotation)
-        return f"{a.arg}:{ann}" if ann else a.arg
+        base = f"{a.arg}:{ann}" if ann else a.arg
+        if default_node is not None:
+            return f"{base}={_ast_default_str(default_node)}"
+        return base
 
-    posonly = [_fmt_arg(a) for a in getattr(args_obj, "posonlyargs", ())]
-    reg = [_fmt_arg(a) for a in getattr(args_obj, "args", ())]
+    raw_posonly = list(getattr(args_obj, "posonlyargs", ()))
+    raw_reg = list(getattr(args_obj, "args", ()))
+    pos_and_reg = raw_posonly + raw_reg
+    raw_defaults = list(getattr(args_obj, "defaults", ()))
+    pad_none = max(0, len(pos_and_reg) - len(raw_defaults))
+    aligned_defaults: List[Optional[ast.AST]] = [None] * pad_none + raw_defaults[-len(pos_and_reg) :] if pos_and_reg else []
+
+    posonly = [_fmt_arg(a, aligned_defaults[idx]) for idx, a in enumerate(raw_posonly)]
+    reg = [_fmt_arg(a, aligned_defaults[len(raw_posonly) + idx]) for idx, a in enumerate(raw_reg)]
     parts: List[str] = list(posonly)
     if posonly:
         parts.append("/")
     parts.extend(reg)
     vararg = getattr(args_obj, "vararg", None)
-    kwonlyargs = getattr(args_obj, "kwonlyargs", ())
+    kwonlyargs = list(getattr(args_obj, "kwonlyargs", ()))
+    kw_defaults = list(getattr(args_obj, "kw_defaults", ()))
     if vararg is not None:
         parts.append("*" + _fmt_arg(vararg))
     elif kwonlyargs:
         parts.append("*")
-    parts.extend(_fmt_arg(a) for a in kwonlyargs)
+    for idx, a in enumerate(kwonlyargs):
+        kw_def = kw_defaults[idx] if idx < len(kw_defaults) else None
+        parts.append(_fmt_arg(a, kw_def))
     kwarg = getattr(args_obj, "kwarg", None)
     if kwarg is not None:
         parts.append("**" + _fmt_arg(kwarg))
@@ -410,7 +440,7 @@ def _py_fn_sig(fn_node: ast.AST) -> str:
 
 
 def _iter_py_import_nodes(body: Sequence[ast.AST], _depth: int = 0) -> Iterator[ast.AST]:
-    """Yield top-level Import/ImportFrom nodes plus those inside nested top-level If/Try blocks."""
+    """Yield top-level Import/ImportFrom nodes plus those inside nested If/Try/With/Match blocks."""
     if _depth >= 4:
         return
     for node in body:
@@ -433,6 +463,11 @@ def _iter_py_import_nodes(body: Sequence[ast.AST], _depth: int = 0) -> Iterator[
                 sub_lists.append(handler.body)
             for stmts in sub_lists:
                 yield from _iter_py_import_nodes(stmts, _depth + 1)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            yield from _iter_py_import_nodes(node.body, _depth + 1)
+        elif type(node).__name__ == "Match":
+            for case_node in getattr(node, "cases", ()):
+                yield from _iter_py_import_nodes(getattr(case_node, "body", ()), _depth + 1)
 
 
 def _collapse_ws(text: str) -> str:
@@ -1296,7 +1331,7 @@ def _extract_cpp_rich_signatures(src: str, imports_out: List[str], sigs_out: Lis
 
 
 def _extract_rich_non_py_signatures(norm_bytes: bytes, ext_l: str) -> Optional[Dict[str, List[str]]]:
-    text = norm_bytes.decode("utf-8", errors="replace")
+    text = strip_utf8_bom_bytes(norm_bytes).decode("utf-8", errors="replace")
     imports: List[str] = []
     sigs: List[str] = []
     if ext_l in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}:
@@ -1360,7 +1395,15 @@ def _extract_py_outline_from_tree(
                     imports.append(f"{dots}{alias.name}")
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = [a.arg for a in node.args.args]
+            args: List[str] = [a.arg for a in getattr(node.args, "posonlyargs", ())]
+            args.extend(a.arg for a in node.args.args)
+            if node.args.vararg is not None:
+                args.append(f"*{node.args.vararg.arg}")
+            elif getattr(node.args, "kwonlyargs", ()):
+                args.append("*")
+            args.extend(a.arg for a in getattr(node.args, "kwonlyargs", ()))
+            if node.args.kwarg is not None:
+                args.append(f"**{node.args.kwarg.arg}")
             prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
             route_tag = _py_route_decorator(node)
             symbols.append(f"{prefix} {node.name}({', '.join(args[:6])}){route_tag} [L{node.lineno}]")
@@ -1380,10 +1423,12 @@ def _extract_outline_from_bytes(
     rel: str,
     max_items: int = 30,
     preparsed_py_tree: Optional[ast.Module] = None,
+    max_imports: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Pure byte-buffer implementation of `extract_file_outline` (expects LF-normalized bytes)."""
-    line_count = 0 if not norm_bytes else norm_bytes.count(b"\n") + (0 if norm_bytes.endswith(b"\n") else 1)
-    text = norm_bytes.decode("utf-8", errors="replace")
+    clean_bytes = strip_utf8_bom_bytes(norm_bytes)
+    line_count = 0 if not clean_bytes else clean_bytes.count(b"\n") + (0 if clean_bytes.endswith(b"\n") else 1)
+    text = clean_bytes.decode("utf-8", errors="replace")
     lines = text[:-1].split("\n") if text.endswith("\n") else (text.split("\n") if text else [])
     ext = ext.lower()
 
@@ -1527,7 +1572,9 @@ def _extract_outline_from_bytes(
             elif ext == ".md" and s.startswith(("# ", "## ")):
                 symbols.append(f"{s} [L{idx}]")
 
-    dedup_imp = list(dict.fromkeys(imports))[:max_items]
+    imp_limit = max_items if max_imports is None else max_imports
+    dedup_all_imp = list(dict.fromkeys(imports))
+    dedup_imp = dedup_all_imp if imp_limit <= 0 else dedup_all_imp[:imp_limit]
     dedup_sym = list(dict.fromkeys(symbols))[:max_items]
 
     out_obj: Dict[str, Any] = {
@@ -1538,7 +1585,8 @@ def _extract_outline_from_bytes(
         "symbols": dedup_sym,
     }
     if py_from_members:
-        out_obj["py_from_members"] = list(dict.fromkeys(py_from_members))[: max_items * 4]
+        dedup_members = list(dict.fromkeys(py_from_members))
+        out_obj["py_from_members"] = dedup_members if imp_limit <= 0 else dedup_members[: max(max_items, imp_limit) * 4]
     return out_obj
 
 
@@ -1583,12 +1631,24 @@ def _compute_py_sig_hash_from_tree(tree: ast.Module) -> str:
             members.sort()
             py_sigs.append(f"{cls_dec_prefix}class {node.name}({bases})[{';'.join(members)}]")
         elif isinstance(node, ast.Assign):
-            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
-                py_sigs.append(_py_all_sig(node.value))
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    if t.id == "__all__":
+                        py_sigs.append(_py_all_sig(node.value))
+                    elif not t.id.startswith("_") and any(c.isupper() for c in t.id) and t.id == t.id.upper():
+                        py_sigs.append(f"const:{t.id}={_ast_default_str(node.value)}")
         elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            if isinstance(node.target, ast.Name):
                 ann = _ast_type_str(node.annotation)
-                py_sigs.append(f"__all__[{ann}]:{_py_all_sig(node.value)}")
+                if node.target.id == "__all__":
+                    py_sigs.append(f"__all__[{ann}]:{_py_all_sig(node.value)}")
+                elif not node.target.id.startswith("_"):
+                    val_part = f"={_ast_default_str(node.value)}" if node.value is not None else ""
+                    py_sigs.append(f"ann:{node.target.id}:{ann}{val_part}")
+        elif type(node).__name__ == "TypeAlias":
+            ta_name = _ast_type_str(getattr(node, "name", None))
+            ta_val = _ast_type_str(getattr(node, "value", None))
+            py_sigs.append(f"typealias:{ta_name}={ta_val}")
     payload = {"i": sorted(set(py_imps)), "s": sorted(py_sigs)}
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:16]
@@ -1599,9 +1659,11 @@ def extract_outline_and_sig_hash_from_bytes(
     ext: str,
     rel: str = "",
     max_items: int = 30,
+    max_imports: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
     """Extract outline and `sig_hash` together (reusing one `ast.parse` for Python files)."""
     ext_l = ext.lower()
+    norm_bytes = strip_utf8_bom_bytes(norm_bytes)
     if b"\r\n" in norm_bytes:
         norm_bytes = norm_bytes.replace(b"\r\n", b"\n")
     tree: Optional[ast.Module] = None
@@ -1615,7 +1677,14 @@ def extract_outline_and_sig_hash_from_bytes(
             sig_hash = None
     elif ext_l in SIG_HASH_EXTS:
         sig_hash = compute_signature_hash_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}")
-    out = _extract_outline_from_bytes(norm_bytes, ext_l, rel, max_items=max_items, preparsed_py_tree=tree)
+    out = _extract_outline_from_bytes(
+        norm_bytes,
+        ext_l,
+        rel,
+        max_items=max_items,
+        preparsed_py_tree=tree,
+        max_imports=max_imports,
+    )
     return out, sig_hash
 
 
@@ -1624,6 +1693,7 @@ def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = ""
     ext_l = ext.lower()
     if ext_l not in SIG_HASH_EXTS:
         return None
+    norm_bytes = strip_utf8_bom_bytes(norm_bytes)
     if b"\r\n" in norm_bytes:
         norm_bytes = norm_bytes.replace(b"\r\n", b"\n")
 
@@ -1640,7 +1710,7 @@ def compute_signature_hash_from_bytes(norm_bytes: bytes, ext: str, rel: str = ""
         encoded = json.dumps(rich_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]
 
-    out = _extract_outline_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}", max_items=200)
+    out = _extract_outline_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}", max_items=200, max_imports=0)
     norm_syms = sorted(re.sub(r"\s*\[L\d+\]\s*$", "", sym).strip() for sym in out["symbols"])
     payload = {"i": sorted(set(out["imports"])), "s": norm_syms}
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1659,11 +1729,22 @@ def compute_signature_hash(full_path: Path, rel: str = "") -> Optional[str]:
     return compute_signature_hash_from_bytes(norm, ext_l, rel or full_path.name)
 
 
-def extract_file_outline(full_path: Path, rel: str, max_items: int = 30) -> Dict[str, Any]:
+def extract_file_outline(
+    full_path: Path,
+    rel: str,
+    max_items: int = 30,
+    max_imports: Optional[int] = None,
+) -> Dict[str, Any]:
     """Lightweight static outline extractor (imports + top-level symbols/signatures)."""
     raw_bytes = full_path.read_bytes()
     norm_bytes = raw_bytes.replace(b"\r\n", b"\n") if b"\r\n" in raw_bytes else raw_bytes
-    return _extract_outline_from_bytes(norm_bytes, full_path.suffix.lower(), rel, max_items=max_items)
+    return _extract_outline_from_bytes(
+        norm_bytes,
+        full_path.suffix.lower(),
+        rel,
+        max_items=max_items,
+        max_imports=max_imports,
+    )
 
 
 def _clean_symbol_names(raw_symbols: Sequence[str], limit: int = 4) -> List[str]:
@@ -1707,7 +1788,7 @@ def _load_tsconfig_file(root: Path, cfg_path: Path, seen: Set[Path], depth: int 
     seen.add(resolved)
 
     try:
-        raw = cfg_path.read_text(encoding="utf-8", errors="replace")
+        raw = cfg_path.read_text(encoding="utf-8-sig", errors="replace")
         clean = re.sub(r",\s*([}\]])", r"\1", _strip_js_comments(raw))
         data = json.loads(clean)
     except (OSError, ValueError):
@@ -2178,6 +2259,87 @@ def _python_candidate_prefixes(cur_dir: str, subpkg_roots: Sequence[str]) -> Lis
     return prefixes
 
 
+def invalidate_outline_cache(
+    root: Path,
+    aoci_dir: Path,
+    touched_paths: Sequence[str] = (),
+    pruned_paths: Sequence[str] = (),
+    rename_map: Optional[Mapping[str, str]] = None,
+) -> None:
+    """
+    Synchronize `.aoci/.cache/outline_cache.json` on writes:
+      - Always delete `pruned_paths`.
+      - Migrate `rename_map` keys.
+      - Evict `touched_paths` ONLY when their cached `(mtime_ns, bytes)` no longer matches disk
+        (preserving fresh outlines populated immediately prior by `scaffold`).
+    """
+    cache_path = aoci_dir / CACHE_DIR / OUTLINE_CACHE
+    if not cache_path.is_file():
+        return
+    if not touched_paths and not pruned_paths and not rename_map:
+        return
+    try:
+        loaded = json.loads(cache_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        return
+    if not isinstance(loaded, dict) or int(loaded.get("schema_version", 0) or 0) != 2:
+        return
+    files_obj = loaded.get("files")
+    if not isinstance(files_obj, dict):
+        return
+
+    changed = False
+    if rename_map:
+        staged: Dict[str, Any] = {}
+        for old_p, new_p in rename_map.items():
+            old_norm = normalize_relpath(old_p)
+            new_norm = normalize_relpath(new_p)
+            if old_norm in files_obj:
+                staged[new_norm] = files_obj.pop(old_norm)
+                changed = True
+        for new_norm, rec in staged.items():
+            if isinstance(rec, dict) and isinstance(rec.get("outline"), dict):
+                rec = dict(rec)
+                out_copy = dict(rec["outline"])
+                out_copy["path"] = new_norm
+                rec["outline"] = out_copy
+            files_obj[new_norm] = rec
+
+    for raw_del in pruned_paths:
+        norm_del = normalize_relpath(str(raw_del))
+        if norm_del in files_obj:
+            del files_obj[norm_del]
+            changed = True
+
+    for raw_p in touched_paths:
+        norm_p = normalize_relpath(str(raw_p))
+        rec = files_obj.get(norm_p)
+        if not isinstance(rec, dict):
+            continue
+        try:
+            st = os.lstat(root / norm_p)
+            is_fresh = (
+                stat.S_ISREG(st.st_mode)
+                and not stat.S_ISLNK(st.st_mode)
+                and st.st_mtime_ns == int(rec.get("mtime_ns", -1))
+                and st.st_size == int(rec.get("bytes", -1))
+            )
+        except (OSError, TypeError, ValueError):
+            is_fresh = False
+        if not is_fresh:
+            del files_obj[norm_p]
+            changed = True
+
+    if changed:
+        try:
+            atomic_write_text(
+                cache_path,
+                json.dumps({"schema_version": 2, "files": files_obj}, ensure_ascii=False, separators=(",", ":")),
+            )
+        except OSError:
+            pass
+
+
 def build_static_import_graph(
     root: Path,
     discovered_files: Sequence[str],
@@ -2190,7 +2352,10 @@ def build_static_import_graph(
     when needed) to resolve internal file-to-file imports across Python, JS/TS/Vue/Svelte, Go, Rust,
     Protobuf, and C/C++ (including monorepo nested configs).
     """
-    extractor = outline_fn or extract_file_outline
+    def _default_graph_extractor(full: Path, rel: str, max_items: int) -> Dict[str, Any]:
+        return extract_file_outline(full, rel, max_items=max_items, max_imports=0)
+
+    extractor = outline_fn or _default_graph_extractor
     known_set = set(discovered_files)
     ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
     go_cache: Dict[str, Tuple[str, str]] = {}

@@ -77,7 +77,24 @@ def _load_legacy_semantic_pool_json(path: Path) -> Dict[str, Dict[str, str]]:
         return empty
 
 
-def _open_semantic_pool(db_path: Path, legacy_json: Optional[Path] = None) -> sqlite3.Connection:
+def _open_semantic_pool(
+    db_path: Path,
+    legacy_json: Optional[Path] = None,
+    *,
+    readonly: bool = False,
+) -> sqlite3.Connection:
+    if readonly:
+        try:
+            uri = db_path.resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        except (sqlite3.Error, ValueError, OSError):
+            conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
+        return conn
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=10.0)
     try:
@@ -149,7 +166,7 @@ def load_semantic_pool(root: Path, git_info: Dict[str, Any]) -> Dict[str, Dict[s
     if not db_path.is_file():
         return _load_legacy_semantic_pool_json(legacy_json)
     try:
-        with contextlib.closing(_open_semantic_pool(db_path)) as conn:
+        with contextlib.closing(_open_semantic_pool(db_path, readonly=True)) as conn:
             by_ps = {
                 f"{rel}\t{sha}": entry
                 for rel, sha, entry in conn.execute(
@@ -261,7 +278,11 @@ def _lookup_pool_entries(
     chunk_size = 400
     try:
         with contextlib.closing(
-            _open_semantic_pool(db_path, legacy_json=legacy_json if touch_lru else None)
+            _open_semantic_pool(
+                db_path,
+                legacy_json=legacy_json if touch_lru else None,
+                readonly=not touch_lru,
+            )
         ) as conn:
             for i in range(0, len(unique_ps_shas), chunk_size):
                 chunk = unique_ps_shas[i : i + chunk_size]
@@ -390,7 +411,7 @@ def pool_stats(root: Path, git_info: Dict[str, Any], max_entries: int = MAX_SEMA
     s_cnt = 0
     if exists:
         try:
-            with contextlib.closing(_open_semantic_pool(db_path)) as conn:
+            with contextlib.closing(_open_semantic_pool(db_path, readonly=True)) as conn:
                 ps_cnt = int(conn.execute("SELECT COUNT(*) FROM pool_by_path_sha").fetchone()[0])
                 s_cnt = int(conn.execute("SELECT COUNT(*) FROM pool_by_sha").fetchone()[0])
         except (sqlite3.Error, OSError):
@@ -516,11 +537,14 @@ def export_semantic_pool(
     use_gz = out_path.name.lower().endswith(".gz")
     payload_bytes = gzip.compress(raw_json) if use_gz else raw_json
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = out_path.with_name(f"{out_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with tmp_path.open("wb") as fh:
-        fh.write(payload_bytes)
-    tmp_path.replace(out_path)
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = out_path.with_name(f"{out_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        with tmp_path.open("wb") as fh:
+            fh.write(payload_bytes)
+        tmp_path.replace(out_path)
+    except OSError as exc:
+        return {"ok": False, "error": f"Cannot write pool bundle `{out_path}`: {exc}"}
     return {
         "ok": True,
         "output_path": str(out_path),
@@ -597,19 +621,22 @@ def import_semantic_pool(
     db_path = semantic_pool_path(root, git_info)
     legacy_json = _legacy_semantic_pool_json_path(root, git_info)
     if not dry_run and (ps_rows or s_rows):
-        with contextlib.closing(_open_semantic_pool(db_path, legacy_json=legacy_json)) as conn:
-            with conn:
-                if ps_rows:
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO pool_by_path_sha (relpath, sha256, entry, last_used) VALUES (?, ?, ?, ?)",
-                        ps_rows,
-                    )
-                if s_rows:
-                    conn.executemany(
-                        "INSERT OR REPLACE INTO pool_by_sha (sha256, entry, last_used) VALUES (?, ?, ?)",
-                        s_rows,
-                    )
-                _evict_pool_excess(conn, max_entries)
+        try:
+            with contextlib.closing(_open_semantic_pool(db_path, legacy_json=legacy_json)) as conn:
+                with conn:
+                    if ps_rows:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO pool_by_path_sha (relpath, sha256, entry, last_used) VALUES (?, ?, ?, ?)",
+                            ps_rows,
+                        )
+                    if s_rows:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO pool_by_sha (sha256, entry, last_used) VALUES (?, ?, ?)",
+                            s_rows,
+                        )
+                    _evict_pool_excess(conn, max_entries)
+        except (sqlite3.Error, OSError) as exc:
+            return {"ok": False, "error": f"Cannot write to semantic pool `{db_path}`: {exc}"}
 
     return {
         "ok": True,

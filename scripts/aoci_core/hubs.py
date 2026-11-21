@@ -18,12 +18,14 @@ from .constants import (
     _is_within_root,
     atomic_write_text,
     normalize_relpath,
+    strip_utf8_bom_bytes,
     utc_now_iso,
 )
 from .parsers import (
     _CLEAN_SYM_RE,
     _JS_REGEX_PREV_CHARS,
     _JS_REGEX_PREV_KW,
+    _SFC_SCRIPT_RE,
     _find_matching_delim,
     _skip_js_regex,
     _skip_string_literal,
@@ -79,6 +81,8 @@ _BRACE_SPAN_EXTS: Set[str] = {
     ".cjs",
     ".mts",
     ".cts",
+    ".vue",
+    ".svelte",
     ".go",
     ".rs",
     ".java",
@@ -106,6 +110,8 @@ _JS_SPAN_EXTS: Set[str] = {
     ".cjs",
     ".mts",
     ".cts",
+    ".vue",
+    ".svelte",
 }
 
 _HASH_COMMENT_RX = re.compile(r'"[^"\\]*(?:\\[\s\S][^"\\]*)*(?:"|$)|#[^\n]*')
@@ -124,7 +130,7 @@ def _count_norm_lines(norm_bytes: bytes) -> int:
 
 def _read_norm_bytes(full_path: Path) -> Optional[bytes]:
     try:
-        raw = full_path.read_bytes()
+        raw = strip_utf8_bom_bytes(full_path.read_bytes())
     except OSError:
         return None
     return raw.replace(b"\r\n", b"\n") if b"\r\n" in raw else raw
@@ -390,7 +396,14 @@ def _extract_outline_spans(full_path: Path, rel: str, ext: str) -> List[Dict[str
         norm_bytes = _read_norm_bytes(full_path)
         if norm_bytes is not None:
             raw_text = norm_bytes.decode("utf-8", errors="replace")
-            if ext in _JS_SPAN_EXTS:
+            if ext in (".vue", ".svelte"):
+                # Blank non-newline characters outside `<script>...</script>` so script symbols never bleed into <template>/<style>
+                chars = ["\n" if ch == "\n" else " " for ch in raw_text]
+                for m_sfc in _SFC_SCRIPT_RE.finditer(raw_text):
+                    s_i, e_i = m_sfc.span(1)
+                    chars[s_i:e_i] = list(raw_text[s_i:e_i])
+                clean_src = _strip_js_comments("".join(chars))
+            elif ext in _JS_SPAN_EXTS:
                 clean_src = _strip_js_comments(raw_text)
             elif ext in (".graphql", ".gql"):
                 clean_src = _strip_hash_comments(raw_text)
@@ -479,7 +492,7 @@ def parse_hubs_volume(hubs_path: Path) -> Tuple[List[Dict[str, Any]], List[Tuple
         return [], []
     by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
     malformed: List[Tuple[int, str]] = []
-    text = hubs_path.read_text(encoding="utf-8", errors="replace")
+    text = hubs_path.read_text(encoding="utf-8-sig", errors="replace")
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#") or (line.startswith("===") and line.endswith("===")):
@@ -821,7 +834,7 @@ def sync_manifest_hubs_volume(aoci_dir: Path) -> None:
         return
     hubs_exists = (Path(aoci_dir) / HUBS_FILE).is_file()
     try:
-        raw = manifest_path.read_text(encoding="utf-8", errors="replace")
+        raw = manifest_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return
     lines = raw.splitlines()
@@ -846,11 +859,12 @@ def _refresh_spans_in_records(
     root_res: Path,
     records: List[Dict[str, Any]],
     target_paths: Set[str],
+    pruned_out: Optional[List[str]] = None,
 ) -> List[str]:
     relevant_paths = {rec["relpath"] for rec in records} & target_paths
     if not relevant_paths:
         return []
-    span_lookup: Dict[str, Dict[str, Tuple[int, int]]] = {}
+    span_lookup: Dict[str, Tuple[Optional[Dict[str, Tuple[int, int]]], bool]] = {}
     for rel in sorted(relevant_paths):
         full = root_res / rel
         if not _is_within_root(root_res, full):
@@ -861,19 +875,27 @@ def _refresh_spans_in_records(
                 continue
         except OSError:
             continue
-        spans = extract_symbol_spans(full, rel)
-        if spans:
-            span_lookup[rel] = {sp["symbol"]: (int(sp["start"]), int(sp["end"])) for sp in spans}
+        span_lookup[rel] = _extract_live_symbol_span_map(full, rel)
     if not span_lookup:
         return []
     refreshed: List[str] = []
+    kept: List[Dict[str, Any]] = []
     for rec in records:
         rel = rec["relpath"]
-        sym_map = span_lookup.get(rel)
-        if not sym_map:
+        lookup_item = span_lookup.get(rel)
+        if lookup_item is None:
+            kept.append(rec)
+            continue
+        sym_map, clean_parse = lookup_item
+        if not clean_parse or sym_map is None:
+            kept.append(rec)
             continue
         new_span = sym_map.get(rec["symbol"])
         if new_span is None:
+            if pruned_out is not None:
+                pruned_out.append(f"{rel}#{rec['symbol']}")
+            else:
+                kept.append(rec)
             continue
         new_start, new_end = new_span
         old_start, old_end = int(rec["start"]), int(rec["end"])
@@ -882,13 +904,16 @@ def _refresh_spans_in_records(
             rec["end"] = new_end
             rec["line"] = format_hub_entry(rel, rec["symbol"], new_start, new_end, rec["f"], rec["s"])
             refreshed.append(f"{rel}#{rec['symbol']} [L{old_start}-L{old_end}]->[L{new_start}-L{new_end}]")
+        kept.append(rec)
+    if pruned_out is not None and len(kept) != len(records):
+        records[:] = kept
     return refreshed
 
 
 def refresh_hub_spans_for_paths(root: Path, aoci_dir: Path, paths: Sequence[str]) -> List[str]:
     """
-    Refresh `[Lstart-Lend]` spans in `.aoci/aoci.hubs.txt` for matching `<relpath>#<symbol>` entries
-    whenever symbol line numbers shift on disk. Caller must hold any index lock if applicable.
+    Refresh `[Lstart-Lend]` spans (and prune deleted symbols in cleanly-parsed modified files)
+    in `.aoci/aoci.hubs.txt`. Caller must hold any index lock if applicable.
     """
     hubs_path = Path(aoci_dir) / HUBS_FILE
     if not hubs_path.is_file() or not paths:
@@ -897,9 +922,11 @@ def refresh_hub_spans_for_paths(root: Path, aoci_dir: Path, paths: Sequence[str]
     if not records or malformed:
         return []
     target_set = {normalize_relpath(str(p)) for p in paths if str(p).strip()}
-    refreshed = _refresh_spans_in_records(Path(root).resolve(), records, target_set)
-    if refreshed:
+    pruned_syms: List[str] = []
+    refreshed = _refresh_spans_in_records(Path(root).resolve(), records, target_set, pruned_out=pruned_syms)
+    if refreshed or pruned_syms:
         write_hubs_volume(hubs_path, records)
+        sync_manifest_hubs_volume(aoci_dir)
     return refreshed
 
 
@@ -910,8 +937,9 @@ def sync_hubs_on_upsert(
     pruned_paths: Sequence[str],
 ) -> Dict[str, List[str]]:
     """
-    Keep `.aoci/aoci.hubs.txt` aligned during `upsert`: drop entries for pruned files and
-    refresh `[Lstart-Lend]` spans for upserted files. Caller must hold `.aoci/.lock`.
+    Keep `.aoci/aoci.hubs.txt` aligned during `upsert` / `restore`: drop entries for pruned files,
+    prune deleted symbols inside cleanly-parsed upserted files, and refresh `[Lstart-Lend]` spans.
+    Caller must hold `.aoci/.lock`.
     """
     hubs_path = Path(aoci_dir) / HUBS_FILE
     if not hubs_path.is_file() or (not upserted_paths and not pruned_paths):
@@ -930,7 +958,11 @@ def sync_hubs_on_upsert(
             kept.append(rec)
 
     upserted_set = {normalize_relpath(str(p)) for p in upserted_paths if str(p).strip()} - pruned_set
-    refreshed = _refresh_spans_in_records(Path(root).resolve(), kept, upserted_set) if upserted_set else []
+    refreshed = (
+        _refresh_spans_in_records(Path(root).resolve(), kept, upserted_set, pruned_out=pruned_labels)
+        if upserted_set
+        else []
+    )
 
     if pruned_labels or refreshed:
         write_hubs_volume(hubs_path, kept)

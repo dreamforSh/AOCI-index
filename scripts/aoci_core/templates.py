@@ -13,7 +13,10 @@ def parse_manifest_field(aoci_dir: Path, prefix: str) -> str:
     manifest_path = aoci_dir / MANIFEST_FILE
     if not manifest_path.exists():
         return ""
-    lines = manifest_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        lines = manifest_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return ""
     for idx, line in enumerate(lines):
         if line.startswith(prefix):
             parts: List[str] = []
@@ -43,7 +46,11 @@ def parse_declared_domains(aoci_dir: Path) -> Dict[str, str]:
         return {}
     domains: Dict[str, str] = {}
     in_domain_section = False
-    for raw in meta_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    try:
+        meta_lines = meta_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return {}
+    for raw in meta_lines:
         line = raw.strip()
         if re.match(r"^#\s*D\s*\(Domain", line, re.IGNORECASE):
             in_domain_section = True

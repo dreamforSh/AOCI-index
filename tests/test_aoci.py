@@ -2176,6 +2176,7 @@ class Phase1FixesTests(RepoTestCase):
                 "aoci_prepare_sync",
                 "aoci_apply_sync",
                 "aoci_symbol",
+                "aoci_install_git_hooks",
             },
         )
         for t_name, t_spec in tools.items():
@@ -3931,5 +3932,8 @@ if __name__ == "__main__":
     from test_ext_pack import TaskPackTests  # noqa: E401, F401
     from test_ext_tests import TestImpactTests  # noqa: E401, F401
     from test_ext_zoom import HubZoomTests  # noqa: E402, F401
+    from test_p0_p1_fixes import P0P1FixesTests  # noqa: E402, F401
+    from test_v15_improvements import V15ImprovementsTests  # noqa: E402, F401
+    from test_v16_optimizations import V16OptimizationsTests  # noqa: E402, F401
 
     unittest.main(verbosity=2)

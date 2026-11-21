@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import gzip
 import hashlib
 import io
 import json
@@ -19,6 +20,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 SKIP_DIR_NAMES = {
     "__pycache__",
+    "_skill_bundle",
+    "site-packages",
     "tests",
     ".git",
     ".hg",
@@ -59,24 +62,42 @@ def normalize_tag_version(tag: str) -> str:
     return ver
 
 
+def _accepted_versions_for_tag(tag: str) -> Tuple[str, List[str]]:
+    raw = tag.strip()
+    if raw.startswith("v"):
+        raw = raw[1:]
+    raw_no_build = raw.split("+", 1)[0]
+    base = normalize_tag_version(tag)
+    accepted = [base]
+    if raw_no_build and raw_no_build not in accepted:
+        accepted.append(raw_no_build)
+    # PEP 440 normalization for prereleases (e.g. 1.5.0-rc.1 -> 1.5.0rc1, 1.5.0-alpha.2 -> 1.5.0a2)
+    pep440 = re.sub(r"-(?:alpha|a)\.?(\d+)$", r"a\1", raw_no_build, flags=re.IGNORECASE)
+    pep440 = re.sub(r"-(?:beta|b)\.?(\d+)$", r"b\1", pep440, flags=re.IGNORECASE)
+    pep440 = re.sub(r"-(?:rc|c|pre|preview)\.?(\d+)$", r"rc\1", pep440, flags=re.IGNORECASE)
+    if pep440 and pep440 not in accepted:
+        accepted.append(pep440)
+    return base, accepted
+
+
 def verify_version_consistency(repo_root: Path, tag: str) -> str:
-    expected = normalize_tag_version(tag)
+    expected, accepted = _accepted_versions_for_tag(tag)
     if not expected:
         raise SystemExit(f"ERROR: Cannot derive semantic version from tag `{tag}`.")
 
-    pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8-sig")
     m_py = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject_text)
     if not m_py:
         raise SystemExit("ERROR: Could not parse `version` from `pyproject.toml`.")
     py_ver = m_py.group(1)
 
-    const_text = (repo_root / "scripts" / "aoci_core" / "constants.py").read_text(encoding="utf-8")
+    const_text = (repo_root / "scripts" / "aoci_core" / "constants.py").read_text(encoding="utf-8-sig")
     m_const = re.search(r'(?m)^AOCI_VERSION\s*=\s*"([^"]+)"', const_text)
     if not m_const:
         raise SystemExit("ERROR: Could not parse `AOCI_VERSION` from `scripts/aoci_core/constants.py`.")
     const_ver = m_const.group(1)
 
-    plugin_data = json.loads((repo_root / "resources" / "plugin.json").read_text(encoding="utf-8"))
+    plugin_data = json.loads((repo_root / "resources" / "plugin.json").read_text(encoding="utf-8-sig"))
     plugin_ver = str(plugin_data.get("version", ""))
 
     mismatches = []
@@ -85,8 +106,8 @@ def verify_version_consistency(repo_root: Path, tag: str) -> str:
         ("scripts/aoci_core/constants.py", const_ver),
         ("resources/plugin.json", plugin_ver),
     ):
-        if found != expected:
-            mismatches.append(f"{label}={found!r} (expected {expected!r})")
+        if found not in accepted:
+            mismatches.append(f"{label}={found!r} (expected one of {accepted!r})")
 
     if mismatches:
         raise SystemExit("ERROR: Release tag/version mismatch: " + ", ".join(mismatches))
@@ -125,28 +146,40 @@ def _file_mode(fpath: Path, data: bytes) -> int:
     return 0o644
 
 
+def _read_normalized_archive_bytes(fpath: Path) -> bytes:
+    data = fpath.read_bytes()
+    if b"\x00" not in data[:8192]:
+        if data.startswith(b"\xef\xbb\xbf#!"):
+            data = data[3:]
+        if b"\r\n" in data:
+            data = data.replace(b"\r\n", b"\n")
+    return data
+
+
 def build_skill_archives(repo_root: Path, outdir: Path, tag: str) -> Tuple[Path, Path]:
     outdir.mkdir(parents=True, exist_ok=True)
     files = collect_skill_files(repo_root, outdir)
     tar_path = outdir / f"aoci-index-{tag}-skill.tar.gz"
     zip_path = outdir / f"aoci-index-{tag}-skill.zip"
 
-    with tarfile.open(tar_path, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
-        for fpath, arcname in files:
-            data = fpath.read_bytes()
-            info = tarfile.TarInfo(name=arcname)
-            info.size = len(data)
-            info.mtime = DETERMINISTIC_MTIME
-            info.mode = _file_mode(fpath, data)
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            tf.addfile(info, io.BytesIO(data))
+    with tar_path.open("wb") as raw_fh:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw_fh, compresslevel=9, mtime=DETERMINISTIC_MTIME) as gz_fh:
+            with tarfile.open(fileobj=gz_fh, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+                for fpath, arcname in files:
+                    data = _read_normalized_archive_bytes(fpath)
+                    info = tarfile.TarInfo(name=arcname)
+                    info.size = len(data)
+                    info.mtime = DETERMINISTIC_MTIME
+                    info.mode = _file_mode(fpath, data)
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    tf.addfile(info, io.BytesIO(data))
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         for fpath, arcname in files:
-            data = fpath.read_bytes()
+            data = _read_normalized_archive_bytes(fpath)
             zinfo = zipfile.ZipInfo(filename=arcname, date_time=DETERMINISTIC_ZIP_DT)
             mode = _file_mode(fpath, data)
             zinfo.external_attr = (0o100000 | mode) << 16

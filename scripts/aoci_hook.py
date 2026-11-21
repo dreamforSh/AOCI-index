@@ -52,15 +52,23 @@ SESSION_TTL_S = 7 * 24 * 3600
 def detect_host(host_arg: str, payload: Dict[str, Any]) -> str:
     if host_arg in ("antigravity", "claude-code", "codex"):
         return host_arg
-    if any(k in payload for k in ("hookEventName", "workspacePaths", "continuationActive", "terminationReason")):
+    if any(
+        k in payload
+        for k in ("hookEventName", "workspacePaths", "continuationActive", "terminationReason", "invocationNum", "conversationId")
+    ):
         return "antigravity"
-    if "turn_id" in payload or "last_assistant_message" in payload:
+    if "turn_id" in payload:
         return "codex"
     if os.environ.get("CODEX_HOME") and not os.environ.get("CLAUDE_PROJECT_DIR"):
         return "codex"
-    if any(k in payload for k in ("hook_event_name", "stop_hook_active", "session_id", "transcript_path")):
-        return "claude-code"
     if os.environ.get("CLAUDE_PROJECT_DIR"):
+        return "claude-code"
+    tp = payload.get("transcript_path")
+    if isinstance(tp, str) and tp.strip():
+        return "claude-code"
+    if "model" in payload or "last_assistant_message" in payload:
+        return "codex"
+    if any(k in payload for k in ("hook_event_name", "stop_hook_active", "session_id", "transcript_path")):
         return "claude-code"
     return "antigravity"
 
@@ -96,27 +104,68 @@ def write_session_snapshot(root: Path, sid: str, data: Dict[str, Any]) -> None:
     aoci_index.atomic_write_text(path, json.dumps(data, ensure_ascii=False, separators=(",", ":")))
 
 
+def _collect_hub_issues(root: Path, drift: Dict[str, Any]) -> List[str]:
+    aoci_dir = root / aoci_index.AOCI_DIR_NAME
+    if not (aoci_dir / aoci_index.HUBS_FILE).is_file():
+        return []
+    issues, _ = aoci_index._hubs.validate_hubs_volume(
+        root,
+        aoci_dir,
+        drift.get("_code_entries") or {},
+        fingerprints=drift.get("_fingerprints"),
+        check_live_symbols=False,
+    )
+    return issues
+
+
 def save_session_snapshot(root: Path, sid: str, drift: Dict[str, Any], overwrite: bool = False) -> None:
-    """Record pre-existing drift for `sid` (SessionStart keeps existing; turn-start overwrites)."""
+    """Record pre-existing drift for `sid` (SessionStart keeps existing; turn-start overwrites non-blocked paths)."""
     path = session_file(root, sid)
     if path.exists() and not overwrite:
         return
     created_at: Optional[str] = None
+    prev_blocked_sig: Dict[str, Optional[str]] = {}
+    prev_blocked_hubs: Set[str] = set()
     if overwrite and path.exists():
         existing = load_session_snapshot(root, sid)
         if existing:
             created_at = existing.get("created_at")
+            raw_bs = existing.get("blocked_sig")
+            if isinstance(raw_bs, dict):
+                prev_blocked_sig = dict(raw_bs)
+            raw_bh = existing.get("blocked_hub_issues")
+            if isinstance(raw_bh, list):
+                prev_blocked_hubs = {str(x) for x in raw_bh}
+
+    cur_sig = aoci_index.drift_signature(drift)
+    kept_blocked_sig: Dict[str, Optional[str]] = {}
+    exempt_sig: Dict[str, Optional[str]] = {}
+    for p, sig_val in cur_sig.items():
+        if p in prev_blocked_sig and prev_blocked_sig[p] == sig_val:
+            kept_blocked_sig[p] = sig_val
+        else:
+            exempt_sig[p] = sig_val
+
+    hub_issues_now = _collect_hub_issues(root, drift)
+    kept_blocked_hubs = [iss for iss in hub_issues_now if iss in prev_blocked_hubs]
+    exempt_hub_issues = [iss for iss in hub_issues_now if iss not in prev_blocked_hubs]
+
     malformed_texts = [m["text"] for m in drift.get("malformed_lines", [])]
     invalid_texts = [f"{it['path']}:{it['code']}:{it['message']}" for it in drift.get("invalid_entries", [])]
-    data = {
+    data: Dict[str, Any] = {
         "created_at": created_at or aoci_index.utc_now_iso(),
-        "signature": aoci_index.drift_signature(drift),
+        "signature": exempt_sig,
         "malformed": len(malformed_texts),
         "malformed_texts": malformed_texts,
         "invalid_texts": invalid_texts,
+        "hub_issues": exempt_hub_issues,
         "stop_retries": 0,
         "last_blocked_count": 0,
     }
+    if kept_blocked_sig:
+        data["blocked_sig"] = kept_blocked_sig
+    if kept_blocked_hubs:
+        data["blocked_hub_issues"] = kept_blocked_hubs
     write_session_snapshot(root, sid, data)
     if not overwrite:
         _cleanup_old_sessions(path.parent)
@@ -126,7 +175,7 @@ def load_session_snapshot(root: Path, sid: Optional[str]) -> Optional[Dict[str, 
     if not sid:
         return None
     try:
-        data = json.loads(session_file(root, sid).read_text(encoding="utf-8"))
+        data = json.loads(session_file(root, sid).read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) and isinstance(data.get("signature"), dict) else None
     except (OSError, ValueError):
         return None
@@ -338,6 +387,8 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     ignored_total = 0
     total_unsynced = 0
     blocked_root_counts: Dict[Path, int] = {}
+    blocked_root_sigs: Dict[Path, Dict[str, Optional[str]]] = {}
+    blocked_root_hubs: Dict[Path, List[str]] = {}
     for root, git_info in roots:
         git_status = aoci_index.check_git_exclusion(root, git_info, check_status=False)
         drift = aoci_index.compute_drift(root, git_info, fast_mtime=True)
@@ -386,6 +437,17 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
         else:
             invalid_new = len(invalid_texts_now)
 
+        hub_issues_now = _collect_hub_issues(root, drift)
+        if snapshot is None:
+            hub_new_list = list(hub_issues_now)
+        elif isinstance(snapshot.get("hub_issues"), list):
+            old_hub_counts = Counter(str(x) for x in snapshot["hub_issues"])
+            cur_hub_counts = Counter(hub_issues_now)
+            hub_new_list = list((cur_hub_counts - old_hub_counts).elements())
+        else:
+            hub_new_list = list(hub_issues_now)
+        hub_new = len(hub_new_list)
+
         parts: List[str] = []
         if git_status["is_git"] and not git_status["ok"]:
             if not git_status["excluded"]:
@@ -421,6 +483,8 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
             parts.append(f"malformed_lines({malformed_new})")
         if invalid_new:
             parts.append(f"invalid_entries({invalid_new})")
+        if hub_new:
+            parts.append(f"hub_issues({hub_new})")
 
         root_unsynced = (
             len(renamed)
@@ -431,6 +495,7 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
             + len(display_deleted)
             + malformed_new
             + invalid_new
+            + hub_new
             + (1 if (git_status["is_git"] and not git_status["ok"]) else 0)
         )
         total_unsynced += root_unsynced
@@ -438,8 +503,16 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
         if parts:
             findings.append(f"- `{root}`: " + "; ".join(parts))
             blocked_root_counts[root] = root_unsynced
+            b_paths: Set[str] = set(added) | set(modified) | set(missing) | set(deleted)
+            for r_obj in drift["renamed"]:
+                if is_new(r_obj["to"]) or is_new(r_obj["from"]):
+                    b_paths.add(r_obj["to"])
+                    b_paths.add(r_obj["from"])
+            blocked_root_sigs[root] = {p: cur_sig.get(p) for p in b_paths if p in cur_sig}
+            if hub_new_list:
+                blocked_root_hubs[root] = hub_new_list
         elif snapshot is not None and sid:
-            # Turn is clean: retire any pre-existing exemptions that have since been resolved
+            # Turn is clean: retire any pre-existing exemptions or blocked markers that have since been resolved
             pruned_sig = {k: v for k, v in snap_sig.items() if k in cur_sig and cur_sig[k] == v}
             old_mal_list = snapshot.get("malformed_texts")
             if isinstance(old_mal_list, list):
@@ -451,21 +524,39 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
                 kept_inv = list((Counter(str(x) for x in old_inv_list) & Counter(invalid_texts_now)).elements())
             else:
                 kept_inv = invalid_texts_now
+            old_hub_list = snapshot.get("hub_issues")
+            if isinstance(old_hub_list, list):
+                kept_hub = list((Counter(str(x) for x in old_hub_list) & Counter(hub_issues_now)).elements())
+            else:
+                kept_hub = hub_issues_now
             mal_changed = (not isinstance(old_mal_list, list)) or (
                 Counter(kept_mal) != Counter(str(x) for x in old_mal_list)
             )
             inv_changed = (not isinstance(old_inv_list, list)) or (
                 Counter(kept_inv) != Counter(str(x) for x in old_inv_list)
             )
+            hub_changed = (not isinstance(old_hub_list, list)) or (
+                Counter(kept_hub) != Counter(str(x) for x in old_hub_list)
+            )
             retries_dirty = int(snapshot.get("stop_retries", 0) or 0) != 0
             blocked_dirty = int(snapshot.get("last_blocked_count", 0) or 0) != 0
-            if pruned_sig != snap_sig or mal_changed or inv_changed or retries_dirty or blocked_dirty:
+            had_blocked_meta = bool(snapshot.get("blocked_sig") or snapshot.get("blocked_hub_issues"))
+            if (
+                pruned_sig != snap_sig
+                or mal_changed
+                or inv_changed
+                or hub_changed
+                or retries_dirty
+                or blocked_dirty
+                or had_blocked_meta
+            ):
                 updated = {
                     "created_at": snapshot.get("created_at") or aoci_index.utc_now_iso(),
                     "signature": pruned_sig,
                     "malformed": len(kept_mal),
                     "malformed_texts": kept_mal,
                     "invalid_texts": kept_inv,
+                    "hub_issues": kept_hub,
                     "stop_retries": 0,
                     "last_blocked_count": 0,
                 }
@@ -505,6 +596,14 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
             }
             base_snap["stop_retries"] = prev_retries + 1
             base_snap["last_blocked_count"] = cur_cnt
+            if blocked_root_sigs.get(root):
+                base_snap["blocked_sig"] = blocked_root_sigs[root]
+            else:
+                base_snap.pop("blocked_sig", None)
+            if blocked_root_hubs.get(root):
+                base_snap["blocked_hub_issues"] = blocked_root_hubs[root]
+            else:
+                base_snap.pop("blocked_hub_issues", None)
             try:
                 write_session_snapshot(root, sid, base_snap)
             except OSError:

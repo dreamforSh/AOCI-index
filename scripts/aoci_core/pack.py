@@ -24,7 +24,7 @@ from .graph import (
 )
 from .hubs import lookup_hub_sections
 from .parsers import extract_file_outline
-from .test_impact import find_impacted_tests
+from .test_impact import find_impacted_tests, is_outline_record_fresh
 
 _SLASH_PATH_TOK_RE = re.compile(r"[A-Za-z0-9_.$@\[\]()~+-]+(?:/[A-Za-z0-9_.$@\[\]()~+-]+)+")
 _ANY_PATH_TOK_RE = re.compile(r"[A-Za-z0-9_.$@\[\]()~+-]+(?:/[A-Za-z0-9_.$@\[\]()~+-]+)*")
@@ -198,7 +198,7 @@ def _read_outline_anchors(
         if not cache_path.is_file():
             return {}
         try:
-            loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+            loaded = json.loads(cache_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError, TypeError):
             return {}
         if not isinstance(loaded, dict):
@@ -230,6 +230,8 @@ def _read_outline_anchors(
             continue
         rel_norm = normalize_relpath(str(raw_rel))
         if wanted_paths is not None and rel_norm not in wanted_paths:
+            continue
+        if not is_outline_record_fresh(root, rel_norm, rec):
             continue
         out_obj = rec.get("outline") if isinstance(rec.get("outline"), dict) else rec
         syms = out_obj.get("symbols") if isinstance(out_obj, dict) else None
@@ -432,7 +434,7 @@ def build_task_pack(
                 omitted_paths.append(rel)
 
         omitted_paths.sort()
-        truncated = bool(omitted_paths)
+        truncated = bool(omitted_paths or used_tokens > budget)
 
     packed_seeds.sort(key=_seed_rank_key)
     packed_deps.sort(key=lambda rel: (dep_dist[rel], -_entry_stats(rel)[0], 0 if _entry_stats(rel)[1] else 1, rel))

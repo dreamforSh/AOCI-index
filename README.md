@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-64748B?style=flat" alt="Linux · macOS · Windows">
 </p>
 <p>
-  <img src="https://img.shields.io/badge/MCP-24%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 24 tools · stdio">
+  <img src="https://img.shields.io/badge/MCP-25%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 25 tools · stdio">
   <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity%20%C2%B7%20Codex-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity · Codex">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22C55E?style=flat" alt="License: MIT"></a>
 </p>
@@ -47,7 +47,7 @@ A single read pass gives coding agents repository-wide architectural orientation
     <td width="25%" align="center"><b>Zero Dependencies</b><br><sub>Python 3.8+ stdlib only</sub></td>
     <td width="25%" align="center"><b>Local-Only <code>.aoci/</code></b><br><sub>Excluded via <code>.git/info/exclude</code></sub></td>
     <td width="25%" align="center"><b>Sub-Second Sync</b><br><sub>LF SHA-256, <code>sig_hash</code> &amp; WAL pool</sub></td>
-    <td width="25%" align="center"><b>24 MCP Tools</b><br><sub>Warm in-memory stdio server</sub></td>
+    <td width="25%" align="center"><b>25 MCP Tools</b><br><sub>Warm in-memory stdio server</sub></td>
   </tr>
 </table>
 
@@ -111,7 +111,7 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
     <td width="50%" valign="top">
       <p><img src="https://api.iconify.design/lucide/shield-check.svg?color=%236366F1" width="18" height="18" align="top" alt=""> <b>MCP, Audit &amp; Guardrails</b></p>
       <ul>
-        <li><b>Warm In-Memory Stdio MCP Server</b> — <code>aoci_mcp.py</code> serves <b>24 annotated tools</b> (lock-free <code>contextvars</code> CLI capture + thread-safe index/BM25/outline/hubs cache), <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 workflow prompts</b> over newline-delimited JSON-RPC 2.0 or <code>Content-Length</code> framing.</li>
+        <li><b>Warm In-Memory Stdio MCP Server</b> — <code>aoci_mcp.py</code> serves <b>25 annotated tools</b> (lock-free <code>contextvars</code> CLI capture + thread-safe index/BM25/outline/hubs cache), <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 workflow prompts</b> over newline-delimited JSON-RPC 2.0 or <code>Content-Length</code> framing.</li>
         <li><b>Architectural Audit &amp; Graph Export</b> — Cross-checks FRAS edges against static imports (including monorepo nested <code>tsconfig.json</code>/<code>go.mod</code>), finds Tarjan SCC cycles, enforces <code>#Layer-Rules:</code>, mines Git co-change coupling (<code>audit --co-change [--exclude-tests]</code>), and exports Mermaid, DOT, or standalone zero-CDN interactive HTML graphs (<code>export --format html</code>).</li>
         <li><b>Tri-Host Guardrails &amp; Local Exclusion</b> — <code>SessionStart</code>, optional turn-start snapshot refresh, and convergent <code>Stop</code> gate for <b>Claude Code</b>, <b>Antigravity</b>, and <b>Codex</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
       </ul>
@@ -176,6 +176,7 @@ python scripts/install.py --host all --scope global --with-hooks --with-mcp
 pip install -e .
 aoci-index --version   # aoci-index 1.5.0
 aoci-mcp               # launches the stdio MCP server
+aoci-install --help    # cross-host skill/hook/MCP installer
 ```
 
 > [!TIP]
@@ -240,7 +241,7 @@ aoci-mcp               # launches the stdio MCP server
 | Per-directory shards | `shard --root <repo> [--depth 1 \| --clean]` | `aoci_shard` |
 | Semantic pool cache | `pool stats\|export\|import --root <repo>` | `aoci_pool` |
 | Repair Git exclusion | `ensure-git-exclude --root <repo>` | `aoci_ensure_git_exclude` |
-| Local Git hooks | `install-git-hooks --root <repo> [--with-pre-commit]` | `—` *(CLI-only)* |
+| Local Git hooks | `install-git-hooks --root <repo> [--with-pre-commit]` | `aoci_install_git_hooks` |
 
 ### MCP Surface
 

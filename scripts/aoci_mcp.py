@@ -19,6 +19,7 @@ import fnmatch
 import io
 import json
 import os
+import re
 import sys
 import threading
 import urllib.parse
@@ -86,11 +87,18 @@ class _MemoryIndexCache:
                 return cached
 
             duplicates: List[str] = []
-            entries, malformed = aoci_index.parse_code_volume(code_path, duplicates=duplicates)
+            raw_code_texts: List[str] = []
+            entries, malformed = aoci_index.parse_code_volume(
+                code_path, duplicates=duplicates, raw_text_out=raw_code_texts
+            )
             parsed = aoci_index.parse_entries_map(entries)
             deps, dependents = aoci_index.build_fras_graph(entries, parsed_entries=parsed)
             mention_index = aoci_index.PathMentionIndex(sorted(entries.keys()))
-            estimated_tokens = max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
+            estimated_tokens = (
+                aoci_index.estimate_tokens(raw_code_texts[0])
+                if raw_code_texts
+                else max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
+            )
             slot: Dict[str, Any] = {
                 "key": key,
                 "entries": entries,
@@ -138,7 +146,7 @@ class _MemoryIndexCache:
                 self._outline_slots.move_to_end(root_key)
                 return cached[1]
             try:
-                loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+                loaded = json.loads(cache_path.read_text(encoding="utf-8-sig"))
             except (OSError, ValueError, TypeError):
                 return None
             if not isinstance(loaded, dict):
@@ -181,21 +189,67 @@ class _MemoryIndexCache:
 
 _CACHE = _MemoryIndexCache()
 _CLIENT_ROOT_HINT: Optional[str] = None
+_CLIENT_ROOT_HINTS: List[str] = []
+MAX_CONTENT_LENGTH = 32 * 1024 * 1024
 
 
-def _file_uri_to_path(uri: str) -> Optional[str]:
+def _file_uri_to_path(uri: str, require_dir: bool = True) -> Optional[str]:
     if not uri:
         return None
     if not uri.startswith("file://"):
+        if not require_dir:
+            return uri
         return uri if Path(uri).is_dir() else None
     try:
         parsed = urllib.parse.urlparse(uri)
-        raw_path = urllib.request.url2pathname(parsed.path)
+        unquoted_path = urllib.parse.unquote(parsed.path)
+        if re.match(r"^/[A-Za-z]:(?:/|$)", unquoted_path):
+            raw_path = unquoted_path[1:]
+            if os.name == "nt":
+                raw_path = os.path.normpath(raw_path)
+        else:
+            raw_path = urllib.request.url2pathname(unquoted_path)
+            if re.match(r"^[\\/][A-Za-z]:(?:[\\/]|$)", raw_path):
+                raw_path = raw_path[1:]
         if parsed.netloc and parsed.netloc not in ("", "localhost"):
-            raw_path = f"//{parsed.netloc}{raw_path}"
-        return raw_path if raw_path else None
+            if os.name == "nt" and not raw_path.startswith(("\\\\", "//")):
+                sep_path = raw_path if raw_path.startswith(("\\", "/")) else f"\\{raw_path}"
+                raw_path = f"\\\\{parsed.netloc}{sep_path}"
+            elif not raw_path.startswith("//"):
+                raw_path = f"//{parsed.netloc}{raw_path}"
+        if not raw_path:
+            return None
+        if require_dir and not Path(raw_path).is_dir():
+            return None
+        return raw_path
     except Exception:
         return None
+
+
+def _select_default_root_hint() -> Optional[str]:
+    for cand_str in _CLIENT_ROOT_HINTS:
+        cand = Path(cand_str)
+        if (cand / aoci_index.AOCI_DIR_NAME / aoci_index.CODE_FILE).is_file():
+            return cand_str
+    return _CLIENT_ROOT_HINT
+
+
+def _resolve_mcp_root(raw_root: Optional[Any], *, for_init: bool = False) -> Path:
+    chosen = str(raw_root).strip() if (raw_root is not None and str(raw_root).strip()) else None
+    if chosen is None:
+        hint = _select_default_root_hint()
+        return aoci_index.resolve_root(hint if hint else None)
+    explicit = aoci_index.resolve_root(chosen)
+    if for_init or (explicit / aoci_index.AOCI_DIR_NAME / aoci_index.CODE_FILE).is_file():
+        return explicit
+    # If caller passed a nested subdirectory inside an indexed repository, climb up to `.git` boundary
+    if explicit.is_dir() and not (explicit / ".git").exists():
+        for parent in explicit.parents:
+            if (parent / aoci_index.AOCI_DIR_NAME / aoci_index.CODE_FILE).is_file():
+                return parent
+            if (parent / ".git").exists():
+                break
+    return explicit
 
 
 _READ_ONLY_ANNOTATIONS: Dict[str, bool] = {
@@ -335,6 +389,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "git_fast": {"type": "boolean", "default": False, "description": "Use cached Git index + `git status` incremental discovery"},
                 "auto_restore": {"type": "boolean", "default": False, "description": "Auto-restore cached entries first"},
                 "check_only": {"type": "boolean", "default": False, "description": "Read-only scan without auto-repairing `.git/info/exclude`"},
+                "fail_on_drift": {"type": "boolean", "default": False, "description": "Return error status if any drift or Git exclusion issue exists"},
                 "batch_size": {"type": "integer", "default": 0, "description": "Optional batch size for pending files"},
                 "max_batch_lines": {"type": "integer", "description": "Maximum line budget per batch"},
                 "reset_batches": {"type": "boolean", "default": False, "description": "Rebuild saved batch_plan.json from scratch"},
@@ -368,6 +423,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "unindexed": {"type": "boolean", "default": False, "description": "Scaffold all pending/unindexed files"},
                 "batch": {"type": "integer", "default": 0, "description": "1-indexed pending batch number"},
                 "batch_size": {"type": "integer", "description": "Batch size when `batch` > 0 (inherits active plan if omitted)"},
+                "max_batch_lines": {"type": "integer", "description": "Maximum line budget per batch"},
                 "reset_batches": {"type": "boolean", "default": False, "description": "Rebuild saved batch_plan.json before selecting batch"},
                 "output": {"type": "string", "description": "Optional output file path relative to `root` (e.g. `.aoci/pending/batch_01.txt`)"},
             },
@@ -496,6 +552,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "properties": {
                 "root": {"type": "string", "description": "Target repository root path"},
                 "fast": {"type": "boolean", "default": False, "description": "Use stat shortcut for non-racy files"},
+                "git_fast": {"type": "boolean", "default": False, "description": "Use cached Git index + `git status` incremental discovery"},
             },
             "required": ["root"],
         },
@@ -521,6 +578,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "min_co_changes": {"type": "integer", "default": 3, "description": "Minimum co-change commit threshold"},
                 "min_co_confidence": {"type": "number", "default": 0.6, "description": "Minimum co-change confidence in [0,1]"},
                 "exclude_tests": {"type": "boolean", "default": False, "description": "Exclude T-layer test files from co-change analysis"},
+                "strict": {"type": "boolean", "default": False, "description": "Return error status if any audit finding exists"},
             },
             "required": ["root"],
         },
@@ -536,13 +594,14 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "format": {"type": "string", "enum": ["mermaid", "dot", "html"], "default": "mermaid", "description": "Graph output format"},
                 "level": {"type": "string", "enum": ["file", "dir", "domain"], "default": "file", "description": "Node aggregation level"},
                 "group_by": {"type": "string", "enum": ["domain", "dir", "layer", "none"], "default": "domain", "description": "Subgraph grouping when level=file"},
-                "direction": {"type": "string", "enum": ["LR", "TD"], "default": "LR", "description": "Layout direction"},
+                "direction": {"type": "string", "enum": ["LR", "TD", "TB"], "default": "LR", "description": "Layout direction"},
                 "layer": {"type": "string", "description": "Optional Layer code(s) filter"},
                 "domain": {"type": "string", "description": "Optional Domain code(s) filter"},
                 "min_importance": {"type": "integer", "description": "Optional minimum Importance (1-9)"},
                 "path": {"type": "string", "description": "Optional path glob filter"},
                 "focus": {"type": "string", "description": "Optional file path to extract neighborhood subgraph"},
                 "depth": {"type": "integer", "default": 1, "description": "Hops around `focus`"},
+                "output": {"type": "string", "description": "Optional output file path (relative to `root` or absolute) to write the exported graph"},
             },
             "required": ["root"],
         },
@@ -678,6 +737,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "allow_sha_fallback": {"type": "boolean", "default": False, "description": "Allow content-hash fallback in `restore`"},
                 "migrate_renames": {"type": "boolean", "default": False, "description": "Migrate exact and similar renames"},
                 "exact_only": {"type": "boolean", "default": False, "description": "Only migrate exact byte-identical renames"},
+                "no_rewrite_refs": {"type": "boolean", "default": False, "description": "Skip rewriting R:/A: path references in `migrate_renames`"},
                 "ack_paths": {"type": "array", "items": {"type": "string"}, "description": "Modified paths to acknowledge (requires `reviewed: true` unless `dry_run`)"},
                 "ack_impl_only": {"type": "boolean", "default": False, "description": "Acknowledge `impl_only` modified files (requires `reviewed: true` unless `dry_run`)"},
                 "reviewed": {"type": "boolean", "default": False, "description": "Confirm acknowledged files were read and verified"},
@@ -689,6 +749,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "drop_malformed": {"type": "boolean", "default": False, "description": "Allow dropping pre-existing malformed lines"},
                 "verify": {"type": "boolean", "default": True, "description": "Run trailing `verify` check (default: true)"},
                 "full_verify": {"type": "boolean", "default": False, "description": "Run full SHA-256 `verify` instead of `--fast`"},
+                "max_bytes": {"type": "integer", "description": "Override max source file size in bytes across sync stages"},
                 "dry_run": {"type": "boolean", "default": False, "description": "Preview mutating stages without writing to disk"},
             },
             "required": ["root"],
@@ -712,6 +773,26 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "live": {"type": "boolean", "default": False, "description": "Read-only live outline fallback for files absent from outline cache"},
             },
             "required": ["root", "name"],
+        },
+    },
+    {
+        "name": "aoci_install_git_hooks",
+        "description": (
+            "Install or remove idempotent local Git hooks (`post-checkout`/`post-merge`/`post-rewrite` "
+            "auto-restore + optional `pre-commit` local exclusion guard)."
+        ),
+        "annotations": _MUTATE_IDEMPOTENT_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "python_cmd": {"type": "string", "description": "Optional Python executable for hook invocations"},
+                "with_pre_commit": {"type": "boolean", "default": False, "description": "Also install a `pre-commit` guard rejecting staged `.aoci/` files"},
+                "pre_commit_verify": {"type": "boolean", "default": False, "description": "With `with_pre_commit`: also run `verify --fast` in `pre-commit`"},
+                "uninstall": {"type": "boolean", "default": False, "description": "Remove managed AOCI Git hook blocks"},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview hook changes without modifying files"},
+            },
+            "required": ["root"],
         },
     },
 ]
@@ -798,6 +879,9 @@ _STDOUT_BUF_VAR: "contextvars.ContextVar[Optional[io.StringIO]]" = contextvars.C
 _STDERR_BUF_VAR: "contextvars.ContextVar[Optional[io.StringIO]]" = contextvars.ContextVar(
     "aoci_mcp_stderr_buf", default=None
 )
+_STDIN_BUF_VAR: "contextvars.ContextVar[Optional[io.StringIO]]" = contextvars.ContextVar(
+    "aoci_mcp_stdin_buf", default=None
+)
 _ROUTER_INIT_LOCK = threading.Lock()
 
 
@@ -811,10 +895,20 @@ class _StreamRouter:
     ) -> None:
         self._var = var
         self._fallback = fallback
+        self._fb_lock = threading.Lock()
+
+    def set_fallback(self, new_fallback: Any) -> Any:
+        with self._fb_lock:
+            prev = self._fallback
+            self._fallback = new_fallback
+            return prev
 
     def _target(self) -> Any:
         buf = self._var.get()
-        return buf if buf is not None else self._fallback
+        if buf is not None:
+            return buf
+        with self._fb_lock:
+            return self._fallback
 
     def write(self, s: str) -> int:
         return self._target().write(s)
@@ -831,6 +925,48 @@ class _StreamRouter:
     def reconfigure(self, *args: Any, **kwargs: Any) -> None:
         if self._var.get() is not None:
             return
+        with self._fb_lock:
+            fb = self._fallback
+        fn = getattr(fb, "reconfigure", None)
+        if callable(fn):
+            fn(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        with self._fb_lock:
+            fb = self._fallback
+        return getattr(fb, name)
+
+
+class _StdinRouter:
+    """Thread-safe stdin proxy returning empty input during in-process CLI capture."""
+
+    def __init__(
+        self,
+        var: "contextvars.ContextVar[Optional[io.StringIO]]",
+        fallback: Any,
+    ) -> None:
+        self._var = var
+        self._fallback = fallback
+
+    def _target(self) -> Any:
+        buf = self._var.get()
+        return buf if buf is not None else self._fallback
+
+    def read(self, *args: Any) -> str:
+        return self._target().read(*args)
+
+    def readline(self, *args: Any) -> str:
+        return self._target().readline(*args)
+
+    def readlines(self, *args: Any) -> List[str]:
+        return self._target().readlines(*args)
+
+    def __iter__(self) -> Any:
+        return iter(self._target())
+
+    def reconfigure(self, *args: Any, **kwargs: Any) -> None:
+        if self._var.get() is not None:
+            return
         fn = getattr(self._fallback, "reconfigure", None)
         if callable(fn):
             fn(*args, **kwargs)
@@ -840,21 +976,29 @@ class _StreamRouter:
 
 
 def _ensure_stream_routers() -> None:
-    if isinstance(sys.stdout, _StreamRouter) and isinstance(sys.stderr, _StreamRouter):
+    if (
+        isinstance(sys.stdout, _StreamRouter)
+        and isinstance(sys.stderr, _StreamRouter)
+        and isinstance(sys.stdin, _StdinRouter)
+    ):
         return
     with _ROUTER_INIT_LOCK:
         if not isinstance(sys.stdout, _StreamRouter):
             sys.stdout = _StreamRouter(_STDOUT_BUF_VAR, sys.stdout)  # type: ignore[assignment]
         if not isinstance(sys.stderr, _StreamRouter):
             sys.stderr = _StreamRouter(_STDERR_BUF_VAR, sys.stderr)  # type: ignore[assignment]
+        if not isinstance(sys.stdin, _StdinRouter):
+            sys.stdin = _StdinRouter(_STDIN_BUF_VAR, sys.stdin)  # type: ignore[assignment]
 
 
 def _run_cli_capture(argv: List[str]) -> Tuple[int, str]:
     _ensure_stream_routers()
     out_buf = io.StringIO()
     err_buf = io.StringIO()
+    in_buf = io.StringIO("")
     tok_out = _STDOUT_BUF_VAR.set(out_buf)
     tok_err = _STDERR_BUF_VAR.set(err_buf)
+    tok_in = _STDIN_BUF_VAR.set(in_buf)
     try:
         try:
             rc = aoci_index.main(argv)
@@ -867,15 +1011,26 @@ def _run_cli_capture(argv: List[str]) -> Tuple[int, str]:
                 rc = 1
                 err_buf.write(f"\n{exc.code}")
     finally:
+        _STDIN_BUF_VAR.reset(tok_in)
         _STDOUT_BUF_VAR.reset(tok_out)
         _STDERR_BUF_VAR.reset(tok_err)
-    combined = (out_buf.getvalue() + ("\n" + err_buf.getvalue() if err_buf.getvalue().strip() else "")).strip()
-    return rc, combined
+    out_txt = out_buf.getvalue().strip()
+    err_txt = err_buf.getvalue().strip()
+    if out_txt:
+        if rc == 0:
+            return 0, out_txt
+        if out_txt.startswith(("{", "[")):
+            try:
+                json.loads(out_txt)
+                return rc, out_txt
+            except ValueError:
+                pass
+        return rc, (f"{out_txt}\n{err_txt}".strip() if err_txt else out_txt)
+    return rc, err_txt
 
 
 def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
-    raw_root = args.get("root") or _CLIENT_ROOT_HINT
-    root = aoci_index.resolve_root(str(raw_root) if raw_root else None)
+    root = _resolve_mcp_root(args.get("root"), for_init=(name == "aoci_init"))
 
     if name == "aoci_init":
         cli_args = ["init", "--root", str(root), "--json"]
@@ -958,16 +1113,24 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             tests_for_set = {item["path"] for item in impacted_tests}
 
         has_filters = any(
-            (layer_set, domain_set, min_imp, path_glob, keyword, impact_set is not None, tests_for_set is not None)
+            (
+                layer_set is not None,
+                domain_set is not None,
+                min_imp,
+                path_glob,
+                keyword,
+                impact_set is not None,
+                tests_for_set is not None,
+            )
         )
         cand_paths: Optional[set] = None
         matched_lines: List[str] = []
         if has_filters or not search_q:
             cand_paths = set()
             for rel, item in sorted(parsed_map.items()):
-                if layer_set and item.layer not in layer_set:
+                if layer_set is not None and item.layer not in layer_set:
                     continue
-                if domain_set and item.domain not in domain_set:
+                if domain_set is not None and item.domain not in domain_set:
                     continue
                 if min_imp and item.imp < min_imp:
                     continue
@@ -1050,10 +1213,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             ctx_hub_paths,
             preloaded_records=_CACHE.get_hub_records(root),
         )
-        if hub_secs:
-            payload["hub_sections"] = hub_secs
+        raw_tests: Optional[List[Dict[str, Any]]] = None
         if with_tests:
-            payload["impacted_tests"] = aoci_index.find_impacted_tests(
+            raw_tests = aoci_index.find_impacted_tests(
                 root,
                 slot["entries"],
                 slot["dependents"],
@@ -1063,6 +1225,13 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 preloaded_outline_files=_CACHE.get_outline_files(root),
                 live_imports=bool(args.get("live_test_imports", False)),
             )
+        aoci_index._graph.attach_budgeted_context_extras(
+            payload,
+            hub_secs,
+            raw_tests,
+            [str(p) for p in raw_paths],
+            budget,
+        )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
     if name == "aoci_diff":
@@ -1096,6 +1265,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.append("--auto-restore")
         if args.get("check_only"):
             cli_args.append("--check-only")
+        if args.get("fail_on_drift"):
+            cli_args.append("--fail-on-drift")
         if args.get("batch_size"):
             cli_args.extend(["--batch-size", str(int(args["batch_size"]))])
         if args.get("max_batch_lines"):
@@ -1122,6 +1293,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cli_args.extend(["--batch", str(int(args["batch"]))])
         if args.get("batch_size"):
             cli_args.extend(["--batch-size", str(int(args["batch_size"]))])
+        if args.get("max_batch_lines"):
+            cli_args.extend(["--max-batch-lines", str(int(args["max_batch_lines"]))])
         if args.get("reset_batches"):
             cli_args.append("--reset-batches")
         if args.get("output"):
@@ -1245,6 +1418,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         cli_args = ["verify", "--root", str(root), "--json"]
         if args.get("fast"):
             cli_args.append("--fast")
+        if args.get("git_fast"):
+            cli_args.append("--git-fast")
         rc, out = _run_cli_capture(cli_args)
         return rc != 0, out
 
@@ -1267,7 +1442,10 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cached_dependents=slot["dependents"] if slot is not None else None,
             cached_parsed=slot["parsed"] if slot is not None else None,
         )
-        return bool(res.get("error")), json.dumps(res, indent=2, ensure_ascii=False)
+        is_audit_err = bool(
+            res.get("error") or (args.get("strict") and int(res.get("total_findings", 0) or 0) > 0)
+        )
+        return is_audit_err, json.dumps(res, indent=2, ensure_ascii=False)
 
     if name == "aoci_export":
         slot = _CACHE.get(root)
@@ -1290,6 +1468,15 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             depth=int(args.get("depth", 1)),
             parsed_entries=slot["parsed"],
         )
+        if args.get("output"):
+            out_path = aoci_index._resolve_cli_file_path(root, str(args["output"]), must_exist=False)
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                aoci_index.write_text_lf(out_path, str(res.get("graph", "")))
+                res = dict(res)
+                res["output_path"] = str(out_path)
+            except OSError as exc:
+                return True, f"ERROR: Cannot write exported graph to `{out_path}`: {exc}"
         return False, json.dumps(res, indent=2, ensure_ascii=False)
 
     if name == "aoci_pool":
@@ -1446,6 +1633,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
 
     if name == "aoci_apply_sync":
         dry_run = bool(args.get("dry_run", False))
+        raw_mb = args.get("max_bytes")
         res = aoci_index._apply_sync.run_apply_sync(
             root,
             _run_cli_capture,
@@ -1453,6 +1641,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             allow_sha_fallback=bool(args.get("allow_sha_fallback", False)),
             migrate_renames=bool(args.get("migrate_renames", False)),
             exact_only=bool(args.get("exact_only", False)),
+            no_rewrite_refs=bool(args.get("no_rewrite_refs", False)),
             ack_paths=[str(p) for p in (args.get("ack_paths") or [])],
             ack_impl_only=bool(args.get("ack_impl_only", False)),
             reviewed=bool(args.get("reviewed", False)),
@@ -1464,6 +1653,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             drop_malformed=bool(args.get("drop_malformed", False)),
             verify=bool(args.get("verify", True)),
             full_verify=bool(args.get("full_verify", False)),
+            max_bytes=int(raw_mb) if raw_mb is not None else None,
             dry_run=dry_run,
         )
         if not dry_run:
@@ -1490,6 +1680,21 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         )
         return (not res.get("ok")), json.dumps(res, indent=2, ensure_ascii=False)
 
+    if name == "aoci_install_git_hooks":
+        cli_args = ["install-git-hooks", "--root", str(root), "--json"]
+        if args.get("python_cmd"):
+            cli_args.extend(["--python-cmd", str(args["python_cmd"])])
+        if args.get("with_pre_commit"):
+            cli_args.append("--with-pre-commit")
+        if args.get("pre_commit_verify"):
+            cli_args.append("--pre-commit-verify")
+        if args.get("uninstall"):
+            cli_args.append("--uninstall")
+        if args.get("dry_run"):
+            cli_args.append("--dry-run")
+        rc, out = _run_cli_capture(cli_args)
+        return rc != 0, out
+
     return True, f"Unknown tool: `{name}`"
 
 
@@ -1498,8 +1703,8 @@ def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str
     if parsed.scheme != "aoci":
         return None, (-32602, f"Unsupported resource URI scheme: `{uri}`")
     qs = urllib.parse.parse_qs(parsed.query)
-    raw_root = (qs.get("root") or [None])[0] or _CLIENT_ROOT_HINT
-    root = aoci_index.resolve_root(str(raw_root) if raw_root else None)
+    raw_root = (qs.get("root") or [None])[0]
+    root = _resolve_mcp_root(raw_root)
     aoci_dir = root / aoci_index.AOCI_DIR_NAME
 
     resource_key = f"{parsed.netloc}{parsed.path}".rstrip("/")
@@ -1525,7 +1730,7 @@ def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str
 
     if not target_path.is_file():
         return None, (-32002, f"Resource file does not exist: `{target_path}`")
-    return target_path.read_text(encoding="utf-8", errors="replace"), None
+    return target_path.read_text(encoding="utf-8-sig", errors="replace"), None
 
 
 def _render_prompt(name: str, arguments: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -1587,14 +1792,22 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
     if method == "initialize":
-        root_uri = params.get("rootUri")
         ws_folders = params.get("workspaceFolders")
-        if isinstance(ws_folders, list) and len(ws_folders) == 1 and isinstance(ws_folders[0], dict):
-            root_uri = ws_folders[0].get("uri") or root_uri
+        collected_hints: List[str] = []
+        if isinstance(ws_folders, list):
+            for wf in ws_folders:
+                if isinstance(wf, dict) and isinstance(wf.get("uri"), str) and wf["uri"].strip():
+                    h_wf = _file_uri_to_path(wf["uri"].strip())
+                    if h_wf and h_wf not in collected_hints:
+                        collected_hints.append(h_wf)
+        root_uri = params.get("rootUri")
         if isinstance(root_uri, str) and root_uri.strip():
-            hint = _file_uri_to_path(root_uri.strip())
-            if hint:
-                _CLIENT_ROOT_HINT = hint
+            h_ru = _file_uri_to_path(root_uri.strip())
+            if h_ru and h_ru not in collected_hints:
+                collected_hints.insert(0, h_ru)
+        if collected_hints:
+            _CLIENT_ROOT_HINTS[:] = collected_hints
+            _CLIENT_ROOT_HINT = _select_default_root_hint() or collected_hints[0]
         client_ver = str(params.get("protocolVersion", DEFAULT_PROTOCOL_VERSION))
         chosen_ver = client_ver if client_ver in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL_VERSION
         return _ok(
@@ -1647,61 +1860,148 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return _err(-32601, f"Method not found: {method}")
 
 
+def _write_rpc_payload(raw_out: Any, payload: Any, use_headers: bool) -> None:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if use_headers:
+        raw_out.write(f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii") + encoded)
+    else:
+        raw_out.write(encoded + b"\n")
+    raw_out.flush()
+
+
 def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
     """Serve MCP JSON-RPC 2.0 over binary stdio (auto-detecting line-delimited vs Content-Length headers)."""
-    raw_in = in_stream if in_stream is not None else sys.stdin.buffer
-    raw_out = out_stream if out_stream is not None else sys.stdout.buffer
+    _ensure_stream_routers()
+    raw_in = in_stream if in_stream is not None else getattr(sys.stdin, "buffer", sys.stdin)
+    prev_stdout_fb: Any = None
+    redirected_stdout_fb = False
+    if out_stream is not None:
+        raw_out = out_stream
+    else:
+        raw_out = getattr(sys.stdout, "buffer", sys.stdout)
+        if isinstance(sys.stdout, _StreamRouter):
+            err_fb = sys.stderr._fallback if isinstance(sys.stderr, _StreamRouter) else sys.stderr
+            prev_stdout_fb = sys.stdout.set_fallback(err_fb)
+            redirected_stdout_fb = True
 
-    while True:
-        first_line = raw_in.readline()
-        if not first_line:
-            break
-        stripped = first_line.strip()
-        if not stripped:
-            continue
-
-        use_headers = False
-        low_first = stripped.lower()
-        if low_first.startswith((b"content-length:", b"content-type:")):
-            use_headers = True
-            headers: List[bytes] = [stripped]
-            while True:
-                hdr = raw_in.readline()
-                if not hdr or hdr in (b"\r\n", b"\n"):
-                    break
-                headers.append(hdr.strip())
-            content_len = -1
-            for h_line in headers:
-                if h_line.lower().startswith(b"content-length:"):
-                    try:
-                        content_len = int(h_line.split(b":", 1)[1].strip())
-                    except ValueError:
-                        content_len = -1
-                    break
-            if content_len < 0:
-                continue
-            body = raw_in.read(content_len)
-            if not body:
+    try:
+        while True:
+            first_line = raw_in.readline()
+            if not first_line:
                 break
-        else:
-            body = stripped
+            stripped = first_line.strip()
+            if not stripped:
+                continue
 
-        try:
-            req = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            continue
-        if not isinstance(req, dict):
-            continue
+            use_headers = False
+            low_first = stripped.lower()
+            if low_first.startswith((b"content-length:", b"content-type:")):
+                use_headers = True
+                headers: List[bytes] = [stripped]
+                eof_in_headers = False
+                while True:
+                    hdr = raw_in.readline()
+                    if not hdr:
+                        eof_in_headers = True
+                        break
+                    if hdr in (b"\r\n", b"\n"):
+                        break
+                    headers.append(hdr.strip())
+                if eof_in_headers:
+                    break
+                content_len = -1
+                for h_line in headers:
+                    if h_line.lower().startswith(b"content-length:"):
+                        try:
+                            content_len = int(h_line.split(b":", 1)[1].strip())
+                        except ValueError:
+                            content_len = -1
+                        break
+                if content_len < 0:
+                    _write_rpc_payload(
+                        raw_out,
+                        {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Content-Length"}},
+                        use_headers,
+                    )
+                    continue
+                if content_len > MAX_CONTENT_LENGTH:
+                    _write_rpc_payload(
+                        raw_out,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {
+                                "code": -32600,
+                                "message": f"Content-Length {content_len} exceeds maximum {MAX_CONTENT_LENGTH}",
+                            },
+                        },
+                        use_headers,
+                    )
+                    break
+                if content_len == 0:
+                    body = b""
+                else:
+                    chunks: List[bytes] = []
+                    remaining = content_len
+                    while remaining > 0:
+                        part = raw_in.read(remaining)
+                        if not part:
+                            break
+                        chunks.append(part)
+                        remaining -= len(part)
+                    body = b"".join(chunks)
+                    if len(body) < content_len:
+                        break
+            else:
+                body = stripped
 
-        resp = handle_rpc_request(req)
-        if resp is None:
-            continue
-        encoded = json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if use_headers:
-            raw_out.write(f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii") + encoded)
-        else:
-            raw_out.write(encoded + b"\n")
-        raw_out.flush()
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                _write_rpc_payload(
+                    raw_out,
+                    {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
+                    use_headers,
+                )
+                continue
+
+            if isinstance(req, list):
+                if not req:
+                    _write_rpc_payload(
+                        raw_out,
+                        {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}},
+                        use_headers,
+                    )
+                    continue
+                batch_resps: List[Dict[str, Any]] = []
+                for item in req:
+                    if isinstance(item, dict):
+                        item_resp = handle_rpc_request(item)
+                        if item_resp is not None:
+                            batch_resps.append(item_resp)
+                    else:
+                        batch_resps.append(
+                            {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+                        )
+                if batch_resps:
+                    _write_rpc_payload(raw_out, batch_resps, use_headers)
+                continue
+
+            if not isinstance(req, dict):
+                _write_rpc_payload(
+                    raw_out,
+                    {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}},
+                    use_headers,
+                )
+                continue
+
+            resp = handle_rpc_request(req)
+            if resp is None:
+                continue
+            _write_rpc_payload(raw_out, resp, use_headers)
+    finally:
+        if redirected_stdout_fb and isinstance(sys.stdout, _StreamRouter):
+            sys.stdout.set_fallback(prev_stdout_fb)
     return 0
 
 

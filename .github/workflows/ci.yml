@@ -39,7 +39,7 @@ jobs:
       - name: Run real-subprocess smoke suite
         env:
           AOCI_TEST_SUBPROCESS: "1"
-        run: python -B -m unittest tests/test_ext_pack.py tests/test_ext_zoom.py tests/test_v15_improvements.py -v
+        run: python -B -m unittest tests/test_ext_pack.py tests/test_ext_tests.py tests/test_ext_zoom.py tests/test_v15_improvements.py tests/test_v16_optimizations.py tests/test_p0_p1_fixes.py -v
 
       - name: Verify CLI version
         run: python -B scripts/aoci_index.py --version
@@ -66,6 +66,14 @@ jobs:
         run: |
           python -m pip install --upgrade --quiet build
           python -m build --outdir dist
+
+      - name: Smoke-test built wheel in isolated venv
+        run: |
+          python -m venv /tmp/aoci-wheel-venv
+          /tmp/aoci-wheel-venv/bin/pip install --quiet dist/*.whl
+          /tmp/aoci-wheel-venv/bin/python -c "import importlib.util, pathlib, aoci_core; assert importlib.util.find_spec('install') is None; assert (pathlib.Path(aoci_core.__file__).parent / '_skill_bundle' / 'SKILL.md').is_file()"
+          /tmp/aoci-wheel-venv/bin/aoci-index --version
+          /tmp/aoci-wheel-venv/bin/aoci-install --host claude-code --scope global --home-dir /tmp/aoci-wheel-home --dry-run
 
       - name: Package skill archives, checksums, and release notes
         env:

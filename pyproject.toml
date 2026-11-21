@@ -14,8 +14,10 @@ dependencies = []
 [project.scripts]
 aoci-index = "aoci_index:main"
 aoci-mcp = "aoci_mcp:serve_stdio"
+aoci-hook = "aoci_hook:main"
+aoci-install = "aoci_core.installer:main"
 
 [tool.setuptools]
 package-dir = {"" = "scripts"}
-py-modules = ["aoci_index", "aoci_mcp", "aoci_hook", "install"]
+py-modules = ["aoci_index", "aoci_mcp", "aoci_hook"]
 packages = ["aoci_core"]

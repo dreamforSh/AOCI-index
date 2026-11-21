@@ -27,6 +27,7 @@ from .constants import (
     _REF_BOUNDARY_LEFT,
     _REF_BOUNDARY_RIGHT,
     _parse_code_filter_set,
+    compute_size_tier,
     normalize_relpath,
 )
 
@@ -150,8 +151,6 @@ def _validate_tag_fields(
     raw_line: str,
     actual_lines: Optional[int] = None,
 ) -> List[Tuple[str, str]]:
-    from .constants import compute_size_tier
-
     errs: List[Tuple[str, str]] = []
     if layer not in VALID_LAYERS:
         errs.append(
@@ -377,10 +376,74 @@ def build_context_subgraph(
         "callers": [entries[p] for p in kept_callers_b],
         "estimated_tokens": used_tokens,
         "budget": budget,
-        "truncated": bool(omitted_paths),
+        "truncated": bool(omitted_paths or used_tokens > budget),
         "omitted_count": len(omitted_paths),
         "omitted_paths": omitted_paths,
     }
+
+
+def attach_budgeted_context_extras(
+    payload: Dict[str, Any],
+    hub_sections: Sequence[Dict[str, Any]],
+    impacted_tests: Optional[Sequence[Dict[str, Any]]],
+    target_paths: Sequence[str],
+    budget: int,
+) -> None:
+    """Attach `hub_sections` and `impacted_tests` to a `context` payload while enforcing `--budget`."""
+    used_tokens = int(payload.get("estimated_tokens", 0) or 0)
+    target_set = {normalize_relpath(str(p)) for p in target_paths if str(p).strip()}
+
+    if hub_sections:
+        if budget > 0:
+            ranked_hubs = [
+                sec
+                for _, sec in sorted(
+                    enumerate(hub_sections),
+                    key=lambda idx_sec: (0 if str(idx_sec[1].get("path", "")) in target_set else 1, idx_sec[0]),
+                )
+            ]
+            kept_hubs: List[Dict[str, Any]] = []
+            hub_omitted = 0
+            for sec in ranked_hubs:
+                cost = estimate_tokens(str(sec.get("entry", "")))
+                if used_tokens + cost <= budget:
+                    used_tokens += cost
+                    kept_hubs.append(sec)
+                else:
+                    hub_omitted += 1
+            if kept_hubs:
+                payload["hub_sections"] = kept_hubs
+            if hub_omitted > 0:
+                payload["hub_sections_omitted"] = hub_omitted
+                payload["truncated"] = True
+        else:
+            payload["hub_sections"] = list(hub_sections)
+            for sec in hub_sections:
+                used_tokens += estimate_tokens(str(sec.get("entry", "")))
+
+    if impacted_tests is not None:
+        if budget > 0:
+            kept_tests: List[Dict[str, Any]] = []
+            tests_omitted = 0
+            for item in impacted_tests:
+                cost = estimate_tokens(str(item.get("entry", "")))
+                if used_tokens + cost <= budget:
+                    used_tokens += cost
+                    kept_tests.append(item)
+                else:
+                    tests_omitted += 1
+            payload["impacted_tests"] = kept_tests
+            if tests_omitted > 0:
+                payload["impacted_tests_omitted"] = tests_omitted
+                payload["truncated"] = True
+        else:
+            payload["impacted_tests"] = list(impacted_tests)
+            for item in impacted_tests:
+                used_tokens += estimate_tokens(str(item.get("entry", "")))
+
+    payload["estimated_tokens"] = used_tokens
+    if budget > 0 and used_tokens > budget:
+        payload["truncated"] = True
 
 
 def _find_dangling_refs_from_parsed(
@@ -1143,9 +1206,9 @@ def export_dependency_graph(
         pe = parsed_entries.get(rel) if parsed_entries is not None else parse_entry(rel, entries[rel])
         if pe is None:
             continue
-        if layer_set and pe.layer not in layer_set:
+        if layer_set is not None and pe.layer not in layer_set:
             continue
-        if domain_set and pe.domain not in domain_set:
+        if domain_set is not None and pe.domain not in domain_set:
             continue
         if min_importance and pe.imp < min_importance:
             continue
@@ -1372,7 +1435,7 @@ def parse_glossary(aoci_dir: Path) -> List[List[str]]:
     if meta_path.is_file():
         try:
             in_glossary_section = False
-            for raw in meta_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            for raw in meta_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
                 line = raw.strip()
                 if re.match(r"^#\s*\[\s*Glossary\b", line, re.IGNORECASE):
                     in_glossary_section = True
@@ -1400,7 +1463,7 @@ def parse_glossary(aoci_dir: Path) -> List[List[str]]:
     glossary_path = aoci_dir / GLOSSARY_FILE
     if glossary_path.is_file():
         try:
-            for raw in glossary_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            for raw in glossary_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue

@@ -227,9 +227,15 @@ GIT_HOOK_END = "# <<< aoci-index git-hook"
 MANAGED_GIT_HOOKS: Tuple[str, ...] = ("post-checkout", "post-merge", "post-rewrite", "pre-commit")
 
 
-def configure_utf8_streams() -> None:
+def strip_utf8_bom_bytes(data: bytes) -> bytes:
+    """Strip a leading 3-byte UTF-8 BOM (`\\xef\\xbb\\xbf`) without altering line numbers."""
+    return data[3:] if data.startswith(b"\xef\xbb\xbf") else data
+
+
+def configure_utf8_streams(include_stdin: bool = True) -> None:
     """Prevent Windows console encoding errors when reading/writing UTF-8 paths or entries."""
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
+    streams = (sys.stdin, sys.stdout, sys.stderr) if include_stdin else (sys.stdout, sys.stderr)
+    for stream in streams:
         if hasattr(stream, "reconfigure"):
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
@@ -319,7 +325,6 @@ def _is_within_root(root: Path, target: Path) -> bool:
 
 
 def _parse_code_filter_set(raw: Optional[str]) -> Optional[Set[str]]:
-    if not raw:
+    if raw is None or not str(raw).strip():
         return None
-    chars = {ch for part in raw.upper().split(",") for ch in part.strip() if ch.isalnum()}
-    return chars or None
+    return {ch for part in str(raw).upper().split(",") for ch in part.strip() if ch.isalnum()}
