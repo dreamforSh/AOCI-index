@@ -1,6 +1,6 @@
 name: "AOCI Architecture & PR Impact Guard"
 description: "Zero-dependency architectural layer-rule, cycle, SARIF 2.1.0, and PR diff impact check powered by AOCI-index."
-author: "CancriRecoleta"
+author: "dreamforSh"
 branding:
   icon: "layers"
   color: "blue"
