@@ -272,11 +272,10 @@ class ConcurrencyTests(RepoTestCase):
             )
             for i in range(n)
         ]
-        codes = [p.wait() for p in procs]
-        for p in procs:
-            p.stdout.close()
-            p.stderr.close()
-        self.assertEqual(codes, [0] * n)
+        outs = [p.communicate() for p in procs]
+        codes = [p.returncode for p in procs]
+        errs = {i: err.decode("utf-8", errors="replace") for i, (_, err) in enumerate(outs) if procs[i].returncode != 0}
+        self.assertEqual(codes, [0] * n, f"Parallel upsert child stderr: {errs}")
         persisted = sum(1 for ln in self.code_text().splitlines() if ln.startswith("m/"))
         self.assertEqual(persisted, n)
         self.assertFalse((self.root / ".aoci" / ".lock").exists())
@@ -2660,7 +2659,7 @@ class AuditV2RegressionTests(RepoTestCase):
         self.assertTrue((self.root / ".aoci" / ".cache" / "outline_cache.json").is_file())
 
         # Second scaffold run hits `outline_cache.json` cleanly without re-extracting unchanged files
-        with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
+        with mock.patch.object(parsers, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
             scaf_again = cli_json("scaffold", "--root", str(self.root), "--batch", "1", "--batch-size", "1")
         self.assertEqual([ln.split("[", 1)[0] for ln in scaf_again["entries"]], batch1_scan)
 
@@ -3346,7 +3345,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
         # 2nd `scaffold --batch 2` before upsert -> 0 hashes & 0 outline extractions
         with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
-            with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
+            with mock.patch.object(parsers, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_before = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2", "--batch-size", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_before["entries"]], ["c.py", "d.py"])
 
@@ -3369,7 +3368,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
             return orig_fp_norm(norm, st_arg)
 
         with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=_track_fp):
-            with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
+            with mock.patch.object(parsers, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_after = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_after["entries"]], ["c.py", "d.py"])
         self.assertGreaterEqual(len(fp_headers), 1)
@@ -3380,7 +3379,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         age_file(self.root / "a.py")
         age_file(self.root / "b.py")
         cli_json("ack", "--root", str(self.root), "a.py", "b.py")
-        orig_extract = aoci_index.extract_file_outline
+        orig_extract = parsers.extract_file_outline
         extracted_paths: list = []
 
         def _track_outline(path_p, rel_p, *rest, **kw):
@@ -3388,14 +3387,14 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
             return orig_extract(path_p, rel_p, *rest, **kw)
 
         with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
-            with mock.patch.object(aoci_index, "extract_file_outline", side_effect=_track_outline):
+            with mock.patch.object(parsers, "extract_file_outline", side_effect=_track_outline):
                 sc2_aged = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_aged["entries"]], ["c.py", "d.py"])
         self.assertEqual(sorted(extracted_paths), ["a.py", "b.py"])
 
         # Repeated Batch 2 now hits 0 hashes AND 0 outline extractions across all 6 files
         with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
-            with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
+            with mock.patch.object(parsers, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_warm = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_warm["entries"]], ["c.py", "d.py"])
 

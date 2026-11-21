@@ -200,7 +200,7 @@ class PerfScaleTests(RepoTestCase):
             0,
         )
         with mock.patch.object(
-            aoci_index, "resolve_go_package_imports", wraps=aoci_index.resolve_go_package_imports
+            parsers, "resolve_go_package_imports", wraps=parsers.resolve_go_package_imports
         ) as spy_go, mock.patch.object(
             parsers, "_build_jvm_cs_indexes", wraps=parsers._build_jvm_cs_indexes
         ) as spy_jvm:

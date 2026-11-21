@@ -35,7 +35,7 @@ SEAM_TARGETS: Dict[str, Any] = {
     "_fingerprint_bytes_norm": discovery,
     "inspect_and_fingerprint_one": discovery,
     "parse_code_volume": shards,
-    "extract_file_outline": aoci_index,
+    "extract_file_outline": parsers,
     "compute_signature_hash": parsers,
     "compute_signature_hash_from_bytes": parsers,
     "IndexLock": lock,
