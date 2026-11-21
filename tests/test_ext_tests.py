@@ -141,7 +141,9 @@ class TestImpactTests(RepoTestCase):
         _, dependents = aoci_index.build_fras_graph(entries)
 
         # Must read strictly from warm outline_cache.json without invoking extract_file_outline
-        with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must not rescan disk")):
+        with mock.patch.object(
+            aoci_index._test_impact, "extract_file_outline", side_effect=AssertionError("must not rescan disk")
+        ):
             py_hits = aoci_index.find_impacted_tests(self.root, entries, dependents, ["src/auth/jwt.py"])
             self.assertEqual(
                 [(h["path"], h["reason"], h["hop"]) for h in py_hits],

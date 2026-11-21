@@ -1,0 +1,4962 @@
+{
+  "schema_version": 1,
+  "help_python_version": [
+    3,
+    14
+  ],
+  "facade_symbols": [
+    "ALWAYS_SKIP_DIRS",
+    "AOCI_DIR_NAME",
+    "AOCI_VERSION",
+    "BASELINE_FILE",
+    "BASELINE_SCHEMA_VERSION",
+    "BATCH_PLAN_CACHE",
+    "BM25Index",
+    "CACHE_DIR",
+    "CJK_CHAR_RE",
+    "CODE_FILE",
+    "DEFAULT_FORBIDDEN_LAYER_EDGES",
+    "DEFAULT_MAX_BATCH_LINES",
+    "DEFAULT_MAX_BYTES",
+    "DEFAULT_SKIP_DIRS",
+    "DEFAULT_SKIP_EXTENSIONS",
+    "DEFAULT_SKIP_FILENAMES",
+    "DEFAULT_SKIP_SUFFIXES",
+    "DOMAIN_TOKEN_RE",
+    "ENTRY_RE",
+    "EXCLUDE_BEGIN",
+    "EXCLUDE_END",
+    "GIT_DISCOVERY_CACHE",
+    "GIT_EXCLUSION_CACHE",
+    "GIT_FAST_AUTO_THRESHOLD",
+    "GIT_HOOK_BEGIN",
+    "GIT_HOOK_END",
+    "GLOSSARY_FILE",
+    "HUBS_FILE",
+    "IGNORE_FILE",
+    "IMPORTANCE_TOKEN_BUDGET",
+    "INSTALL_MANIFEST_NAME",
+    "IgnoreMatcher",
+    "IndexLock",
+    "LINE_SKETCH_K",
+    "LOCK_FILE",
+    "LOCK_STALE_S",
+    "LOCK_TIMEOUT_S",
+    "LiveFileSet",
+    "MANAGED_GIT_HOOKS",
+    "MANIFEST_FILE",
+    "MAX_SEMANTIC_POOL_ENTRIES",
+    "META_FILE",
+    "MIN_RENAME_LINES",
+    "OUTLINE_CACHE",
+    "PARALLEL_HASH_THRESHOLD",
+    "ParsedEntry",
+    "PathMentionIndex",
+    "RACY_WINDOW_NS",
+    "RELPATH_TOKEN_RE",
+    "ROOT_FILE_TOKEN_RE",
+    "SCAN_FP_CACHE",
+    "SESSIONS_DIR",
+    "SHARDS_DIR",
+    "SHARDS_INDEX",
+    "SHARDS_MANIFEST",
+    "SIG_HASH_EXTS",
+    "SIMILAR_RENAME_THRESHOLD",
+    "SKIP_RULES_REV",
+    "VAGUE_F_RE",
+    "VALID_LAYERS",
+    "VALID_SIZES",
+    "_CAMEL_PART_RE",
+    "_CJK_RUN_RE",
+    "_CLEAN_SYM_RE",
+    "_GIT_BIN_CACHE",
+    "_GO_SYM_RE",
+    "_JS_CALL_IMPORT_RE",
+    "_JS_CJS_EXPORT_RE",
+    "_JS_LEADING_EXPORT_RE",
+    "_JS_LOCAL_EXPORT_RE",
+    "_JS_REEXPORT_RE",
+    "_JS_REGEX_PREV_CHARS",
+    "_JS_REGEX_PREV_KW",
+    "_JS_RESOLVE_EXTS",
+    "_JS_STATIC_IMPORT_RE",
+    "_JS_SYM_RE",
+    "_JVM_CS_SYM_RE",
+    "_LIKELY_FILE_EXTS",
+    "_PATH_SEG_CHAR",
+    "_PATH_SEG_PATTERN",
+    "_REF_BOUNDARY_LEFT",
+    "_REF_BOUNDARY_RIGHT",
+    "_RS_SYM_RE",
+    "_SFC_SCRIPT_RE",
+    "_SHA256_HEX_RE",
+    "_WIN_RESERVED_SHARD_NAMES",
+    "__version__",
+    "_apply_sync",
+    "_ast_type_str",
+    "_attach_dir_stats",
+    "_batch_pack",
+    "_build_pending_items",
+    "_capture_internal_cli",
+    "_ci_check",
+    "_classify_modified_entry",
+    "_clean_symbol_names",
+    "_clear_batch_plan",
+    "_cochange",
+    "_demote_git_discovery_paths",
+    "_detect_git_info_fast",
+    "_emit_cli_error",
+    "_expand_rust_use_tree",
+    "_extract_js_ts_outline",
+    "_extract_outline_from_bytes",
+    "_fingerprint_bytes",
+    "_fingerprint_bytes_norm",
+    "_format_hook_python_cmd",
+    "_git_discovery_cache_key",
+    "_git_exclusion_cache_key",
+    "_git_head_key",
+    "_githooks",
+    "_glob_to_regex",
+    "_graph",
+    "_has_git_binary",
+    "_hubs",
+    "_ignore",
+    "_infer_layer_and_domain",
+    "_is_scan_cache_fresh",
+    "_is_within_root",
+    "_legacy_semantic_pool_json_path",
+    "_line_sketch",
+    "_load_batch_plan",
+    "_load_go_module_prefix",
+    "_load_layer_rules_from_aoci",
+    "_load_legacy_semantic_pool_json",
+    "_load_scan_fp_cache",
+    "_load_tsconfig_aliases",
+    "_load_tsconfig_file",
+    "_lookup_pool_entries",
+    "_matches_nested_gitignore",
+    "_migrate_renames_locked",
+    "_norm_join_posix",
+    "_open_semantic_pool",
+    "_pack",
+    "_parse_code_filter_set",
+    "_parse_js_export_brace",
+    "_parse_porcelain_z_paths",
+    "_parsers",
+    "_pid_is_alive",
+    "_pool",
+    "_populate_missing_sig_hashes",
+    "_print_impacted_tests",
+    "_probe_js_path",
+    "_prune_scan_fp_cache",
+    "_py_fn_sig",
+    "_py_route_decorator",
+    "_read_ignore_lines",
+    "_resolve_cli_file_path",
+    "_resolve_disk_case_single",
+    "_sanitize_graph_label",
+    "_save_batch_plan",
+    "_save_git_discovery_cache",
+    "_save_scan_fp_cache",
+    "_scandir_walk",
+    "_shards",
+    "_sketch_similarity",
+    "_stat_key",
+    "_static_ecosystem",
+    "_strip_c_comments",
+    "_strip_git_hook_marker",
+    "_strip_js_comments",
+    "_symbols",
+    "_sync_prep",
+    "_test_impact",
+    "_tokenize_search",
+    "_try_git_incremental_scan",
+    "_try_heal_racy_baseline",
+    "_upsert_git_hook_block",
+    "_upsert_locked",
+    "_validate_pool_entry_row",
+    "_validate_zoom_target_file",
+    "allocate_shard_ids",
+    "atomic_write_text",
+    "audit_architecture",
+    "bfs_neighbors",
+    "bfs_neighbors_with_distance",
+    "build_context_subgraph",
+    "build_explicit_mention_index",
+    "build_fras_graph",
+    "build_parser",
+    "build_static_import_graph",
+    "build_task_pack",
+    "check_git_exclusion",
+    "check_layer_violations",
+    "cmd_ack",
+    "cmd_apply_sync",
+    "cmd_audit",
+    "cmd_batch_pack",
+    "cmd_ci_check",
+    "cmd_context",
+    "cmd_diff",
+    "cmd_ensure_git_exclude",
+    "cmd_export",
+    "cmd_init",
+    "cmd_install_git_hooks",
+    "cmd_lint",
+    "cmd_migrate_renames",
+    "cmd_outline",
+    "cmd_overview",
+    "cmd_pack",
+    "cmd_pool",
+    "cmd_prepare_sync",
+    "cmd_query",
+    "cmd_restore",
+    "cmd_scaffold",
+    "cmd_scan",
+    "cmd_shard",
+    "cmd_symbol",
+    "cmd_upsert",
+    "cmd_verify",
+    "cmd_zoom",
+    "code_dependency_view",
+    "compile_path_ref_rewriter",
+    "compute_diff_briefing",
+    "compute_drift",
+    "compute_lint",
+    "compute_outlines",
+    "compute_signature_hash",
+    "compute_signature_hash_from_bytes",
+    "compute_size_tier",
+    "compute_zoom_read",
+    "configure_utf8_streams",
+    "count_restorable_from_pool",
+    "detect_git_info",
+    "discover_and_fingerprint",
+    "discover_candidates",
+    "drift_signature",
+    "ensure_git_exclusion",
+    "estimate_tokens",
+    "expand_query_with_glossary",
+    "export_dependency_graph",
+    "export_semantic_pool",
+    "extract_file_outline",
+    "extract_path_refs",
+    "find_dangling_refs",
+    "find_dependency_cycles",
+    "find_impacted_tests",
+    "fingerprint_file",
+    "git_exclude_pattern",
+    "import_semantic_pool",
+    "inspect_and_fingerprint_one",
+    "install_git_hooks",
+    "install_manifest_dirs",
+    "is_probably_binary_bytes",
+    "lint_entries",
+    "load_aociignore",
+    "load_baseline",
+    "load_ignore_matcher",
+    "load_semantic_pool",
+    "main",
+    "make_batches",
+    "matches_ignore",
+    "normalize_relpath",
+    "parse_code_volume",
+    "parse_declared_domains",
+    "parse_entries_map",
+    "parse_entry",
+    "parse_entry_fields",
+    "parse_glossary",
+    "parse_layer_rules",
+    "parse_manifest_field",
+    "path_ref_pattern",
+    "path_skip_reason",
+    "pool_stats",
+    "public_drift",
+    "record_semantic_pool_entries",
+    "render_code_volume",
+    "render_ignore_template",
+    "render_manifest_template",
+    "render_meta_template",
+    "report_malformed_block",
+    "resolve_git_hooks_dir",
+    "resolve_go_package_imports",
+    "resolve_root",
+    "resolve_stable_batches",
+    "restore_from_semantic_pool",
+    "rewrite_path_refs",
+    "run_ci_architecture_check",
+    "run_git",
+    "save_baseline",
+    "scaffold_entries",
+    "search_entries_bm25",
+    "search_entries_bm25_detailed",
+    "semantic_pool_path",
+    "semantic_word_count",
+    "shard_key_for_path",
+    "shard_prefix_for_path",
+    "sync_manifest_git_header",
+    "sync_shards_if_enabled",
+    "under_install_manifest_dir",
+    "uninstall_git_hooks",
+    "utc_now_iso",
+    "validate_and_normalize_entry",
+    "validate_parsed_entry_tags",
+    "write_code_volume",
+    "write_shards",
+    "write_text_lf"
+  ],
+  "parser_spec": {
+    "prog": "aoci_index.py",
+    "description": "AOCI Fast Codebase Index Manager",
+    "func_name": null,
+    "actions": [
+      {
+        "kind": "_HelpAction",
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "dest": "help",
+        "nargs": 0,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "type": null,
+        "choices": null,
+        "required": false,
+        "help": "show this help message and exit",
+        "version": null
+      },
+      {
+        "kind": "_VersionAction",
+        "option_strings": [
+          "-V",
+          "--version"
+        ],
+        "dest": "version",
+        "nargs": 0,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "type": null,
+        "choices": null,
+        "required": false,
+        "help": "show program's version number and exit",
+        "version": "%(prog)s 1.5.0"
+      },
+      {
+        "kind": "subparsers",
+        "dest": "command",
+        "required": true,
+        "choices": [
+          "init",
+          "scan",
+          "status",
+          "upsert",
+          "ack",
+          "lint",
+          "migrate-renames",
+          "verify",
+          "query",
+          "context",
+          "overview",
+          "outline",
+          "shard",
+          "restore",
+          "diff",
+          "scaffold",
+          "ensure-git-exclude",
+          "audit",
+          "export",
+          "pool",
+          "install-git-hooks",
+          "pack",
+          "prepare-sync",
+          "zoom",
+          "apply-sync",
+          "symbol",
+          "batch-pack",
+          "ci-check"
+        ]
+      }
+    ],
+    "subparsers": {
+      "init": {
+        "prog": "aoci_index.py init",
+        "description": null,
+        "func_name": "cmd_init",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root (defaults to Git toplevel or CWD)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--project"
+            ],
+            "dest": "project",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Project name for `aoci.txt`",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--locale"
+            ],
+            "dest": "locale",
+            "nargs": null,
+            "const": null,
+            "default": "en-US",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Locale label (default: en-US)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--force"
+            ],
+            "dest": "force",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Overwrite existing template files",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Max file size in bytes (default: 524288)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "scan": {
+        "prog": "aoci_index.py scan",
+        "description": null,
+        "func_name": "cmd_scan",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--batches",
+              "--batch-size"
+            ],
+            "dest": "batches",
+            "nargs": null,
+            "const": null,
+            "default": 0,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Split pending files into batches of up to N files per batch (`--batch-size N`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-batch-lines"
+            ],
+            "dest": "max_batch_lines",
+            "nargs": null,
+            "const": null,
+            "default": 2500,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum line budget per batch (default: 2500)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--reset-batches"
+            ],
+            "dest": "reset_batches",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Rebuild `.aoci/.cache/batch_plan.json` from current pending files",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--fast"
+            ],
+            "dest": "fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip disk reads when mtime & byte size match baseline",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--git-fast"
+            ],
+            "dest": "git_fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Use cached Git index + `git status` incremental discovery (auto-enabled on >=2000-file repos with --fast)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--auto-restore"
+            ],
+            "dest": "auto_restore",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Automatically restore matching `(path, sha256)` entries from semantic cache pool before scanning",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--check-only"
+            ],
+            "dest": "check_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Do not auto-repair `.git/info/exclude`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--fail-on-drift"
+            ],
+            "dest": "fail_on_drift",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exit with code 1 if any drift exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "status": {
+        "prog": "aoci_index.py status",
+        "description": null,
+        "func_name": "cmd_scan",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--batches",
+              "--batch-size"
+            ],
+            "dest": "batches",
+            "nargs": null,
+            "const": null,
+            "default": 0,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Split pending files into batches of up to N files per batch (`--batch-size N`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-batch-lines"
+            ],
+            "dest": "max_batch_lines",
+            "nargs": null,
+            "const": null,
+            "default": 2500,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum line budget per batch (default: 2500)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--reset-batches"
+            ],
+            "dest": "reset_batches",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Rebuild `.aoci/.cache/batch_plan.json` from current pending files",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--fast"
+            ],
+            "dest": "fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip disk reads when mtime & byte size match baseline",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--git-fast"
+            ],
+            "dest": "git_fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Use cached Git index + `git status` incremental discovery (auto-enabled on >=2000-file repos with --fast)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--auto-restore"
+            ],
+            "dest": "auto_restore",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Automatically restore matching `(path, sha256)` entries from semantic cache pool before scanning",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--check-only"
+            ],
+            "dest": "check_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Do not auto-repair `.git/info/exclude`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--fail-on-drift"
+            ],
+            "dest": "fail_on_drift",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exit with code 1 if any drift exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "upsert": {
+        "prog": "aoci_index.py upsert",
+        "description": null,
+        "func_name": "cmd_upsert",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--entries-file"
+            ],
+            "dest": "entries_file",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Path to a text file containing object-fras-v2 lines",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--pending-dir"
+            ],
+            "dest": "pending_dir",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Directory containing `*.txt` subagent batch entry files to validate and merge atomically",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--clean-pending"
+            ],
+            "dest": "clean_pending",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Remove consumed `*.txt` files in `--pending-dir` after a successful non-dry-run merge",
+            "version": null
+          },
+          {
+            "kind": "_AppendAction",
+            "option_strings": [
+              "--entry"
+            ],
+            "dest": "entry",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Single object-fras-v2 line (repeatable)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--stdin"
+            ],
+            "dest": "stdin",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Read object-fras-v2 lines from stdin",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--prune-only"
+            ],
+            "dest": "prune_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Only prune deleted/ignored files from index",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-prune"
+            ],
+            "dest": "no_prune",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Do not automatically prune deleted files",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--strict-size"
+            ],
+            "dest": "strict_size",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Fail instead of auto-fixing stale Size tier",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Validate entries without writing to disk",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--drop-malformed"
+            ],
+            "dest": "drop_malformed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Allow the rewrite to delete pre-existing malformed lines in aoci.code.txt",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "ack": {
+        "prog": "aoci_index.py ack",
+        "description": null,
+        "func_name": "cmd_ack",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "paths",
+            "nargs": "*",
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Relative file paths to acknowledge",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--all-modified"
+            ],
+            "dest": "all_modified",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Acknowledge every currently modified file (requires --reviewed)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--impl-only"
+            ],
+            "dest": "impl_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Acknowledge only modified files whose interface signature hash is unchanged (requires --reviewed unless --dry-run)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--reviewed"
+            ],
+            "dest": "reviewed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Confirm every file matched by --all-modified was read and its FRAS entry verified accurate",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Preview without writing",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "lint": {
+        "prog": "aoci_index.py lint",
+        "description": null,
+        "func_name": "cmd_lint",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--code"
+            ],
+            "dest": "code",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Comma-separated finding codes to keep (e.g. ref-dangling,F-vague)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--limit"
+            ],
+            "dest": "limit",
+            "nargs": null,
+            "const": null,
+            "default": 100,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Max findings to print (default: 100)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--strict"
+            ],
+            "dest": "strict",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exit 1 when any finding exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "migrate-renames": {
+        "prog": "aoci_index.py migrate-renames",
+        "description": null,
+        "func_name": "cmd_migrate_renames",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--exact-only"
+            ],
+            "dest": "exact_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Only migrate byte-identical renames, skip moved+edited matches",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-rewrite-refs"
+            ],
+            "dest": "no_rewrite_refs",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Do not rewrite path mentions in other R:/A: fields",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--drop-malformed"
+            ],
+            "dest": "drop_malformed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Allow the rewrite to delete pre-existing malformed lines in aoci.code.txt",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Preview migrations without writing to disk",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "verify": {
+        "prog": "aoci_index.py verify",
+        "description": null,
+        "func_name": "cmd_verify",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--fast"
+            ],
+            "dest": "fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Trust (mtime,size) for unchanged non-racy files (quick pre-check; full hashing is the default)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--git-fast"
+            ],
+            "dest": "git_fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Use cached Git index + `git status` incremental scan",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "query": {
+        "prog": "aoci_index.py query",
+        "description": null,
+        "func_name": "cmd_query",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--layer"
+            ],
+            "dest": "layer",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Filter by Layer code(s), e.g. `M` or `E,A,M`",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--domain"
+            ],
+            "dest": "domain",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Filter by Domain code(s), e.g. `O` or `A,O`",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--min-importance"
+            ],
+            "dest": "min_importance",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Filter entries with Importance >= N",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--path"
+            ],
+            "dest": "path",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Glob pattern on relative path (e.g. `src/auth/*`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--keyword"
+            ],
+            "dest": "keyword",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Case-insensitive exact substring filter",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--search"
+            ],
+            "dest": "search",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Ranked multi-term BM25 + Importance search across path/symbols/F/R/A/S",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--top"
+            ],
+            "dest": "top",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum entries to return (default: 20 with --search; 0 = unlimited)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--impact"
+            ],
+            "dest": "impact",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target file plus every entry that depends on it (via R: or A: callers)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--tests-for"
+            ],
+            "dest": "tests_for",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target file to find impacted T-layer test files (FRAS + outline + naming)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--live-test-imports"
+            ],
+            "dest": "live_test_imports",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Transitive hops (default: 1 for --impact, 3 for --tests-for)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "context": {
+        "prog": "aoci_index.py context",
+        "description": null,
+        "func_name": "cmd_context",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "paths",
+            "nargs": "+",
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": true,
+            "help": "One or more relative file paths",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 1,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Graph expansion hops (default: 1)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--budget"
+            ],
+            "dest": "budget",
+            "nargs": null,
+            "const": null,
+            "default": 0,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Optional token budget ceiling (0 = unlimited)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--with-tests"
+            ],
+            "dest": "with_tests",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Attach impacted T-layer test files",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--live-test-imports"
+            ],
+            "dest": "live_test_imports",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "overview": {
+        "prog": "aoci_index.py overview",
+        "description": null,
+        "func_name": "cmd_overview",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--min-importance"
+            ],
+            "dest": "min_importance",
+            "nargs": null,
+            "const": null,
+            "default": 7,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Minimum Importance for core entries (default: 7)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-core"
+            ],
+            "dest": "max_core",
+            "nargs": null,
+            "const": null,
+            "default": 50,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Max core entries to display (default: 50)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "outline": {
+        "prog": "aoci_index.py outline",
+        "description": null,
+        "func_name": "cmd_outline",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "paths",
+            "nargs": "+",
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": true,
+            "help": "One or more relative file paths",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-items"
+            ],
+            "dest": "max_items",
+            "nargs": null,
+            "const": null,
+            "default": 30,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Max imports/symbols per file (default: 30)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "shard": {
+        "prog": "aoci_index.py shard",
+        "description": null,
+        "func_name": "cmd_shard",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 1,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Directory prefix depth for shard grouping (default: 1)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--clean"
+            ],
+            "dest": "clean",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Disable sharding and remove `.aoci/shards/`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "restore": {
+        "prog": "aoci_index.py restore",
+        "description": null,
+        "func_name": "cmd_restore",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--allow-sha-fallback"
+            ],
+            "dest": "allow_sha_fallback",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Opt in to content-hash fallback for unambiguous moved files whose original path no longer exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--exact-path-only"
+            ],
+            "dest": "exact_path_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Legacy alias; exact `(path, sha256)` restore is the default",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-prune"
+            ],
+            "dest": "no_prune",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Do not prune entries missing on the current branch",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Preview restorable entries without writing",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "diff": {
+        "prog": "aoci_index.py diff",
+        "description": null,
+        "func_name": "cmd_diff",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "rev",
+            "nargs": "?",
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional Git revision spec (e.g. `main...HEAD`, `HEAD~1`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--staged"
+            ],
+            "dest": "staged",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Inspect staged (`--cached`) diff",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 1,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Upstream caller hops (default: 1)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--with-tests"
+            ],
+            "dest": "with_tests",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Attach impacted T-layer test files",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--live-test-imports"
+            ],
+            "dest": "live_test_imports",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "scaffold": {
+        "prog": "aoci_index.py scaffold",
+        "description": null,
+        "func_name": "cmd_scaffold",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "paths",
+            "nargs": "*",
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target relative paths to scaffold",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--unindexed"
+            ],
+            "dest": "unindexed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Scaffold all currently pending/unindexed files",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--batch"
+            ],
+            "dest": "batch",
+            "nargs": null,
+            "const": null,
+            "default": 0,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Scaffold 1-indexed batch N from pending files",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--batch-size"
+            ],
+            "dest": "batch_size",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Batch size when used with --batch (inherits active batch_plan.json if omitted, else 20)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-batch-lines"
+            ],
+            "dest": "max_batch_lines",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum line budget per batch (inherits active plan if omitted)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--reset-batches"
+            ],
+            "dest": "reset_batches",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Rebuild `.aoci/.cache/batch_plan.json` before selecting `--batch`",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--output"
+            ],
+            "dest": "output",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional path (e.g. `.aoci/pending/batch_01.txt`) to write skeleton lines",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "ensure-git-exclude": {
+        "prog": "aoci_index.py ensure-git-exclude",
+        "description": null,
+        "func_name": "cmd_ensure_git_exclude",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "audit": {
+        "prog": "aoci_index.py audit",
+        "description": null,
+        "func_name": "cmd_audit",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--forbid"
+            ],
+            "dest": "forbid",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Extra layer redlines (e.g. `D!->E,U; P!->E`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-default-rules"
+            ],
+            "dest": "no_default_rules",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Disable built-in layer redline defaults",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-static"
+            ],
+            "dest": "no_static",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip static import vs FRAS cross-check",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-cycles"
+            ],
+            "dest": "no_cycles",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip dependency cycle detection",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-layers"
+            ],
+            "dest": "no_layers",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip layer redline validation",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--co-change"
+            ],
+            "dest": "co_change",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Mine recent Git commits for unlinked co-changing pairs",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--co-change-commits"
+            ],
+            "dest": "co_change_commits",
+            "nargs": null,
+            "const": null,
+            "default": 200,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Max recent commits to scan for --co-change (default: 200)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--min-co-changes"
+            ],
+            "dest": "min_co_changes",
+            "nargs": null,
+            "const": null,
+            "default": 3,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Minimum co-change commit count (default: 3)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--min-co-confidence"
+            ],
+            "dest": "min_co_confidence",
+            "nargs": null,
+            "const": null,
+            "default": 0.6,
+            "type": "float",
+            "choices": null,
+            "required": false,
+            "help": "Minimum co-change confidence in [0,1] (default: 0.6)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--exclude-tests"
+            ],
+            "dest": "exclude_tests",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exclude T-layer test files from --co-change pairs",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--strict"
+            ],
+            "dest": "strict",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exit 1 when any missing static dep, cycle, or layer violation exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "export": {
+        "prog": "aoci_index.py export",
+        "description": null,
+        "func_name": "cmd_export",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--format"
+            ],
+            "dest": "format",
+            "nargs": null,
+            "const": null,
+            "default": "mermaid",
+            "type": null,
+            "choices": [
+              "mermaid",
+              "dot",
+              "html"
+            ],
+            "required": false,
+            "help": "Output format (default: mermaid)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--level"
+            ],
+            "dest": "level",
+            "nargs": null,
+            "const": null,
+            "default": "file",
+            "type": null,
+            "choices": [
+              "file",
+              "dir",
+              "domain"
+            ],
+            "required": false,
+            "help": "Aggregation level (default: file)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--group-by"
+            ],
+            "dest": "group_by",
+            "nargs": null,
+            "const": null,
+            "default": "domain",
+            "type": null,
+            "choices": [
+              "domain",
+              "dir",
+              "layer",
+              "none"
+            ],
+            "required": false,
+            "help": "Subgraph grouping for file level",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--direction"
+            ],
+            "dest": "direction",
+            "nargs": null,
+            "const": null,
+            "default": "LR",
+            "type": null,
+            "choices": [
+              "LR",
+              "TD",
+              "TB"
+            ],
+            "required": false,
+            "help": "Graph layout direction (default: LR)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--layer"
+            ],
+            "dest": "layer",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Filter nodes by Layer code(s)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--domain"
+            ],
+            "dest": "domain",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Filter nodes by Domain code(s)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--min-importance"
+            ],
+            "dest": "min_importance",
+            "nargs": null,
+            "const": null,
+            "default": 0,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Filter nodes with Importance >= N",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--path"
+            ],
+            "dest": "path",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Glob filter on relative file paths",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--focus"
+            ],
+            "dest": "focus",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Center subgraph on a target file and its neighbors",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 1,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Neighborhood hops around `--focus` (default: 1)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--diff"
+            ],
+            "dest": "diff",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Highlight working-tree changed nodes and affected 1-hop callers",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--diff-rev"
+            ],
+            "dest": "diff_rev",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Highlight changed nodes and affected callers against Git revision (e.g. `origin/main`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--output"
+            ],
+            "dest": "output",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional output file path relative to `--root`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "pool": {
+        "prog": "aoci_index.py pool",
+        "description": null,
+        "func_name": null,
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "subparsers",
+            "dest": "pool_action",
+            "required": true,
+            "choices": [
+              "stats",
+              "export",
+              "import"
+            ]
+          }
+        ],
+        "subparsers": {
+          "stats": {
+            "prog": "aoci_index.py pool stats",
+            "description": null,
+            "func_name": "cmd_pool",
+            "actions": [
+              {
+                "kind": "_HelpAction",
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "dest": "help",
+                "nargs": 0,
+                "const": null,
+                "default": "==SUPPRESS==",
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "show this help message and exit",
+                "version": null
+              },
+              {
+                "kind": "_StoreAction",
+                "option_strings": [
+                  "--root"
+                ],
+                "dest": "root",
+                "nargs": null,
+                "const": null,
+                "default": null,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Target codebase root",
+                "version": null
+              },
+              {
+                "kind": "_StoreTrueAction",
+                "option_strings": [
+                  "--json"
+                ],
+                "dest": "json",
+                "nargs": 0,
+                "const": true,
+                "default": false,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Output JSON",
+                "version": null
+              }
+            ],
+            "subparsers": {}
+          },
+          "export": {
+            "prog": "aoci_index.py pool export",
+            "description": null,
+            "func_name": "cmd_pool",
+            "actions": [
+              {
+                "kind": "_HelpAction",
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "dest": "help",
+                "nargs": 0,
+                "const": null,
+                "default": "==SUPPRESS==",
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "show this help message and exit",
+                "version": null
+              },
+              {
+                "kind": "_StoreAction",
+                "option_strings": [
+                  "--root"
+                ],
+                "dest": "root",
+                "nargs": null,
+                "const": null,
+                "default": null,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Target codebase root",
+                "version": null
+              },
+              {
+                "kind": "_StoreAction",
+                "option_strings": [
+                  "--output"
+                ],
+                "dest": "output",
+                "nargs": null,
+                "const": null,
+                "default": null,
+                "type": null,
+                "choices": null,
+                "required": true,
+                "help": "Output bundle path (use `.json.gz` for gzip)",
+                "version": null
+              },
+              {
+                "kind": "_StoreTrueAction",
+                "option_strings": [
+                  "--pool-only"
+                ],
+                "dest": "pool_only",
+                "nargs": 0,
+                "const": true,
+                "default": false,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Export only rows already in the SQLite pool (skip current code.txt)",
+                "version": null
+              },
+              {
+                "kind": "_StoreTrueAction",
+                "option_strings": [
+                  "--json"
+                ],
+                "dest": "json",
+                "nargs": 0,
+                "const": true,
+                "default": false,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Output JSON",
+                "version": null
+              }
+            ],
+            "subparsers": {}
+          },
+          "import": {
+            "prog": "aoci_index.py pool import",
+            "description": null,
+            "func_name": "cmd_pool",
+            "actions": [
+              {
+                "kind": "_HelpAction",
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "dest": "help",
+                "nargs": 0,
+                "const": null,
+                "default": "==SUPPRESS==",
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "show this help message and exit",
+                "version": null
+              },
+              {
+                "kind": "_StoreAction",
+                "option_strings": [
+                  "--root"
+                ],
+                "dest": "root",
+                "nargs": null,
+                "const": null,
+                "default": null,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Target codebase root",
+                "version": null
+              },
+              {
+                "kind": "_StoreAction",
+                "option_strings": [
+                  "--input"
+                ],
+                "dest": "input",
+                "nargs": null,
+                "const": null,
+                "default": null,
+                "type": null,
+                "choices": null,
+                "required": true,
+                "help": "Input bundle file path relative to `--root` or absolute",
+                "version": null
+              },
+              {
+                "kind": "_StoreTrueAction",
+                "option_strings": [
+                  "--dry-run"
+                ],
+                "dest": "dry_run",
+                "nargs": 0,
+                "const": true,
+                "default": false,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Validate bundle without modifying the pool DB",
+                "version": null
+              },
+              {
+                "kind": "_StoreTrueAction",
+                "option_strings": [
+                  "--json"
+                ],
+                "dest": "json",
+                "nargs": 0,
+                "const": true,
+                "default": false,
+                "type": null,
+                "choices": null,
+                "required": false,
+                "help": "Output JSON",
+                "version": null
+              }
+            ],
+            "subparsers": {}
+          }
+        }
+      },
+      "install-git-hooks": {
+        "prog": "aoci_index.py install-git-hooks",
+        "description": null,
+        "func_name": "cmd_install_git_hooks",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--python-cmd"
+            ],
+            "dest": "python_cmd",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Python interpreter command written into hook scripts",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--with-pre-commit"
+            ],
+            "dest": "with_pre_commit",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Also manage a `pre-commit` guard rejecting staged `.aoci/` files",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--pre-commit-verify"
+            ],
+            "dest": "pre_commit_verify",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Run `verify --fast` inside `pre-commit` when `--with-pre-commit` is enabled",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--uninstall"
+            ],
+            "dest": "uninstall",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Strip AOCI managed blocks from Git hooks cleanly",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Preview hook actions without writing",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "pack": {
+        "prog": "aoci_index.py pack",
+        "description": null,
+        "func_name": "cmd_pack",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--task"
+            ],
+            "dest": "task",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": true,
+            "help": "Task description or query to pack context for",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-diff"
+            ],
+            "dest": "no_diff",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exclude working-tree Git diff signals",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 1,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Graph expansion hops around seeds (default: 1)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--budget"
+            ],
+            "dest": "budget",
+            "nargs": null,
+            "const": null,
+            "default": 2500,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Token budget ceiling (default: 2500; 0 = unlimited)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--top-seeds"
+            ],
+            "dest": "top_seeds",
+            "nargs": null,
+            "const": null,
+            "default": 8,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum BM25 seed hits (default: 8)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--with-tests"
+            ],
+            "dest": "with_tests",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Attach impacted T-layer test files for packed seeds",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--live-test-imports"
+            ],
+            "dest": "live_test_imports",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--live-anchors"
+            ],
+            "dest": "live_anchors",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Extract live symbol anchors in memory when outline cache misses",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "prepare-sync": {
+        "prog": "aoci_index.py prepare-sync",
+        "description": null,
+        "func_name": "cmd_prepare_sync",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-fast"
+            ],
+            "dest": "no_fast",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Force full SHA-256 verification instead of fast mtime mode",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-diff-lines"
+            ],
+            "dest": "max_diff_lines",
+            "nargs": null,
+            "const": null,
+            "default": 40,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Max git diff lines per modified file (default: 40)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "zoom": {
+        "prog": "aoci_index.py zoom",
+        "description": null,
+        "func_name": "cmd_zoom",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "path",
+            "nargs": "?",
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target relative file path (for read or --scaffold)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--scaffold"
+            ],
+            "dest": "scaffold",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Scaffold symbol section skeletons for <path>",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--output"
+            ],
+            "dest": "output",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional output file path for --scaffold skeletons",
+            "version": null
+          },
+          {
+            "kind": "_AppendAction",
+            "option_strings": [
+              "--upsert"
+            ],
+            "dest": "upsert",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Hub entry line to merge into aoci.hubs.txt (repeatable)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--upsert-file"
+            ],
+            "dest": "upsert_file",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Path to a text file containing hub entry lines",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--prune-missing"
+            ],
+            "dest": "prune_missing",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Prune hub entries whose file or symbol no longer exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Validate --upsert changes without writing to disk",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "apply-sync": {
+        "prog": "aoci_index.py apply-sync",
+        "description": null,
+        "func_name": "cmd_apply_sync",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--restore"
+            ],
+            "dest": "restore",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Run semantic pool restore (`--no-prune`) first",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--allow-sha-fallback"
+            ],
+            "dest": "allow_sha_fallback",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pass `--allow-sha-fallback` to `restore`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--migrate-renames"
+            ],
+            "dest": "migrate_renames",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Migrate exact and similar renames",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--exact-only"
+            ],
+            "dest": "exact_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pass `--exact-only` to `migrate-renames`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-rewrite-refs"
+            ],
+            "dest": "no_rewrite_refs",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pass `--no-rewrite-refs` to `migrate-renames`",
+            "version": null
+          },
+          {
+            "kind": "_AppendAction",
+            "option_strings": [
+              "--ack-path"
+            ],
+            "dest": "ack_path",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Path to acknowledge via `ack` (repeatable; requires --reviewed)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--ack-impl-only"
+            ],
+            "dest": "ack_impl_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Acknowledge `impl_only` modified files (requires --reviewed)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--reviewed"
+            ],
+            "dest": "reviewed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Confirm acknowledged files were read and verified",
+            "version": null
+          },
+          {
+            "kind": "_AppendAction",
+            "option_strings": [
+              "--entry"
+            ],
+            "dest": "entry",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "object-fras-v2 line to merge in `upsert` (repeatable)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--entries-file"
+            ],
+            "dest": "entries_file",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "File containing object-fras-v2 lines to merge in `upsert`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--prune-only"
+            ],
+            "dest": "prune_only",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pass `--prune-only` to `upsert`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-prune"
+            ],
+            "dest": "no_prune",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pass `--no-prune` to `upsert`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--strict-size"
+            ],
+            "dest": "strict_size",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Pass `--strict-size` to `upsert`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--drop-malformed"
+            ],
+            "dest": "drop_malformed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Allow dropping pre-existing malformed lines",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-verify"
+            ],
+            "dest": "no_verify",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip trailing `verify` check",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--full-verify"
+            ],
+            "dest": "full_verify",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Run full `verify` instead of `verify --fast`",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Override max source file size in bytes across stages",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Preview mutating stages without writing to disk",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "symbol": {
+        "prog": "aoci_index.py symbol",
+        "description": null,
+        "func_name": "cmd_symbol",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "name",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": true,
+            "help": "Symbol name or substring to look up",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--exact"
+            ],
+            "dest": "exact",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Restrict to exact / qualified suffix matches",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 1,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "FRAS neighbor expansion hops per matched file (default: 1)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--limit"
+            ],
+            "dest": "limit",
+            "nargs": null,
+            "const": null,
+            "default": 20,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum matched symbols to return (default: 20; 0 = unlimited)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--live"
+            ],
+            "dest": "live",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Read-only live outline fallback for files missing from outline cache",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "batch-pack": {
+        "prog": "aoci_index.py batch-pack",
+        "description": null,
+        "func_name": "cmd_batch_pack",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--batch"
+            ],
+            "dest": "batch",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": true,
+            "help": "1-indexed batch number to pack",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--batch-size"
+            ],
+            "dest": "batch_size",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Files per batch (inherits active batch_plan.json if omitted)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-batch-lines"
+            ],
+            "dest": "max_batch_lines",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Line budget per batch",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--reset-batches"
+            ],
+            "dest": "reset_batches",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Rebuild `.aoci/.cache/batch_plan.json` before packing",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--with-source"
+            ],
+            "dest": "with_source",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Embed bounded source excerpts per file",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-source-lines"
+            ],
+            "dest": "max_source_lines",
+            "nargs": null,
+            "const": null,
+            "default": 200,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum source lines per file with `--with-source` (default: 200)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--output"
+            ],
+            "dest": "output",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional output file path",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "ci-check": {
+        "prog": "aoci_index.py ci-check",
+        "description": null,
+        "func_name": "cmd_ci_check",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--format"
+            ],
+            "dest": "format",
+            "nargs": null,
+            "const": null,
+            "default": "text",
+            "type": null,
+            "choices": [
+              "text",
+              "json",
+              "github",
+              "sarif",
+              "markdown"
+            ],
+            "required": false,
+            "help": "Report output format (default: text)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--base-rev"
+            ],
+            "dest": "base_rev",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Base Git revision (e.g. `origin/main`) for PR diff impact & test derivation",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--pool-bundle"
+            ],
+            "dest": "pool_bundle",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional exported semantic pool bundle (`.json` or `.json.gz`) for zero-index CI",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--forbid"
+            ],
+            "dest": "forbid",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Extra layer redlines (e.g. `D!->E,U; P!->E`)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-default-rules"
+            ],
+            "dest": "no_default_rules",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Disable built-in layer redline defaults",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-static"
+            ],
+            "dest": "no_static",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip static import vs FRAS cross-check",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-cycles"
+            ],
+            "dest": "no_cycles",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip dependency cycle detection",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--no-layers"
+            ],
+            "dest": "no_layers",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Skip layer redline validation",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--check-drift"
+            ],
+            "dest": "check_drift",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Also report unsynced `.aoci/` drift when `.aoci/` exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--exclude-tests"
+            ],
+            "dest": "exclude_tests",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exclude T-layer test files from layer/cycle checks",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--sarif-output"
+            ],
+            "dest": "sarif_output",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional file path to write SARIF 2.1.0 output alongside stdout",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--output"
+            ],
+            "dest": "output",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Optional file path to write formatted report",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--strict"
+            ],
+            "dest": "strict",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Exit with code 1 when any architectural finding exists",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Shortcut for `--format json`",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      }
+    }
+  },
+  "help_texts": {
+    "aoci_index.py": "usage: aoci_index.py [-h] [-V]\n                     {init,scan,status,upsert,ack,lint,migrate-renames,verify,query,context,overview,outline,shard,restore,diff,scaffold,ensure-git-exclude,audit,export,pool,install-git-hooks,pack,prepare-sync,zoom,apply-sync,symbol,batch-pack,ci-check} ...\n\nAOCI Fast Codebase Index Manager\n\npositional arguments:\n  {init,scan,status,upsert,ack,lint,migrate-renames,verify,query,context,overview,outline,shard,restore,diff,scaffold,ensure-git-exclude,audit,export,pool,install-git-hooks,pack,prepare-sync,zoom,apply-sync,symbol,batch-pack,ci-check}\n    init                Initialize `.aoci/` index repository and enforce `.git/info/exclude`\n    scan                Detect codebase drift and generate line-balanced batching plan\n    status              Detect codebase drift and generate line-balanced batching plan\n    upsert              Validate & merge FRAS entries into `aoci.code.txt` and `baseline.json`\n    ack                 Re-baseline modified files whose existing FRAS entries are still accurate\n                        (auto Size tier refresh)\n    lint                FRAS quality checks (vague F, token budget, hub S, dangling refs, dups)\n    migrate-renames     Migrate exact-content (and high-similarity moved+edited) renamed files and\n                        rewrite R:/A: refs\n    verify              Verify Git exclusion, entry format, and zero SHA-256 drift\n    query               Filter or BM25-search `.aoci/aoci.code.txt` entries or trace impact\n                        neighbors\n    context             Expand architectural subgraph (targets + R: deps + upstream callers)\n    overview            Print compact global digest for fast orientation\n    outline             Extract static imports and top-level symbols to assist R:/A: authoring\n    shard               Split `aoci.code.txt` into per-directory `.aoci/shards/<dir>.code.txt`\n                        slices (auto-synced once enabled)\n    restore             Zero-token restore of FRAS entries from `<git-common-dir>/aoci-cache`\n                        after branch switches or worktrees\n    diff                Generate architectural impact briefing (FRAS + S: traps + affected\n                        callers) for Git diffs\n    scaffold            Draft FRAS entry skeletons with auto-resolved R: imports and repo-wide A:\n                        callers (<TODO> F:/S:)\n    ensure-git-exclude  Idempotently enforce `.aoci/` in `.git/info/exclude`\n    audit               Audit FRAS graph vs static imports, dependency cycles (Tarjan SCC), and\n                        forbidden layer edges\n    export              Export FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML\n                        format\n    pool                Inspect, export, or import `.pool.sqlite3` semantic cache entries\n    install-git-hooks   Install or remove idempotent local Git hooks (`post-checkout`/`post-\n                        merge`/`post-rewrite` + optional `pre-commit`)\n    pack                Build a task-driven, token-budgeted context pack (seeds + R:/A:\n                        neighborhood + S: traps + open_next)\n    prepare-sync        Collect single-pass agent sync briefing (scaffolds, outlines, bounded\n                        diffs, neighbors, actions)\n    zoom                Read, scaffold, or upsert symbol-level H-tier sections in\n                        `.aoci/aoci.hubs.txt`\n    apply-sync          Run ordered sync workflow (restore -> migrate-renames -> ack -> upsert ->\n                        verify) in one pass\n    symbol              Search symbols across `.aoci/aoci.hubs.txt`, outline cache, and FRAS `A:`\n                        exports\n    batch-pack          Assemble a self-contained subagent work-pack (scaffolds + outlines +\n                        optional source) for batch N\n    ci-check            CI-native architecture guard (layer rules, cycles, PR diff impact, GitHub\n                        annotations & SARIF 2.1.0)\n\noptions:\n  -h, --help            show this help message and exit\n  -V, --version         show program's version number and exit\n",
+    "aoci_index.py init": "usage: aoci_index.py init [-h] [--root ROOT] [--project PROJECT] [--locale LOCALE] [--force]\n                          [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root (defaults to Git toplevel or CWD)\n  --project PROJECT     Project name for `aoci.txt`\n  --locale LOCALE       Locale label (default: en-US)\n  --force               Overwrite existing template files\n  --max-bytes MAX_BYTES\n                        Max file size in bytes (default: 524288)\n  --json                Output JSON\n",
+    "aoci_index.py scan": "usage: aoci_index.py scan [-h] [--root ROOT] [--batches BATCHES]\n                          [--max-batch-lines MAX_BATCH_LINES] [--reset-batches] [--fast]\n                          [--git-fast] [--auto-restore] [--check-only] [--fail-on-drift]\n                          [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --batches, --batch-size BATCHES\n                        Split pending files into batches of up to N files per batch (`--batch-size\n                        N`)\n  --max-batch-lines MAX_BATCH_LINES\n                        Maximum line budget per batch (default: 2500)\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` from current pending files\n  --fast                Skip disk reads when mtime & byte size match baseline\n  --git-fast            Use cached Git index + `git status` incremental discovery (auto-enabled on\n                        >=2000-file repos with --fast)\n  --auto-restore        Automatically restore matching `(path, sha256)` entries from semantic\n                        cache pool before scanning\n  --check-only          Do not auto-repair `.git/info/exclude`\n  --fail-on-drift       Exit with code 1 if any drift exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py status": "usage: aoci_index.py status [-h] [--root ROOT] [--batches BATCHES]\n                            [--max-batch-lines MAX_BATCH_LINES] [--reset-batches] [--fast]\n                            [--git-fast] [--auto-restore] [--check-only] [--fail-on-drift]\n                            [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --batches, --batch-size BATCHES\n                        Split pending files into batches of up to N files per batch (`--batch-size\n                        N`)\n  --max-batch-lines MAX_BATCH_LINES\n                        Maximum line budget per batch (default: 2500)\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` from current pending files\n  --fast                Skip disk reads when mtime & byte size match baseline\n  --git-fast            Use cached Git index + `git status` incremental discovery (auto-enabled on\n                        >=2000-file repos with --fast)\n  --auto-restore        Automatically restore matching `(path, sha256)` entries from semantic\n                        cache pool before scanning\n  --check-only          Do not auto-repair `.git/info/exclude`\n  --fail-on-drift       Exit with code 1 if any drift exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py upsert": "usage: aoci_index.py upsert [-h] [--root ROOT] [--entries-file ENTRIES_FILE]\n                            [--pending-dir PENDING_DIR] [--clean-pending] [--entry ENTRY]\n                            [--stdin] [--prune-only] [--no-prune] [--strict-size] [--dry-run]\n                            [--drop-malformed] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --entries-file ENTRIES_FILE\n                        Path to a text file containing object-fras-v2 lines\n  --pending-dir PENDING_DIR\n                        Directory containing `*.txt` subagent batch entry files to validate and\n                        merge atomically\n  --clean-pending       Remove consumed `*.txt` files in `--pending-dir` after a successful non-\n                        dry-run merge\n  --entry ENTRY         Single object-fras-v2 line (repeatable)\n  --stdin               Read object-fras-v2 lines from stdin\n  --prune-only          Only prune deleted/ignored files from index\n  --no-prune            Do not automatically prune deleted files\n  --strict-size         Fail instead of auto-fixing stale Size tier\n  --dry-run             Validate entries without writing to disk\n  --drop-malformed      Allow the rewrite to delete pre-existing malformed lines in aoci.code.txt\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py ack": "usage: aoci_index.py ack [-h] [--root ROOT] [--all-modified] [--impl-only] [--reviewed]\n                         [--dry-run] [--max-bytes MAX_BYTES] [--json]\n                         [paths ...]\n\npositional arguments:\n  paths                 Relative file paths to acknowledge\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --all-modified        Acknowledge every currently modified file (requires --reviewed)\n  --impl-only           Acknowledge only modified files whose interface signature hash is\n                        unchanged (requires --reviewed unless --dry-run)\n  --reviewed            Confirm every file matched by --all-modified was read and its FRAS entry\n                        verified accurate\n  --dry-run             Preview without writing\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py lint": "usage: aoci_index.py lint [-h] [--root ROOT] [--code CODE] [--limit LIMIT] [--strict]\n                          [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --code CODE           Comma-separated finding codes to keep (e.g. ref-dangling,F-vague)\n  --limit LIMIT         Max findings to print (default: 100)\n  --strict              Exit 1 when any finding exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py migrate-renames": "usage: aoci_index.py migrate-renames [-h] [--root ROOT] [--exact-only] [--no-rewrite-refs]\n                                     [--drop-malformed] [--dry-run] [--max-bytes MAX_BYTES]\n                                     [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --exact-only          Only migrate byte-identical renames, skip moved+edited matches\n  --no-rewrite-refs     Do not rewrite path mentions in other R:/A: fields\n  --drop-malformed      Allow the rewrite to delete pre-existing malformed lines in aoci.code.txt\n  --dry-run             Preview migrations without writing to disk\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py verify": "usage: aoci_index.py verify [-h] [--root ROOT] [--max-bytes MAX_BYTES] [--fast] [--git-fast]\n                            [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --max-bytes MAX_BYTES\n  --fast                Trust (mtime,size) for unchanged non-racy files (quick pre-check; full\n                        hashing is the default)\n  --git-fast            Use cached Git index + `git status` incremental scan\n  --json                Output JSON\n",
+    "aoci_index.py query": "usage: aoci_index.py query [-h] [--root ROOT] [--layer LAYER] [--domain DOMAIN]\n                           [--min-importance MIN_IMPORTANCE] [--path PATH] [--keyword KEYWORD]\n                           [--search SEARCH] [--top TOP] [--impact IMPACT] [--tests-for TESTS_FOR]\n                           [--live-test-imports] [--depth DEPTH] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --layer LAYER         Filter by Layer code(s), e.g. `M` or `E,A,M`\n  --domain DOMAIN       Filter by Domain code(s), e.g. `O` or `A,O`\n  --min-importance MIN_IMPORTANCE\n                        Filter entries with Importance >= N\n  --path PATH           Glob pattern on relative path (e.g. `src/auth/*`)\n  --keyword KEYWORD     Case-insensitive exact substring filter\n  --search SEARCH       Ranked multi-term BM25 + Importance search across path/symbols/F/R/A/S\n  --top TOP             Maximum entries to return (default: 20 with --search; 0 = unlimited)\n  --impact IMPACT       Target file plus every entry that depends on it (via R: or A: callers)\n  --tests-for TESTS_FOR\n                        Target file to find impacted T-layer test files (FRAS + outline + naming)\n  --live-test-imports   Read uncached T-layer test imports in memory when outline_cache.json is\n                        missing/stale\n  --depth DEPTH         Transitive hops (default: 1 for --impact, 3 for --tests-for)\n  --json                Output JSON\n",
+    "aoci_index.py context": "usage: aoci_index.py context [-h] [--root ROOT] [--depth DEPTH] [--budget BUDGET] [--with-tests]\n                             [--live-test-imports] [--json]\n                             paths [paths ...]\n\npositional arguments:\n  paths                One or more relative file paths\n\noptions:\n  -h, --help           show this help message and exit\n  --root ROOT          Target codebase root\n  --depth DEPTH        Graph expansion hops (default: 1)\n  --budget BUDGET      Optional token budget ceiling (0 = unlimited)\n  --with-tests         Attach impacted T-layer test files\n  --live-test-imports  Read uncached T-layer test imports in memory when outline_cache.json is\n                       missing/stale\n  --json               Output JSON\n",
+    "aoci_index.py overview": "usage: aoci_index.py overview [-h] [--root ROOT] [--min-importance MIN_IMPORTANCE]\n                              [--max-core MAX_CORE] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --min-importance MIN_IMPORTANCE\n                        Minimum Importance for core entries (default: 7)\n  --max-core MAX_CORE   Max core entries to display (default: 50)\n  --json                Output JSON\n",
+    "aoci_index.py outline": "usage: aoci_index.py outline [-h] [--root ROOT] [--max-items MAX_ITEMS] [--max-bytes MAX_BYTES]\n                             [--json]\n                             paths [paths ...]\n\npositional arguments:\n  paths                 One or more relative file paths\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --max-items MAX_ITEMS\n                        Max imports/symbols per file (default: 30)\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py shard": "usage: aoci_index.py shard [-h] [--root ROOT] [--depth DEPTH] [--clean] [--json]\n\noptions:\n  -h, --help     show this help message and exit\n  --root ROOT    Target codebase root\n  --depth DEPTH  Directory prefix depth for shard grouping (default: 1)\n  --clean        Disable sharding and remove `.aoci/shards/`\n  --json         Output JSON\n",
+    "aoci_index.py restore": "usage: aoci_index.py restore [-h] [--root ROOT] [--allow-sha-fallback] [--exact-path-only]\n                             [--no-prune] [--dry-run] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --allow-sha-fallback  Opt in to content-hash fallback for unambiguous moved files whose original\n                        path no longer exists\n  --exact-path-only     Legacy alias; exact `(path, sha256)` restore is the default\n  --no-prune            Do not prune entries missing on the current branch\n  --dry-run             Preview restorable entries without writing\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py diff": "usage: aoci_index.py diff [-h] [--root ROOT] [--staged] [--depth DEPTH] [--with-tests]\n                          [--live-test-imports] [--max-bytes MAX_BYTES] [--json]\n                          [rev]\n\npositional arguments:\n  rev                   Optional Git revision spec (e.g. `main...HEAD`, `HEAD~1`)\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --staged              Inspect staged (`--cached`) diff\n  --depth DEPTH         Upstream caller hops (default: 1)\n  --with-tests          Attach impacted T-layer test files\n  --live-test-imports   Read uncached T-layer test imports in memory when outline_cache.json is\n                        missing/stale\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py scaffold": "usage: aoci_index.py scaffold [-h] [--root ROOT] [--unindexed] [--batch BATCH]\n                              [--batch-size BATCH_SIZE] [--max-batch-lines MAX_BATCH_LINES]\n                              [--reset-batches] [--output OUTPUT] [--max-bytes MAX_BYTES] [--json]\n                              [paths ...]\n\npositional arguments:\n  paths                 Target relative paths to scaffold\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --unindexed           Scaffold all currently pending/unindexed files\n  --batch BATCH         Scaffold 1-indexed batch N from pending files\n  --batch-size BATCH_SIZE\n                        Batch size when used with --batch (inherits active batch_plan.json if\n                        omitted, else 20)\n  --max-batch-lines MAX_BATCH_LINES\n                        Maximum line budget per batch (inherits active plan if omitted)\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` before selecting `--batch`\n  --output OUTPUT       Optional path (e.g. `.aoci/pending/batch_01.txt`) to write skeleton lines\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py ensure-git-exclude": "usage: aoci_index.py ensure-git-exclude [-h] [--root ROOT] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --root ROOT  Target codebase root\n  --json       Output JSON\n",
+    "aoci_index.py audit": "usage: aoci_index.py audit [-h] [--root ROOT] [--forbid FORBID] [--no-default-rules] [--no-static]\n                           [--no-cycles] [--no-layers] [--co-change]\n                           [--co-change-commits CO_CHANGE_COMMITS]\n                           [--min-co-changes MIN_CO_CHANGES]\n                           [--min-co-confidence MIN_CO_CONFIDENCE] [--exclude-tests] [--strict]\n                           [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --forbid FORBID       Extra layer redlines (e.g. `D!->E,U; P!->E`)\n  --no-default-rules    Disable built-in layer redline defaults\n  --no-static           Skip static import vs FRAS cross-check\n  --no-cycles           Skip dependency cycle detection\n  --no-layers           Skip layer redline validation\n  --co-change           Mine recent Git commits for unlinked co-changing pairs\n  --co-change-commits CO_CHANGE_COMMITS\n                        Max recent commits to scan for --co-change (default: 200)\n  --min-co-changes MIN_CO_CHANGES\n                        Minimum co-change commit count (default: 3)\n  --min-co-confidence MIN_CO_CONFIDENCE\n                        Minimum co-change confidence in [0,1] (default: 0.6)\n  --exclude-tests       Exclude T-layer test files from --co-change pairs\n  --strict              Exit 1 when any missing static dep, cycle, or layer violation exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py export": "usage: aoci_index.py export [-h] [--root ROOT] [--format {mermaid,dot,html}]\n                            [--level {file,dir,domain}] [--group-by {domain,dir,layer,none}]\n                            [--direction {LR,TD,TB}] [--layer LAYER] [--domain DOMAIN]\n                            [--min-importance MIN_IMPORTANCE] [--path PATH] [--focus FOCUS]\n                            [--depth DEPTH] [--diff] [--diff-rev DIFF_REV] [--output OUTPUT]\n                            [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --format {mermaid,dot,html}\n                        Output format (default: mermaid)\n  --level {file,dir,domain}\n                        Aggregation level (default: file)\n  --group-by {domain,dir,layer,none}\n                        Subgraph grouping for file level\n  --direction {LR,TD,TB}\n                        Graph layout direction (default: LR)\n  --layer LAYER         Filter nodes by Layer code(s)\n  --domain DOMAIN       Filter nodes by Domain code(s)\n  --min-importance MIN_IMPORTANCE\n                        Filter nodes with Importance >= N\n  --path PATH           Glob filter on relative file paths\n  --focus FOCUS         Center subgraph on a target file and its neighbors\n  --depth DEPTH         Neighborhood hops around `--focus` (default: 1)\n  --diff                Highlight working-tree changed nodes and affected 1-hop callers\n  --diff-rev DIFF_REV   Highlight changed nodes and affected callers against Git revision (e.g.\n                        `origin/main`)\n  --output OUTPUT       Optional output file path relative to `--root`\n  --json                Output JSON\n",
+    "aoci_index.py pool": "usage: aoci_index.py pool [-h] {stats,export,import} ...\n\npositional arguments:\n  {stats,export,import}\n    stats               Show SQLite WAL semantic pool counts and path\n    export              Export validated semantic pool entries to a portable JSON(.gz) bundle\n    import              Validate and import entries from an `aoci-semantic-pool-v1` JSON(.gz)\n                        bundle\n\noptions:\n  -h, --help            show this help message and exit\n",
+    "aoci_index.py pool stats": "usage: aoci_index.py pool stats [-h] [--root ROOT] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --root ROOT  Target codebase root\n  --json       Output JSON\n",
+    "aoci_index.py pool export": "usage: aoci_index.py pool export [-h] [--root ROOT] --output OUTPUT [--pool-only] [--json]\n\noptions:\n  -h, --help       show this help message and exit\n  --root ROOT      Target codebase root\n  --output OUTPUT  Output bundle path (use `.json.gz` for gzip)\n  --pool-only      Export only rows already in the SQLite pool (skip current code.txt)\n  --json           Output JSON\n",
+    "aoci_index.py pool import": "usage: aoci_index.py pool import [-h] [--root ROOT] --input INPUT [--dry-run] [--json]\n\noptions:\n  -h, --help     show this help message and exit\n  --root ROOT    Target codebase root\n  --input INPUT  Input bundle file path relative to `--root` or absolute\n  --dry-run      Validate bundle without modifying the pool DB\n  --json         Output JSON\n",
+    "aoci_index.py install-git-hooks": "usage: aoci_index.py install-git-hooks [-h] [--root ROOT] [--python-cmd PYTHON_CMD]\n                                       [--with-pre-commit] [--pre-commit-verify] [--uninstall]\n                                       [--dry-run] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --python-cmd PYTHON_CMD\n                        Python interpreter command written into hook scripts\n  --with-pre-commit     Also manage a `pre-commit` guard rejecting staged `.aoci/` files\n  --pre-commit-verify   Run `verify --fast` inside `pre-commit` when `--with-pre-commit` is\n                        enabled\n  --uninstall           Strip AOCI managed blocks from Git hooks cleanly\n  --dry-run             Preview hook actions without writing\n  --json                Output JSON\n",
+    "aoci_index.py pack": "usage: aoci_index.py pack [-h] --task TASK [--root ROOT] [--no-diff] [--depth DEPTH]\n                          [--budget BUDGET] [--top-seeds TOP_SEEDS] [--with-tests]\n                          [--live-test-imports] [--live-anchors] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --task TASK           Task description or query to pack context for\n  --root ROOT           Target codebase root\n  --no-diff             Exclude working-tree Git diff signals\n  --depth DEPTH         Graph expansion hops around seeds (default: 1)\n  --budget BUDGET       Token budget ceiling (default: 2500; 0 = unlimited)\n  --top-seeds TOP_SEEDS\n                        Maximum BM25 seed hits (default: 8)\n  --with-tests          Attach impacted T-layer test files for packed seeds\n  --live-test-imports   Read uncached T-layer test imports in memory when outline_cache.json is\n                        missing/stale\n  --live-anchors        Extract live symbol anchors in memory when outline cache misses\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py prepare-sync": "usage: aoci_index.py prepare-sync [-h] [--root ROOT] [--no-fast] [--max-diff-lines MAX_DIFF_LINES]\n                                  [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --no-fast             Force full SHA-256 verification instead of fast mtime mode\n  --max-diff-lines MAX_DIFF_LINES\n                        Max git diff lines per modified file (default: 40)\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py zoom": "usage: aoci_index.py zoom [-h] [--root ROOT] [--scaffold] [--output OUTPUT] [--upsert UPSERT]\n                          [--upsert-file UPSERT_FILE] [--prune-missing] [--dry-run]\n                          [--max-bytes MAX_BYTES] [--json]\n                          [path]\n\npositional arguments:\n  path                  Target relative file path (for read or --scaffold)\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --scaffold            Scaffold symbol section skeletons for <path>\n  --output OUTPUT       Optional output file path for --scaffold skeletons\n  --upsert UPSERT       Hub entry line to merge into aoci.hubs.txt (repeatable)\n  --upsert-file UPSERT_FILE\n                        Path to a text file containing hub entry lines\n  --prune-missing       Prune hub entries whose file or symbol no longer exists\n  --dry-run             Validate --upsert changes without writing to disk\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py apply-sync": "usage: aoci_index.py apply-sync [-h] [--root ROOT] [--restore] [--allow-sha-fallback]\n                                [--migrate-renames] [--exact-only] [--no-rewrite-refs]\n                                [--ack-path ACK_PATH] [--ack-impl-only] [--reviewed]\n                                [--entry ENTRY] [--entries-file ENTRIES_FILE] [--prune-only]\n                                [--no-prune] [--strict-size] [--drop-malformed] [--no-verify]\n                                [--full-verify] [--max-bytes MAX_BYTES] [--dry-run] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --restore             Run semantic pool restore (`--no-prune`) first\n  --allow-sha-fallback  Pass `--allow-sha-fallback` to `restore`\n  --migrate-renames     Migrate exact and similar renames\n  --exact-only          Pass `--exact-only` to `migrate-renames`\n  --no-rewrite-refs     Pass `--no-rewrite-refs` to `migrate-renames`\n  --ack-path ACK_PATH   Path to acknowledge via `ack` (repeatable; requires --reviewed)\n  --ack-impl-only       Acknowledge `impl_only` modified files (requires --reviewed)\n  --reviewed            Confirm acknowledged files were read and verified\n  --entry ENTRY         object-fras-v2 line to merge in `upsert` (repeatable)\n  --entries-file ENTRIES_FILE\n                        File containing object-fras-v2 lines to merge in `upsert`\n  --prune-only          Pass `--prune-only` to `upsert`\n  --no-prune            Pass `--no-prune` to `upsert`\n  --strict-size         Pass `--strict-size` to `upsert`\n  --drop-malformed      Allow dropping pre-existing malformed lines\n  --no-verify           Skip trailing `verify` check\n  --full-verify         Run full `verify` instead of `verify --fast`\n  --max-bytes MAX_BYTES\n                        Override max source file size in bytes across stages\n  --dry-run             Preview mutating stages without writing to disk\n  --json                Output JSON\n",
+    "aoci_index.py symbol": "usage: aoci_index.py symbol [-h] [--root ROOT] [--exact] [--depth DEPTH] [--limit LIMIT] [--live]\n                            [--json]\n                            name\n\npositional arguments:\n  name           Symbol name or substring to look up\n\noptions:\n  -h, --help     show this help message and exit\n  --root ROOT    Target codebase root\n  --exact        Restrict to exact / qualified suffix matches\n  --depth DEPTH  FRAS neighbor expansion hops per matched file (default: 1)\n  --limit LIMIT  Maximum matched symbols to return (default: 20; 0 = unlimited)\n  --live         Read-only live outline fallback for files missing from outline cache\n  --json         Output JSON\n",
+    "aoci_index.py batch-pack": "usage: aoci_index.py batch-pack [-h] --batch BATCH [--root ROOT] [--batch-size BATCH_SIZE]\n                                [--max-batch-lines MAX_BATCH_LINES] [--reset-batches]\n                                [--with-source] [--max-source-lines MAX_SOURCE_LINES]\n                                [--output OUTPUT] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --batch BATCH         1-indexed batch number to pack\n  --root ROOT           Target codebase root\n  --batch-size BATCH_SIZE\n                        Files per batch (inherits active batch_plan.json if omitted)\n  --max-batch-lines MAX_BATCH_LINES\n                        Line budget per batch\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` before packing\n  --with-source         Embed bounded source excerpts per file\n  --max-source-lines MAX_SOURCE_LINES\n                        Maximum source lines per file with `--with-source` (default: 200)\n  --output OUTPUT       Optional output file path\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py ci-check": "usage: aoci_index.py ci-check [-h] [--root ROOT] [--format {text,json,github,sarif,markdown}]\n                              [--base-rev BASE_REV] [--pool-bundle POOL_BUNDLE] [--forbid FORBID]\n                              [--no-default-rules] [--no-static] [--no-cycles] [--no-layers]\n                              [--check-drift] [--exclude-tests] [--sarif-output SARIF_OUTPUT]\n                              [--output OUTPUT] [--strict] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --format {text,json,github,sarif,markdown}\n                        Report output format (default: text)\n  --base-rev BASE_REV   Base Git revision (e.g. `origin/main`) for PR diff impact & test\n                        derivation\n  --pool-bundle POOL_BUNDLE\n                        Optional exported semantic pool bundle (`.json` or `.json.gz`) for zero-\n                        index CI\n  --forbid FORBID       Extra layer redlines (e.g. `D!->E,U; P!->E`)\n  --no-default-rules    Disable built-in layer redline defaults\n  --no-static           Skip static import vs FRAS cross-check\n  --no-cycles           Skip dependency cycle detection\n  --no-layers           Skip layer redline validation\n  --check-drift         Also report unsynced `.aoci/` drift when `.aoci/` exists\n  --exclude-tests       Exclude T-layer test files from layer/cycle checks\n  --sarif-output SARIF_OUTPUT\n                        Optional file path to write SARIF 2.1.0 output alongside stdout\n  --output OUTPUT       Optional file path to write formatted report\n  --strict              Exit with code 1 when any architectural finding exists\n  --max-bytes MAX_BYTES\n  --json                Shortcut for `--format json`\n"
+  }
+}

@@ -2336,8 +2336,9 @@ class Phase1FixesTests(RepoTestCase):
 
         # Git Copy (`C100\0app.py\0app_copy.py\0`) must NOT report source `app.py` as deleted
         fake_cp = subprocess.CompletedProcess(["git"], 0, stdout="C100\0app.py\0app_copy.py\0", stderr="")
-        with mock.patch.object(aoci_index, "run_git", return_value=fake_cp):
+        with mock.patch.object(aoci_index, "run_git", return_value=fake_cp) as spy_copy_git:
             cp_brief = aoci_index.compute_diff_briefing(sub, rev="HEAD~1..HEAD")
+        self.assertGreaterEqual(spy_copy_git.call_count, 1)
         self.assertEqual(cp_brief["deleted_entries"], [])
         self.assertEqual(cp_brief["unindexed_changed"], ["app_copy.py"])
 
@@ -3369,6 +3370,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
             with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_after = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_after["entries"]], ["c.py", "d.py"])
+        self.assertGreaterEqual(len(fp_headers), 1)
         for header in fp_headers:
             self.assertIn(header, ("def fn_a():", "def fn_b():"), f"unexpected re-hash of unindexed file: {header}")
 
@@ -3387,7 +3389,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
             with mock.patch.object(aoci_index, "extract_file_outline", side_effect=_track_outline):
                 sc2_aged = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_aged["entries"]], ["c.py", "d.py"])
-        self.assertTrue(all(p in ("a.py", "b.py") for p in extracted_paths), extracted_paths)
+        self.assertEqual(sorted(extracted_paths), ["a.py", "b.py"])
 
         # Repeated Batch 2 now hits 0 hashes AND 0 outline extractions across all 6 files
         with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
