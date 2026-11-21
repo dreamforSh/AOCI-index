@@ -766,6 +766,89 @@ class HookSessionTests(RepoTestCase):
             with mock.patch.object(aoci_index, "detect_git_info", side_effect=AssertionError("git must not be called")):
                 self.assertEqual(aoci_hook.discover_indexed_roots({"cwd": plain_dir}), [])
 
+    def test_codex_hook_contract_auto_detect_session_turn_and_stop(self):
+        self.write("a.py", "a = 1\n")
+        self.write("b.py", "b = 1\n")
+        self.init()
+        self.upsert(
+            "a.py[CX2T]: F:defines constant a value | R:- | A:- | S:-",
+            "b.py[CX2T]: F:defines constant b value | R:- | A:- | S:-",
+        )
+        self.write("a.py", "a = 2\n")  # pre-existing user edit before session start
+
+        base = {
+            "cwd": str(self.root),
+            "session_id": "codex-1",
+            "transcript_path": None,
+            "model": "gpt-5",
+            "permission_mode": "default",
+        }
+        start = hook(
+            "session-start",
+            dict(base, hook_event_name="SessionStart", source="startup"),
+            host="codex",
+        )
+        self.assertEqual(set(start.keys()), {"hookSpecificOutput"})
+        self.assertEqual(set(start["hookSpecificOutput"].keys()), {"hookEventName", "additionalContext"})
+        self.assertEqual(start["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertIn("aoci_index.py", start["hookSpecificOutput"]["additionalContext"])
+
+        compact = hook(
+            "session-start",
+            dict(base, hook_event_name="SessionStart", source="compact"),
+            host="codex",
+        )
+        self.assertIn("post-compaction context refresh", compact["hookSpecificOutput"]["additionalContext"])
+
+        # Auto-detect Codex via `turn_id` / `last_assistant_message`
+        stop_clean = hook(
+            "auto",
+            dict(base, turn_id="t1", hook_event_name="Stop", stop_hook_active=False, last_assistant_message=None),
+            host="auto",
+        )
+        self.assertEqual(stop_clean, {})
+
+        # Turn-start (`UserPromptSubmit`) refreshes user edit baseline
+        self.write("a.py", "a = 3\n")
+        self.assertEqual(
+            hook(
+                "auto",
+                dict(base, turn_id="t2", hook_event_name="UserPromptSubmit", prompt="update b"),
+                host="auto",
+            ),
+            {},
+        )
+
+        # Agent modifies b.py -> Stop blocks with strict StopCommandOutputWire keys (never hookSpecificOutput)
+        self.write("b.py", "b = 2\n")
+        stop_block = hook(
+            "auto",
+            dict(base, turn_id="t2", hook_event_name="Stop", stop_hook_active=False, last_assistant_message="done"),
+            host="auto",
+        )
+        self.assertEqual(set(stop_block.keys()), {"decision", "reason"})
+        self.assertEqual(stop_block["decision"], "block")
+        self.assertNotIn("hookSpecificOutput", stop_block)
+        self.assertIn("b.py", stop_block["reason"])
+        self.assertNotIn("modified(2)", stop_block["reason"])
+
+        # Loop protection: stop_hook_active=True without progress stops retrying
+        stop_cap = hook(
+            "auto",
+            dict(base, turn_id="t2", hook_event_name="Stop", stop_hook_active=True, last_assistant_message="retry"),
+            host="auto",
+        )
+        self.assertEqual(stop_cap, {})
+
+        # Non-indexed workspace returns {} across all Codex events
+        with tempfile.TemporaryDirectory() as plain_dir:
+            for ev, extra in (
+                ("session-start", {"hook_event_name": "SessionStart", "source": "startup"}),
+                ("turn-start", {"turn_id": "t0", "hook_event_name": "UserPromptSubmit", "prompt": "hi"}),
+                ("stop", {"turn_id": "t0", "hook_event_name": "Stop", "stop_hook_active": False}),
+            ):
+                self.assertEqual(hook(ev, {"cwd": plain_dir, "session_id": "s0", **extra}, host="codex"), {})
+
 
 class InstallAndNonGitTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -956,6 +1039,205 @@ class InstallAndNonGitTests(unittest.TestCase):
         self.assertIn("app.py", added_paths)
         self.assertNotIn("secret.env", added_paths)
         self.assertNotIn("gen_out/x.py", added_paths)
+
+    def test_codex_install_global_project_runner_toml_mcp_and_clean_uninstall(self):
+        # 0) Validate static Codex manual templates conform strictly to HooksFile schema
+        for tpl_name in ("codex.hooks.global.json", "codex.hooks.project.json"):
+            tpl = json.loads((SKILL_DIR / "resources" / tpl_name).read_text(encoding="utf-8"))
+            self.assertLessEqual(set(tpl.keys()), {"description", "hooks"}, tpl_name)
+            self.assertEqual(set(tpl["hooks"].keys()), {"SessionStart", "UserPromptSubmit", "Stop"}, tpl_name)
+
+        # 1) Global install preserving existing Codex hooks, TOML tables, comments, and sibling MCP servers
+        home = self.tmp / "codex_home"
+        codex_dir = home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "hooks.json").write_text(
+            json.dumps(
+                {
+                    "description": "Custom Codex hooks",
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "^Bash$", "hooks": [{"type": "command", "command": "echo guard"}]}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (codex_dir / "config.toml").write_text(
+            "# User global Codex config\n"
+            'model = "gpt-5"\n\n'
+            "[features]\n"
+            "hooks = true\n\n"
+            "[mcp_servers.other]\n"
+            'command = "node"\n'
+            'args = ["other.js"]\n',
+            encoding="utf-8",
+        )
+
+        code, out = self.run_install(
+            "--host", "codex", "--scope", "global", "--home-dir", str(home),
+            "--with-hooks", "--with-rules", "--with-mcp",
+        )
+        self.assertEqual(code, 0, out)
+        codex_skill = home / ".agents" / "skills" / "aoci-index" / "SKILL.md"
+        self.assertTrue(codex_skill.is_file())
+        self.assertIn("overview", (codex_dir / "AGENTS.md").read_text(encoding="utf-8"))
+
+        hooks_cfg = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+        self.assertEqual(hooks_cfg.get("description"), "Custom Codex hooks")
+        self.assertEqual(hooks_cfg["hooks"]["PreToolUse"][0]["matcher"], "^Bash$")
+        for ev in ("SessionStart", "UserPromptSubmit", "Stop"):
+            self.assertEqual(len(hooks_cfg["hooks"][ev]), 1)
+            self.assertNotIn("matcher", hooks_cfg["hooks"][ev][0])
+            self.assertIn("--host codex", hooks_cfg["hooks"][ev][0]["hooks"][0]["command"])
+
+        toml_text = (codex_dir / "config.toml").read_text(encoding="utf-8")
+        self.assertIn("# User global Codex config", toml_text)
+        self.assertIn("[mcp_servers.other]", toml_text)
+        self.assertIn("[mcp_servers.aoci-index]", toml_text)
+        if sys.version_info >= (3, 11):
+            import tomllib
+
+            parsed_toml = tomllib.loads(toml_text)
+            self.assertEqual(parsed_toml["mcp_servers"]["other"]["command"], "node")
+            aoci_srv = parsed_toml["mcp_servers"]["aoci-index"]
+            self.assertTrue(any("aoci_mcp.py" in a for a in aoci_srv["args"]))
+
+        # Re-install with custom interpreter updates hooks & MCP in-place without duplicating entries
+        code, out = self.run_install(
+            "--host", "codex", "--scope", "global", "--home-dir", str(home),
+            "--python-cmd", "python-custom", "--with-hooks", "--with-mcp",
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual((codex_dir / "config.toml").read_text(encoding="utf-8").count("[mcp_servers.aoci-index]"), 1)
+        hooks_re = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+        self.assertIn("python-custom", hooks_re["hooks"]["SessionStart"][0]["hooks"][0]["command"])
+
+        # Uninstall cleans Codex skill, AGENTS.md snippet, AOCI hooks, and MCP table while keeping user data
+        code, out = self.run_install("--host", "codex", "--scope", "global", "--home-dir", str(home), "--uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(codex_skill.parent.exists())
+        self.assertFalse((codex_dir / "AGENTS.md").exists())
+        hooks_after = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+        self.assertEqual(list(hooks_after["hooks"].keys()), ["PreToolUse"])
+        toml_after = (codex_dir / "config.toml").read_text(encoding="utf-8")
+        self.assertNotIn("[mcp_servers.aoci-index]", toml_after)
+        self.assertIn("[mcp_servers.other]", toml_after)
+        self.assertIn("hooks = true", toml_after)
+        if sys.version_info >= (3, 11):
+            import tomllib
+
+            parsed_after = tomllib.loads(toml_after)
+            self.assertNotIn("aoci-index", parsed_after["mcp_servers"])
+            self.assertIn("other", parsed_after["mcp_servers"])
+
+        # 2) Project install in path with spaces: run generated hooks from root AND nested subdir via real OS shell
+        proj = self.tmp / "codex proj"
+        (proj / "nested" / "pkg").mkdir(parents=True)
+        (proj / "nested" / "pkg" / "app.py").write_text("x = 1\n", encoding="utf-8")
+        age_file(proj / "nested" / "pkg" / "app.py")
+        cli("init", "--root", str(proj))
+        cli("upsert", "--root", str(proj), "--entry", "nested/pkg/app.py[CX2T]: F:defines app x | R:- | A:- | S:-")
+
+        py_arg = f'"{sys.executable}"' if " " in sys.executable else sys.executable
+        code, out = self.run_install(
+            "--host", "codex", "--scope", "project", "--project-root", str(proj), "--home-dir", str(home),
+            "--python-cmd", py_arg, "--with-hooks", "--with-rules", "--with-mcp",
+        )
+        self.assertEqual(code, 0, out)
+        self.assertTrue((proj / ".agents" / "skills" / "aoci-index" / "SKILL.md").is_file())
+        self.assertIn("overview", (proj / "AGENTS.md").read_text(encoding="utf-8"))
+        self.assertIn("[mcp_servers.aoci-index]", (proj / ".codex" / "config.toml").read_text(encoding="utf-8"))
+
+        proj_hooks = json.loads((proj / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+        start_cmd = proj_hooks["SessionStart"][0]["hooks"][0]["command"]
+        turn_cmd = proj_hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
+        stop_cmd = proj_hooks["Stop"][0]["hooks"][0]["command"]
+
+        for work_dir in (proj, proj / "nested" / "pkg"):
+            sp_start = subprocess.run(
+                start_cmd,
+                shell=True,
+                cwd=str(work_dir),
+                input=json.dumps({"cwd": str(work_dir), "session_id": f"s-{work_dir.name}", "hook_event_name": "SessionStart", "source": "startup"}),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(sp_start.returncode, 0, sp_start.stderr)
+            out_start = json.loads(sp_start.stdout)
+            self.assertIn("aoci_index.py", out_start["hookSpecificOutput"]["additionalContext"])
+
+        # Turn-start and Stop from nested subdir after modifying app.py
+        sp_turn = subprocess.run(
+            turn_cmd,
+            shell=True,
+            cwd=str(proj / "nested" / "pkg"),
+            input=json.dumps({"cwd": str(proj / "nested" / "pkg"), "session_id": "s-pkg", "turn_id": "t1", "hook_event_name": "UserPromptSubmit", "prompt": "edit"}),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(sp_turn.returncode, 0, sp_turn.stderr)
+        self.assertEqual(json.loads(sp_turn.stdout), {})
+
+        (proj / "nested" / "pkg" / "app.py").write_text("x = 99\n", encoding="utf-8")
+        sp_stop = subprocess.run(
+            stop_cmd,
+            shell=True,
+            cwd=str(proj / "nested" / "pkg"),
+            input=json.dumps({"cwd": str(proj / "nested" / "pkg"), "session_id": "s-pkg", "turn_id": "t1", "hook_event_name": "Stop", "stop_hook_active": False, "last_assistant_message": "ok"}),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(sp_stop.returncode, 0, sp_stop.stderr)
+        stop_obj = json.loads(sp_stop.stdout)
+        self.assertEqual(stop_obj["decision"], "block")
+        self.assertNotIn("hookSpecificOutput", stop_obj)
+        self.assertIn("nested/pkg/app.py", stop_obj["reason"])
+
+        # `--no-turn-hook` removes UserPromptSubmit cleanly
+        code, out = self.run_install(
+            "--host", "codex", "--scope", "project", "--project-root", str(proj), "--home-dir", str(home),
+            "--with-hooks", "--no-turn-hook",
+        )
+        self.assertEqual(code, 0, out)
+        proj_hooks_noturn = json.loads((proj / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertNotIn("UserPromptSubmit", proj_hooks_noturn)
+        self.assertIn("SessionStart", proj_hooks_noturn)
+        self.assertIn("Stop", proj_hooks_noturn)
+
+        # 3) `--host all` + selective `--host codex --uninstall` keeps shared `.agents/skills/aoci-index` for Antigravity
+        proj_all = self.tmp / "all_hosts_proj"
+        proj_all.mkdir()
+        code, out = self.run_install(
+            "--host", "all", "--scope", "project", "--project-root", str(proj_all), "--home-dir", str(home),
+            "--with-hooks", "--with-rules", "--with-mcp",
+        )
+        self.assertEqual(code, 0, out)
+        self.assertTrue((proj_all / ".claude" / "skills" / "aoci-index" / "SKILL.md").is_file())
+        self.assertTrue((proj_all / ".agents" / "skills" / "aoci-index" / "SKILL.md").is_file())
+        self.assertTrue((proj_all / ".codex" / "hooks.json").is_file())
+        self.assertTrue((proj_all / ".codex" / "config.toml").is_file())
+
+        code, out = self.run_install(
+            "--host", "codex", "--scope", "project", "--project-root", str(proj_all), "--home-dir", str(home), "--uninstall"
+        )
+        self.assertEqual(code, 0, out)
+        self.assertFalse((proj_all / ".codex" / "hooks.json").exists())
+        self.assertFalse((proj_all / ".codex" / "config.toml").exists())
+        self.assertTrue((proj_all / ".agents" / "skills" / "aoci-index" / "SKILL.md").is_file())
+        self.assertTrue((proj_all / "AGENTS.md").is_file())
+
+        code, out = self.run_install(
+            "--host", "all", "--scope", "project", "--project-root", str(proj_all), "--home-dir", str(home), "--uninstall"
+        )
+        self.assertEqual(code, 0, out)
+        self.assertFalse((proj_all / ".claude" / "skills" / "aoci-index").exists())
+        self.assertFalse((proj_all / ".agents" / "skills" / "aoci-index").exists())
+        self.assertFalse((proj_all / "AGENTS.md").exists())
 
 
 class IgnoreMatcherTests(unittest.TestCase):

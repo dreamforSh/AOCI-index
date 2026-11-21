@@ -5,16 +5,22 @@ Cross-Host Installer & Uninstaller for the `aoci-index` Skill (install.py).
 Supports installing and uninstalling `aoci-index` for:
   - Claude Code  (`~/.claude/skills/aoci-index` or `<repo>/.claude/skills/aoci-index`)
                  + optional hooks in `settings.json` + optional `CLAUDE.md` snippet
+                 + optional MCP in `~/.claude.json` / `<repo>/.mcp.json`
   - Antigravity  (`~/.gemini/config/skills/aoci-index` or `<repo>/.agents/skills/aoci-index`)
-                 + optional hooks in `hooks.json` + optional `AGENTS.md` snippet
+                 + optional hooks in `hooks.json` + optional `AGENTS.md` / `GEMINI.md` snippet
+                 + optional MCP in `mcp_config.json` / `.agents/plugins/aoci-index`
+  - Codex        (`~/.agents/skills/aoci-index` or `<repo>/.agents/skills/aoci-index`)
+                 + optional hooks in `~/.codex/hooks.json` / `<repo>/.codex/hooks.json`
+                 + optional `AGENTS.md` snippet (`~/.codex/AGENTS.md` / `<repo>/AGENTS.md`)
+                 + optional MCP in `~/.codex/config.toml` / `<repo>/.codex/config.toml`
 
 Features:
-  - Idempotent JSON hook merging (preserves all existing settings & hooks)
-  - Automatic `.bak` backup before modifying existing JSON config files
+  - Idempotent JSON / TOML merging (preserves all existing settings, comments & hooks)
+  - Automatic `.bak` backup before modifying existing JSON or TOML config files
   - Install manifest (`.aoci-install.json`) so re-installs refuse to clobber locally
     edited skill files unless `--force` is given
   - Global hooks default to the absolute interpreter running this installer (venv-safe)
-  - Clean `--uninstall` that removes only `aoci-index` artifacts (skill + hooks + rules)
+  - Clean `--uninstall` that removes only `aoci-index` artifacts (skill + hooks + rules + MCP)
   - Full `--dry-run` preview mode
 """
 
@@ -67,6 +73,8 @@ COPY_IGNORE = tuple(sorted(_SKIP_DIR_NAMES)) + (
 
 RULE_BEGIN = "<!-- >>> aoci-index -->"
 RULE_END = "<!-- <<< aoci-index -->"
+TOML_MCP_BEGIN = "# >>> aoci-index mcp"
+TOML_MCP_END = "# <<< aoci-index mcp"
 
 
 def configure_utf8_streams() -> None:
@@ -148,10 +156,9 @@ def write_text_lf(path: Path, text: str) -> None:
         fh.write(text)
 
 
-def save_json_dict(path: Path, data: Dict[str, Any], dry_run: bool) -> None:
-    rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+def _write_text_with_backup(path: Path, rendered: str, dry_run: bool, dry_run_label: str = "write file") -> None:
     if dry_run:
-        print(f"  [dry-run] write JSON: {path}")
+        print(f"  [dry-run] {dry_run_label}: {path}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size > 0:
@@ -163,6 +170,11 @@ def save_json_dict(path: Path, data: Dict[str, Any], dry_run: bool) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     write_text_lf(tmp, rendered)
     tmp.replace(path)
+
+
+def save_json_dict(path: Path, data: Dict[str, Any], dry_run: bool) -> None:
+    rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    _write_text_with_backup(path, rendered, dry_run, dry_run_label="write JSON")
 
 
 def _dir_has_any_entries(path: Path) -> bool:
@@ -364,9 +376,13 @@ def _strip_aoci_from_claude_groups(groups: List[Any]) -> Tuple[List[Any], bool]:
     return cleaned_groups, changed
 
 
-def _upsert_aoci_in_claude_groups(groups: List[Any], new_handler: Dict[str, Any]) -> List[Any]:
+def _upsert_aoci_in_claude_groups(
+    groups: List[Any],
+    new_handler: Dict[str, Any],
+    include_matcher: bool = True,
+) -> List[Any]:
     """
-    Replace an existing AOCI command in-place inside its Claude Code hook group (preserving sibling
+    Replace an existing AOCI command in-place inside its hook group (preserving sibling
     commands, order, and `matcher`), or append a new group when AOCI is not yet present.
     """
     out_groups: List[Any] = []
@@ -393,8 +409,18 @@ def _upsert_aoci_in_claude_groups(groups: List[Any], new_handler: Dict[str, Any]
             out_groups.append(new_group)
 
     if not replaced:
-        out_groups.append({"matcher": "", "hooks": [new_handler]})
+        new_group_entry: Dict[str, Any] = {"hooks": [new_handler]}
+        if include_matcher:
+            new_group_entry = {"matcher": "", "hooks": [new_handler]}
+        out_groups.append(new_group_entry)
     return out_groups
+
+
+def _global_hook_runner(skill_dest: Path, py_cmd: str) -> str:
+    script_posix = (skill_dest / "scripts" / "aoci_hook.py").resolve().as_posix()
+    if py_cmd.startswith('"') and " " in script_posix:
+        return f'{py_cmd} -c "import runpy;runpy.run_path({script_posix!r},run_name=\'__main__\')"'
+    return f'{py_cmd} "{script_posix}"'
 
 
 def _claude_project_runner(py_cmd: str) -> str:
@@ -410,6 +436,81 @@ def _claude_project_runner(py_cmd: str) -> str:
     )
 
 
+def _codex_project_expr(script_name: str) -> str:
+    rel_agents = f".agents/skills/{SKILL_NAME}/scripts/{script_name}"
+    rel_codex = f".codex/skills/{SKILL_NAME}/scripts/{script_name}"
+    return (
+        "import pathlib,runpy;"
+        f"p=next((d/r for d in (pathlib.Path.cwd(),*pathlib.Path.cwd().parents) "
+        f"for r in ({rel_agents!r},{rel_codex!r}) if (d/r).is_file()),None);"
+        "p and runpy.run_path(str(p),run_name='__main__')"
+    )
+
+
+def _codex_project_runner(py_cmd: str) -> str:
+    """
+    Shell-neutral Python hook runner for project-scoped Codex installs.
+    Walks upward from CWD to locate `.agents/skills/aoci-index/scripts/aoci_hook.py`
+    (falling back to `.codex/skills/aoci-index/scripts/aoci_hook.py`) so hooks work
+    both at repo root and in nested subdirectories across cmd.exe, PowerShell, and sh.
+    """
+    return f'{py_cmd} -c "{_codex_project_expr("aoci_hook.py")}"'
+
+
+def _codex_project_mcp_args() -> List[str]:
+    return ["-c", _codex_project_expr("aoci_mcp.py")]
+
+
+def _merge_standard_hooks(
+    hooks_obj: Dict[str, Any],
+    runner: str,
+    host_flag: str,
+    with_turn_hook: bool,
+    include_matcher: bool,
+) -> None:
+    desired_events: Dict[str, str] = {
+        "SessionStart": f"{runner} --host {host_flag} --event session-start",
+    }
+    if with_turn_hook:
+        desired_events["UserPromptSubmit"] = f"{runner} --host {host_flag} --event turn-start"
+    elif isinstance(hooks_obj.get("UserPromptSubmit"), list):
+        cleaned_turn, _ = _strip_aoci_from_claude_groups(hooks_obj["UserPromptSubmit"])
+        if cleaned_turn:
+            hooks_obj["UserPromptSubmit"] = cleaned_turn
+        else:
+            del hooks_obj["UserPromptSubmit"]
+    desired_events["Stop"] = f"{runner} --host {host_flag} --event stop"
+
+    for ev_name, cmd_str in desired_events.items():
+        existing = hooks_obj.get(ev_name)
+        if not isinstance(existing, list):
+            existing = []
+        hooks_obj[ev_name] = _upsert_aoci_in_claude_groups(
+            existing,
+            {
+                "type": "command",
+                "command": cmd_str,
+                "timeout": 10,
+            },
+            include_matcher=include_matcher,
+        )
+
+
+def _strip_hooks_dict(hooks_obj: Dict[str, Any]) -> bool:
+    changed = False
+    for ev_name in list(hooks_obj.keys()):
+        existing = hooks_obj.get(ev_name)
+        if isinstance(existing, list):
+            cleaned, ev_changed = _strip_aoci_from_claude_groups(existing)
+            if ev_changed:
+                changed = True
+                if cleaned:
+                    hooks_obj[ev_name] = cleaned
+                else:
+                    del hooks_obj[ev_name]
+    return changed
+
+
 def upsert_claude_hooks(
     settings_json: Path,
     skill_dest: Path,
@@ -423,40 +524,8 @@ def upsert_claude_hooks(
     if not isinstance(hooks_obj, dict):
         raise ValueError(f"`hooks` key in `{settings_json}` must be a JSON object.")
 
-    if scope == "project":
-        runner = _claude_project_runner(py_cmd)
-    else:
-        script_posix = (skill_dest / "scripts" / "aoci_hook.py").resolve().as_posix()
-        if py_cmd.startswith('"') and " " in script_posix:
-            runner = f'{py_cmd} -c "import runpy;runpy.run_path({script_posix!r},run_name=\'__main__\')"'
-        else:
-            runner = f'{py_cmd} "{script_posix}"'
-
-    desired_events: Dict[str, str] = {
-        "SessionStart": f"{runner} --host claude-code --event session-start",
-    }
-    if with_turn_hook:
-        desired_events["UserPromptSubmit"] = f"{runner} --host claude-code --event turn-start"
-    elif isinstance(hooks_obj.get("UserPromptSubmit"), list):
-        cleaned_turn, _ = _strip_aoci_from_claude_groups(hooks_obj["UserPromptSubmit"])
-        if cleaned_turn:
-            hooks_obj["UserPromptSubmit"] = cleaned_turn
-        else:
-            del hooks_obj["UserPromptSubmit"]
-    desired_events["Stop"] = f"{runner} --host claude-code --event stop"
-
-    for ev_name, cmd_str in desired_events.items():
-        existing = hooks_obj.get(ev_name)
-        if not isinstance(existing, list):
-            existing = []
-        hooks_obj[ev_name] = _upsert_aoci_in_claude_groups(
-            existing,
-            {
-                "type": "command",
-                "command": cmd_str,
-                "timeout": 10,
-            },
-        )
+    runner = _claude_project_runner(py_cmd) if scope == "project" else _global_hook_runner(skill_dest, py_cmd)
+    _merge_standard_hooks(hooks_obj, runner, "claude-code", with_turn_hook=with_turn_hook, include_matcher=True)
 
     save_json_dict(settings_json, data, dry_run)
     if not dry_run:
@@ -473,19 +542,7 @@ def remove_claude_hooks(settings_json: Path, dry_run: bool) -> None:
         print(f"  [skip] no `hooks` block in {settings_json}")
         return
 
-    changed = False
-    for ev_name in list(hooks_obj.keys()):
-        existing = hooks_obj.get(ev_name)
-        if isinstance(existing, list):
-            cleaned, ev_changed = _strip_aoci_from_claude_groups(existing)
-            if ev_changed:
-                changed = True
-                if cleaned:
-                    hooks_obj[ev_name] = cleaned
-                else:
-                    del hooks_obj[ev_name]
-
-    if not changed:
+    if not _strip_hooks_dict(hooks_obj):
         print(f"  [skip] no `aoci-index` hooks found in {settings_json}")
         return
     if not hooks_obj:
@@ -493,6 +550,52 @@ def remove_claude_hooks(settings_json: Path, dry_run: bool) -> None:
     save_json_dict(settings_json, data, dry_run)
     if not dry_run:
         print(f"  [ok] removed Claude Code `aoci-index` hooks from {settings_json}")
+
+
+def upsert_codex_hooks(
+    hooks_json: Path,
+    skill_dest: Path,
+    scope: str,
+    py_cmd: str,
+    dry_run: bool,
+    with_turn_hook: bool = True,
+) -> None:
+    data = load_json_dict(hooks_json)
+    hooks_obj = data.setdefault("hooks", {})
+    if not isinstance(hooks_obj, dict):
+        raise ValueError(f"`hooks` key in `{hooks_json}` must be a JSON object.")
+
+    runner = _codex_project_runner(py_cmd) if scope == "project" else _global_hook_runner(skill_dest, py_cmd)
+    _merge_standard_hooks(hooks_obj, runner, "codex", with_turn_hook=with_turn_hook, include_matcher=False)
+
+    save_json_dict(hooks_json, data, dry_run)
+    if not dry_run:
+        print(f"  [ok] merged Codex hooks -> {hooks_json}")
+        if scope == "project":
+            print("  [note] In Codex CLI, review and trust project hooks via `/hooks` before first run.")
+
+
+def remove_codex_hooks(hooks_json: Path, dry_run: bool, remove_if_empty: bool = True) -> None:
+    if not hooks_json.exists():
+        print(f"  [skip] hooks file not present: {hooks_json}")
+        return
+    data = load_json_dict(hooks_json)
+    hooks_obj = data.get("hooks")
+    if not isinstance(hooks_obj, dict) or not _strip_hooks_dict(hooks_obj):
+        print(f"  [skip] no `aoci-index` hooks found in {hooks_json}")
+        return
+    if not hooks_obj:
+        del data["hooks"]
+    if remove_if_empty and not data:
+        if dry_run:
+            print(f"  [dry-run] remove empty hooks config: {hooks_json}")
+            return
+        hooks_json.unlink()
+        print(f"  [ok] removed empty hooks config {hooks_json}")
+        return
+    save_json_dict(hooks_json, data, dry_run)
+    if not dry_run:
+        print(f"  [ok] removed Codex `aoci-index` hooks from {hooks_json}")
 
 
 def upsert_rule_snippet(rule_file: Path, snippet_path: Path, dry_run: bool) -> None:
@@ -600,6 +703,104 @@ def _remove_mcp_server(mcp_json: Path, dry_run: bool, remove_if_empty: bool = Fa
     save_json_dict(mcp_json, data, dry_run)
     if not dry_run:
         print(f"  [ok] removed MCP server `{SKILL_NAME}` from {mcp_json}")
+
+
+_TOML_FENCED_MCP_RE = re.compile(
+    rf"(?ms)^[ \t]*{re.escape(TOML_MCP_BEGIN)}\r?\n.*?^[ \t]*{re.escape(TOML_MCP_END)}[ \t]*\r?\n?"
+)
+_TOML_TABLE_MCP_RE = re.compile(
+    rf"(?ms)^[ \t]*\[mcp_servers\.(?:{re.escape(SKILL_NAME)}|\"{re.escape(SKILL_NAME)}\"|'{re.escape(SKILL_NAME)}')\][ \t]*(?:#[^\r\n]*)?\r?\n.*?(?=^[ \t]*\[(?!mcp_servers\.(?:{re.escape(SKILL_NAME)}|\"{re.escape(SKILL_NAME)}\"|'{re.escape(SKILL_NAME)}')\.)|\Z)"
+)
+
+
+def _render_codex_mcp_block(py_cmd: str, mcp_args: List[str]) -> str:
+    cmd_exe, prefix_args = _split_python_cmd(py_cmd)
+    all_args = [*prefix_args, *mcp_args]
+    args_toml = "[" + ", ".join(json.dumps(a, ensure_ascii=False) for a in all_args) + "]"
+    return (
+        f"{TOML_MCP_BEGIN}\n"
+        f"[mcp_servers.{SKILL_NAME}]\n"
+        f"command = {json.dumps(cmd_exe, ensure_ascii=False)}\n"
+        f"args = {args_toml}\n"
+        f"{TOML_MCP_END}\n"
+    )
+
+
+def _strip_toml_match(existing: str, match: "re.Match[str]") -> str:
+    before = existing[: match.start()].rstrip("\r\n")
+    after = existing[match.end() :].lstrip("\r\n")
+    if before and after:
+        return before + "\n\n" + after
+    if before:
+        return before + "\n"
+    if after:
+        return after
+    return ""
+
+
+def upsert_codex_mcp_toml(config_toml: Path, py_cmd: str, mcp_args: List[str], dry_run: bool) -> None:
+    block = _render_codex_mcp_block(py_cmd, mcp_args)
+    existing = config_toml.read_text(encoding="utf-8", errors="replace") if config_toml.exists() else ""
+
+    if _TOML_FENCED_MCP_RE.search(existing):
+        updated = _TOML_FENCED_MCP_RE.sub(lambda _m: block, existing, count=1)
+    elif _TOML_TABLE_MCP_RE.search(existing):
+        updated = _TOML_TABLE_MCP_RE.sub(lambda _m: block, existing, count=1)
+    else:
+        sep = "\n" if existing and not existing.endswith("\n") else ""
+        blank = "\n" if existing and not existing.endswith("\n\n") else ""
+        updated = existing + sep + blank + block
+
+    _write_text_with_backup(config_toml, updated, dry_run, dry_run_label="write Codex MCP TOML")
+    if not dry_run:
+        print(f"  [ok] merged Codex MCP server `{SKILL_NAME}` -> {config_toml}")
+
+
+def remove_codex_mcp_toml(config_toml: Path, dry_run: bool, remove_if_empty: bool = True) -> None:
+    if not config_toml.exists():
+        print(f"  [skip] Codex config not present: {config_toml}")
+        return
+    existing = config_toml.read_text(encoding="utf-8", errors="replace")
+    match = _TOML_FENCED_MCP_RE.search(existing) or _TOML_TABLE_MCP_RE.search(existing)
+    if not match:
+        print(f"  [skip] `{SKILL_NAME}` MCP table not found in {config_toml}")
+        return
+    updated = _strip_toml_match(existing, match)
+    if remove_if_empty and not updated.strip():
+        if dry_run:
+            print(f"  [dry-run] remove empty Codex config: {config_toml}")
+            return
+        config_toml.unlink()
+        print(f"  [ok] removed empty Codex config {config_toml}")
+        return
+    _write_text_with_backup(config_toml, updated, dry_run, dry_run_label="update Codex MCP TOML")
+    if not dry_run:
+        print(f"  [ok] removed Codex MCP server `{SKILL_NAME}` from {config_toml}")
+
+
+def _antigravity_uses_project_skill(project_root: Path) -> bool:
+    """Return True if project-scoped Antigravity hooks or MCP config reference `.agents/skills/aoci-index`."""
+    agy_hooks = project_root / ".agents" / "hooks.json"
+    if agy_hooks.is_file():
+        try:
+            data = load_json_dict(agy_hooks)
+            spec = data.get(AGY_HOOK_KEY)
+            if isinstance(spec, dict) and any(
+                isinstance(handlers, list) and any(_is_aoci_hook_handler(h) for h in handlers)
+                for handlers in spec.values()
+            ):
+                return True
+        except (OSError, ValueError):
+            pass
+    agy_plugin_mcp = project_root / ".agents" / "plugins" / SKILL_NAME / "mcp_config.json"
+    if agy_plugin_mcp.is_file():
+        try:
+            raw = agy_plugin_mcp.read_text(encoding="utf-8", errors="replace")
+            if f"skills/{SKILL_NAME}/scripts/aoci_mcp.py" in raw:
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def install_antigravity_plugin_bundle(
@@ -801,6 +1002,7 @@ def process_host(
     no_turn_hook: bool = False,
     with_mcp: bool = False,
     as_plugin: bool = False,
+    codex_home: Optional[Path] = None,
 ) -> bool:
     print(f"==> {'Uninstalling' if uninstall else 'Installing'} `{SKILL_NAME}` for {host} ({scope} scope)")
     py_cmd = py_cmd or default_python_cmd(scope)
@@ -914,16 +1116,66 @@ def process_host(
                 else:
                     mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
                 _upsert_mcp_server(mcp_file, py_cmd, mcp_args, dry_run)
+
+    elif host == "codex":
+        codex_dir = (codex_home or (home_dir / ".codex")) if scope == "global" else (project_root / ".codex")
+        skill_dest = (
+            (home_dir / ".agents" / "skills" / SKILL_NAME)
+            if scope == "global"
+            else (project_root / ".agents" / "skills" / SKILL_NAME)
+        )
+        hooks_file = codex_dir / "hooks.json"
+        mcp_file = codex_dir / "config.toml"
+        rule_file = (codex_dir / "AGENTS.md") if scope == "global" else (project_root / "AGENTS.md")
+        snippet_path = SOURCE_DIR / "resources" / "AGENTS.snippet.md"
+
+        if uninstall:
+            shared_with_agy = scope == "project" and _antigravity_uses_project_skill(project_root)
+            if shared_with_agy:
+                print(f"  [keep] preserved shared project skill for Antigravity: {skill_dest}")
+            else:
+                remove_skill_tree(skill_dest, dry_run)
+            if with_hooks:
+                remove_codex_hooks(hooks_file, dry_run, remove_if_empty=True)
+            if with_rules:
+                if shared_with_agy:
+                    print(f"  [keep] preserved shared AGENTS.md snippet for Antigravity: {rule_file}")
+                else:
+                    remove_rule_snippet(rule_file, dry_run)
+            if with_mcp:
+                remove_codex_mcp_toml(mcp_file, dry_run, remove_if_empty=True)
+        else:
+            if not copy_skill_tree(skill_dest, dry_run, force):
+                return False
+            if with_hooks:
+                upsert_codex_hooks(
+                    hooks_file,
+                    skill_dest,
+                    scope,
+                    py_cmd,
+                    dry_run,
+                    with_turn_hook=not no_turn_hook,
+                )
+            if with_rules:
+                upsert_rule_snippet(rule_file, snippet_path, dry_run)
+            if with_mcp:
+                if scope == "project":
+                    mcp_args = _codex_project_mcp_args()
+                else:
+                    mcp_args = [(skill_dest / "scripts" / "aoci_mcp.py").resolve().as_posix()]
+                upsert_codex_mcp_toml(mcp_file, py_cmd, mcp_args, dry_run)
     return True
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Install or uninstall the `aoci-index` skill for Claude Code and Antigravity")
+    p = argparse.ArgumentParser(
+        description="Install or uninstall the `aoci-index` skill for Claude Code, Antigravity, and Codex"
+    )
     p.add_argument(
         "--host",
-        choices=("claude-code", "antigravity", "both"),
+        choices=("claude-code", "antigravity", "codex", "both", "all"),
         required=True,
-        help="Target agent host(s)",
+        help="Target agent host(s) (`both` = Claude Code + Antigravity; `all` = Claude Code + Antigravity + Codex)",
     )
     p.add_argument(
         "--scope",
@@ -933,7 +1185,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--project-root", help="Target repository root (used with `--scope project`; defaults to CWD)")
     p.add_argument("--home-dir", help="Override user home directory (defaults to Path.home())")
-    p.add_argument("--with-hooks", action="store_true", help="Merge lifecycle hooks (SessionStart + Stop, plus UserPromptSubmit on Claude Code)")
+    p.add_argument(
+        "--with-hooks",
+        action="store_true",
+        help="Merge lifecycle hooks (SessionStart + Stop, plus UserPromptSubmit on Claude Code and Codex)",
+    )
     p.add_argument(
         "--with-turn-hook",
         action="store_true",
@@ -961,7 +1217,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--uninstall",
         action="store_true",
-        help="Remove the `aoci-index` skill plus its hooks and rule snippets",
+        help="Remove the `aoci-index` skill plus its hooks, rules, and MCP registrations",
     )
     p.add_argument(
         "--keep-config",
@@ -978,7 +1234,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     home_dir = Path(args.home_dir).resolve() if args.home_dir else Path.home().resolve()
     project_root = Path(args.project_root).resolve() if args.project_root else Path.cwd().resolve()
-    hosts: List[str] = ["claude-code", "antigravity"] if args.host == "both" else [args.host]
+    if args.host == "both":
+        hosts: List[str] = ["claude-code", "antigravity"]
+    elif args.host == "all":
+        hosts = ["claude-code", "antigravity", "codex"]
+    else:
+        hosts = [args.host]
+
+    if args.home_dir:
+        codex_home = home_dir / ".codex"
+    elif os.environ.get("CODEX_HOME", "").strip():
+        codex_home = Path(os.environ["CODEX_HOME"].strip()).resolve()
+    else:
+        codex_home = home_dir / ".codex"
 
     # Uninstall is complete by default: hooks/rules/mcp pointing at a deleted script would break sessions
     with_hooks = args.with_hooks or args.with_turn_hook or (args.uninstall and not args.keep_config)
@@ -1002,6 +1270,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             no_turn_hook=args.no_turn_hook,
             with_mcp=with_mcp,
             as_plugin=args.as_plugin,
+            codex_home=codex_home,
         ) and ok
     return 0 if ok else 1
 

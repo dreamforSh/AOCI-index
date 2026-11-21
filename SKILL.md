@@ -2,7 +2,7 @@
 name: aoci-index
 description: >-
   AI-Oriented Code Indexing (AOCI) fast codebase index builder, reader, and
-  drift synchronizer for Claude Code and Antigravity. Use whenever: (1) the
+  drift synchronizer for Claude Code, Antigravity, and Codex. Use whenever: (1) the
   user asks to build, initialize, inspect, query, or refresh an AOCI index for
   a codebase (or invokes `/aoci-index`); OR (2) working in any repository that
   already contains a `.aoci/` index directory — always read the `.aoci/` index
@@ -13,7 +13,7 @@ description: >-
 
 # AOCI Codebase Fast Index (`aoci-index`)
 
-Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semantic index repository under `<repo>/.aoci/`. Works identically in **Claude Code** and **Antigravity**. A single read pass gives the agent repository-scale architectural orientation, cross-file dependencies, and non-obvious invariants, while cached drift checks (roughly 0.1s on small repos and a few hundred ms at ~3k files) keep the index synchronized as code evolves.
+Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semantic index repository under `<repo>/.aoci/`. Works identically in **Claude Code**, **Antigravity**, and **Codex**. A single read pass gives the agent repository-scale architectural orientation, cross-file dependencies, and non-obvious invariants, while cached drift checks (roughly 0.1s on small repos and a few hundred ms at ~3k files) keep the index synchronized as code evolves.
 
 ## Four Non-Negotiable Rules
 
@@ -188,12 +188,13 @@ After creating, editing, renaming, or deleting any managed source file — **bef
 | `ensure-git-exclude` | Idempotently repair `.git/info/exclude` (e.g. after late `git init`) | `--root`, `--json` |
 | `install-git-hooks` | Install/remove idempotent local Git hooks (`post-checkout`/`post-merge`/`post-rewrite` auto-restore + optional `pre-commit`) | `--root`, `--python-cmd`, `--with-pre-commit`, `--pre-commit-verify`, `--uninstall`, `--dry-run`, `--json` |
 
-## Cross-Host Installation, MCP Server & Lifecycle Hooks (Claude Code + Antigravity)
+## Cross-Host Installation, MCP Server & Lifecycle Hooks (Claude Code + Antigravity + Codex)
 
-Use the bundled zero-dependency installer [scripts/install.py](./scripts/install.py) to install this skill — plus optional `SessionStart` + `UserPromptSubmit`/`PreInvocation` + `Stop` lifecycle hooks ([scripts/aoci_hook.py](./scripts/aoci_hook.py)), in-memory Stdio MCP server ([scripts/aoci_mcp.py](./scripts/aoci_mcp.py) via `--with-mcp`), rule snippets, or a self-contained Antigravity plugin bundle (`--as-plugin` using [resources/plugin.json](./resources/plugin.json)) — for **Claude Code**, **Antigravity**, or **both**:
+Use the bundled zero-dependency installer [scripts/install.py](./scripts/install.py) to install this skill — plus optional `SessionStart` + `UserPromptSubmit`/`PreInvocation` + `Stop` lifecycle hooks ([scripts/aoci_hook.py](./scripts/aoci_hook.py)), in-memory Stdio MCP server ([scripts/aoci_mcp.py](./scripts/aoci_mcp.py) via `--with-mcp`), rule snippets, or a self-contained Antigravity plugin bundle (`--as-plugin` using [resources/plugin.json](./resources/plugin.json)) — for **Claude Code**, **Antigravity**, **Codex**, `--host both`, or `--host all`:
 
 - Full installation, hook configuration, and manual test guide: [references/hooks-and-install.md](./references/hooks-and-install.md)
 - The `Stop` hook only blames drift introduced **during the current session**. Drift that existed at `SessionStart` and is still byte-identical is reported once at startup but never blocks a turn.
 - Regression suite (stdlib only): `python tests/test_aoci.py`
 - Claude Code templates: [resources/claude.settings.global.json](./resources/claude.settings.global.json), [resources/claude.settings.project.json](./resources/claude.settings.project.json), [resources/CLAUDE.snippet.md](./resources/CLAUDE.snippet.md)
 - Antigravity templates: [resources/hooks.global.json](./resources/hooks.global.json), [resources/hooks.project.json](./resources/hooks.project.json), [resources/AGENTS.snippet.md](./resources/AGENTS.snippet.md)
+- Codex templates: [resources/codex.hooks.global.json](./resources/codex.hooks.global.json), [resources/codex.hooks.project.json](./resources/codex.hooks.project.json), [resources/AGENTS.snippet.md](./resources/AGENTS.snippet.md)

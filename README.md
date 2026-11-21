@@ -20,7 +20,7 @@
 </p>
 <p>
   <img src="https://img.shields.io/badge/MCP-24%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 24 tools · stdio">
-  <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity">
+  <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity%20%C2%B7%20Codex-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity · Codex">
 </p>
 
 <p>
@@ -37,7 +37,7 @@
 
 ---
 
-**`aoci-index`** is a zero-dependency Python 3.8+ **AI-Oriented Codebase Indexing** (`.aoci/`) engine — combining a BM25/FRAS graph reader, dual-host lifecycle guardrails, and a stdio MCP server for **Claude Code** and **Antigravity**.
+**`aoci-index`** is a zero-dependency Python 3.8+ **AI-Oriented Codebase Indexing** (`.aoci/`) engine — combining a BM25/FRAS graph reader, tri-host lifecycle guardrails, and a stdio MCP server for **Claude Code**, **Antigravity**, and **Codex**.
 
 A single read pass gives coding agents repository-wide architectural orientation, cross-file dependencies, and non-obvious invariants — while keeping `.aoci/` strictly local via `.git/info/exclude`.
 
@@ -112,7 +112,7 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
       <ul>
         <li><b>Warm In-Memory Stdio MCP Server</b> — <code>aoci_mcp.py</code> serves <b>24 annotated tools</b> (lock-free <code>contextvars</code> CLI capture + thread-safe index/BM25/outline/hubs cache), <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 workflow prompts</b> over newline-delimited JSON-RPC 2.0 or <code>Content-Length</code> framing.</li>
         <li><b>Architectural Audit &amp; Graph Export</b> — Cross-checks FRAS edges against static imports (including monorepo nested <code>tsconfig.json</code>/<code>go.mod</code>), finds Tarjan SCC cycles, enforces <code>#Layer-Rules:</code>, mines Git co-change coupling (<code>audit --co-change [--exclude-tests]</code>), and exports Mermaid, DOT, or standalone zero-CDN interactive HTML graphs (<code>export --format html</code>).</li>
-        <li><b>Dual-Host Guardrails &amp; Local Exclusion</b> — <code>SessionStart</code>, optional turn-start snapshot refresh, and convergent <code>Stop</code> gate for <b>Claude Code</b> and <b>Antigravity</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
+        <li><b>Tri-Host Guardrails &amp; Local Exclusion</b> — <code>SessionStart</code>, optional turn-start snapshot refresh, and convergent <code>Stop</code> gate for <b>Claude Code</b>, <b>Antigravity</b>, and <b>Codex</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
       </ul>
     </td>
   </tr>
@@ -154,9 +154,19 @@ python scripts/install.py --host claude-code --scope project --project-root <rep
 ```bash
 # Global Antigravity plugin bundle (skill + plugin.json + hooks + rules + MCP)
 python scripts/install.py --host antigravity --scope global --as-plugin --with-hooks --with-rules --with-mcp
+```
 
-# Install for both hosts at once (pass --dry-run to preview, or --uninstall to remove cleanly)
-python scripts/install.py --host both --scope global --with-hooks --with-mcp
+### Codex
+
+```bash
+# Global install (~/.agents/skills/ + ~/.codex/hooks.json + ~/.codex/config.toml)
+python scripts/install.py --host codex --scope global --with-hooks --with-mcp
+
+# Project-scoped install (.agents/skills/ + .codex/hooks.json + AGENTS.md + .codex/config.toml)
+python scripts/install.py --host codex --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
+
+# Install for Claude Code + Antigravity (`both`) or all three hosts (`all`) at once
+python scripts/install.py --host all --scope global --with-hooks --with-mcp
 ```
 
 ### Optional Editable CLI Package
@@ -261,7 +271,7 @@ python -B -m unittest discover -s tests -p "test_*.py"
 <div align="center">
   <img src="assets/logo.svg" width="28" height="28" alt="">
   <br>
-  <sub>Zero dependencies &middot; Local-only <code>.aoci/</code> &middot; Built for Claude Code &amp; Antigravity</sub>
+  <sub>Zero dependencies &middot; Local-only <code>.aoci/</code> &middot; Built for Claude Code, Antigravity &amp; Codex</sub>
   <br>
   <sub><a href="#top">Back to top</a></sub>
 </div>

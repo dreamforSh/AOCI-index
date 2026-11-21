@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.agents/skills/aoci-index/scripts/aoci_hook.py --host codex --event session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.agents/skills/aoci-index/scripts/aoci_hook.py --host codex --event turn-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.agents/skills/aoci-index/scripts/aoci_hook.py --host codex --event stop",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

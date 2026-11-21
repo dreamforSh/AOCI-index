@@ -1,6 +1,6 @@
-# Installation & Dual-Host Lifecycle Hooks Guide (Claude Code + Antigravity)
+# Installation & Tri-Host Lifecycle Hooks Guide (Claude Code + Antigravity + Codex)
 
-The `aoci-index/` directory is a self-contained Agent Skill with zero third-party dependencies (requires Python 3.8+ and optional Git). It supports both **Claude Code** and **Antigravity** out of the box.
+The `aoci-index/` directory is a self-contained Agent Skill with zero third-party dependencies (requires Python 3.8+ and optional Git). It supports **Claude Code**, **Antigravity**, and **Codex** out of the box.
 
 ---
 
@@ -37,13 +37,34 @@ Use [../scripts/install.py](../scripts/install.py) to copy the skill and optiona
   ```
   - Installs into `<repo>/.agents/skills/aoci-index/`, `<repo>/.agents/hooks.json`, and `<repo>/AGENTS.md`.
 
-### Install for Both Hosts at Once (with Optional Stdio MCP Server or Plugin Bundle)
+### Install for Codex
+
+- **Global (recommended — available across all repos)**:
+  ```bash
+  python scripts/install.py --host codex --scope global --with-hooks --with-mcp
+  ```
+  - Copies skill to `~/.agents/skills/aoci-index/`.
+  - Merges `SessionStart`, `UserPromptSubmit`, and `Stop` hooks under `"hooks"` into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json` when `CODEX_HOME` is set; pass `--no-turn-hook` to omit `UserPromptSubmit`).
+  - With `--with-mcp`, merges a marker-fenced `[mcp_servers.aoci-index]` table into `~/.codex/config.toml` (`$CODEX_HOME/config.toml`).
+  - Add `--with-rules` to append the fenced protocol block to `~/.codex/AGENTS.md`.
+- **Project-scoped**:
+  ```bash
+  python scripts/install.py --host codex --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
+  ```
+  - Installs into `<repo>/.agents/skills/aoci-index/`, `<repo>/.codex/hooks.json` (using a shell-neutral Python runner that locates `.agents/skills/aoci-index` or `.codex/skills/aoci-index` from CWD or parent directories across `cmd.exe`, PowerShell, and POSIX `sh`), `<repo>/AGENTS.md`, and `<repo>/.codex/config.toml`.
+  - **Trust requirement**: in Codex CLI, review and trust project-local hooks via `/hooks` before first execution.
+
+### Install for Multiple Hosts at Once (with Optional Stdio MCP Server or Plugin Bundle)
 
 ```bash
+# Install for Claude Code + Antigravity:
 python scripts/install.py --host both --scope global --with-hooks --with-mcp
+
+# Install for Claude Code + Antigravity + Codex:
+python scripts/install.py --host all --scope global --with-hooks --with-mcp
 ```
 
-- `--with-mcp` registers the zero-dependency in-memory Stdio MCP server ([../scripts/aoci_mcp.py](../scripts/aoci_mcp.py)) into `~/.gemini/config/mcp_config.json` (Antigravity global), `<repo>/.agents/plugins/aoci-index/mcp_config.json` (Antigravity project — portable via `PLUGIN_ROOT` with `"name": "aoci-index-project-mcp"` in its lightweight wrapper `plugin.json`), and `~/.claude.json` / `<repo>/.mcp.json` (Claude Code — portable via `CLAUDE_PROJECT_DIR`), exposing 24 annotated tools (`aoci_init`, `aoci_overview`, `aoci_query`, `aoci_symbol`, `aoci_context`, `aoci_pack`, `aoci_diff`, `aoci_scan`, `aoci_prepare_sync`, `aoci_apply_sync`, `aoci_outline`, `aoci_scaffold`, `aoci_ack`, `aoci_upsert`, `aoci_migrate_renames`, `aoci_restore`, `aoci_zoom`, `aoci_shard`, `aoci_ensure_git_exclude`, `aoci_lint`, `aoci_verify`, `aoci_audit`, `aoci_export`, `aoci_pool`), MCP Resources (`aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://hubs`, `aoci://shards/INDEX`), URI Templates (`aoci://shards/{shard}`, `aoci://{volume}?root={root}`), and MCP Prompts (`aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`) without shell commands.
+- `--with-mcp` registers the zero-dependency in-memory Stdio MCP server ([../scripts/aoci_mcp.py](../scripts/aoci_mcp.py)) into `~/.gemini/config/mcp_config.json` (Antigravity global), `<repo>/.agents/plugins/aoci-index/mcp_config.json` (Antigravity project — portable via `PLUGIN_ROOT` with `"name": "aoci-index-project-mcp"` in its lightweight wrapper `plugin.json`), `~/.claude.json` / `<repo>/.mcp.json` (Claude Code — portable via `CLAUDE_PROJECT_DIR`), and `~/.codex/config.toml` / `<repo>/.codex/config.toml` (Codex — marker-fenced `[mcp_servers.aoci-index]` TOML table), exposing 24 annotated tools (`aoci_init`, `aoci_overview`, `aoci_query`, `aoci_symbol`, `aoci_context`, `aoci_pack`, `aoci_diff`, `aoci_scan`, `aoci_prepare_sync`, `aoci_apply_sync`, `aoci_outline`, `aoci_scaffold`, `aoci_ack`, `aoci_upsert`, `aoci_migrate_renames`, `aoci_restore`, `aoci_zoom`, `aoci_shard`, `aoci_ensure_git_exclude`, `aoci_lint`, `aoci_verify`, `aoci_audit`, `aoci_export`, `aoci_pool`), MCP Resources (`aoci://manifest`, `aoci://meta`, `aoci://code`, `aoci://hubs`, `aoci://shards/INDEX`), URI Templates (`aoci://shards/{shard}`, `aoci://{volume}?root={root}`), and MCP Prompts (`aoci-bootstrap`, `aoci-review-diff`, `aoci-sync`) without shell commands.
 - `--as-plugin` (Antigravity) packages the skill, `plugin.json`, `assets/logo.svg`, `hooks.json`, portable `mcp_config.json`, and `rules/AGENTS.md` into a single toggleable plugin directory under `~/.gemini/config/plugins/aoci-index/` (or `<repo>/.agents/plugins/aoci-index/`).
 
 ### Clean Uninstall
@@ -62,18 +83,18 @@ python scripts/install.py --host both --scope global --uninstall
 
 ---
 
-## 2. How Dual-Host Lifecycle Hooks Work (`scripts/aoci_hook.py`)
+## 2. How Tri-Host Lifecycle Hooks Work (`scripts/aoci_hook.py`)
 
-[../scripts/aoci_hook.py](../scripts/aoci_hook.py) implements both hosts' exact JSON stdin/stdout contracts (`--host auto | claude-code | antigravity`):
+[../scripts/aoci_hook.py](../scripts/aoci_hook.py) implements all three hosts' exact JSON stdin/stdout contracts (`--host auto | claude-code | antigravity | codex`):
 
-| Hook Event | Trigger | Automatic Behavior | Claude Code Output | Antigravity Output |
-| :--- | :--- | :--- | :--- | :--- |
-| **`SessionStart`** | Session startup, resume, or Claude Code post-compaction (`source == "compact"`) when `.aoci/aoci.code.txt` exists | 1) Ensures `.git/info/exclude` protects `.aoci/`;<br>2) Zero-read fast drift check (+ 0-token restorable count from the SQLite semantic pool);<br>3) Surfaces `#Global-Invariants:` and enforces **Read-Whole-First**;<br>4) Snapshots pre-existing drift to `.aoci/.sessions/<session_id or conversationId>.json` (first start only; resume/compact keep it). | `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` | `{"injectSteps": [{"systemMessage": {"systemMessage": "..."}}]}` |
-| **`UserPromptSubmit` / `PreInvocation`** *(optional `--event turn-start`)* | Start of each new user turn when `.aoci/` exists | Refreshes the session's external-drift snapshot before the agent runs any tools: Claude Code `UserPromptSubmit` refreshes unconditionally once per turn; Antigravity `PreInvocation` refreshes only when `invocationNum <= 1` (stateless — no flag can linger after `Ctrl+C`). Pure-Python `.aoci` check runs before any `git` call. | `{}` | `{}` |
-| **`Stop`** | Normal turn completion when `.aoci/` exists | Zero-read fast drift check (added / modified / renamed / deleted / exact malformed-line multiset) + cached Git exclusion check. **Session-scoped**: drift that existed at session/turn start and is still byte-identical is not counted, and resolved exemptions are retired when a turn finishes cleanly. Loop-guarded by `stop_hook_active` (Claude Code) and `continuationActive` (Antigravity); Antigravity stops with `fullyIdle: false` (background tasks running) are never gated. | `{"decision": "block", "reason": "..."}` (or `{}` when clean) | `{"decision": "continue", "reason": "..."}` (or `{}` when clean) |
+| Hook Event | Trigger | Automatic Behavior | Claude Code Output | Codex Output | Antigravity Output |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`SessionStart`** | Session startup, resume, or post-compaction (`source == "compact"`) when `.aoci/aoci.code.txt` exists | 1) Ensures `.git/info/exclude` protects `.aoci/`;<br>2) Zero-read fast drift check (+ 0-token restorable count from the SQLite semantic pool);<br>3) Surfaces `#Global-Invariants:` and enforces **Read-Whole-First**;<br>4) Snapshots pre-existing drift to `.aoci/.sessions/<session_id or conversationId>.json` (first start only; resume/compact keep it). | `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` | `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}` | `{"injectSteps": [{"systemMessage": {"systemMessage": "..."}}]}` |
+| **`UserPromptSubmit` / `PreInvocation`** *(optional `--event turn-start`)* | Start of each new user turn when `.aoci/` exists | Refreshes the session's external-drift snapshot before the agent runs any tools: Claude Code & Codex `UserPromptSubmit` refresh unconditionally once per turn; Antigravity `PreInvocation` refreshes only when `invocationNum <= 1` (stateless — no flag can linger after `Ctrl+C`). Pure-Python `.aoci` check runs before any `git` call. | `{}` | `{}` | `{}` |
+| **`Stop`** | Normal turn completion when `.aoci/` exists | Zero-read fast drift check (added / modified / renamed / deleted / exact malformed-line multiset) + cached Git exclusion check. **Session-scoped**: drift that existed at session/turn start and is still byte-identical is not counted, and resolved exemptions are retired when a turn finishes cleanly. Loop-guarded by `stop_hook_active` (Claude Code / Codex) and `continuationActive` (Antigravity); Antigravity stops with `fullyIdle: false` (background tasks running) are never gated. | `{"decision": "block", "reason": "..."}` (or `{}` when clean) | `{"decision": "block", "reason": "..."}` (or `{}` when clean — never emits `hookSpecificOutput`) | `{"decision": "continue", "reason": "..."}` (or `{}` when clean) |
 
-> In workspaces **without** `.aoci/`, both hooks return `{}` immediately with zero overhead and zero prompts.
-> In Claude Code, `SessionStart` also fires after context compaction, automatically re-injecting the Read-Whole-First reminder and Global Invariants so context never drifts.
+> In workspaces **without** `.aoci/`, all hooks return `{}` immediately with zero overhead and zero prompts.
+> In Claude Code and Codex, `SessionStart` also fires after context compaction, automatically re-injecting the Read-Whole-First reminder and Global Invariants so context never drifts.
 > Hook failures still return `{}` (never break a session) but print a traceback to stderr; set `AOCI_HOOK_LOG=<file>` to also append failures to a log file.
 > Without a session snapshot (hooks installed mid-session, or no session id in the payload), `Stop` falls back to reporting all drift.
 
@@ -93,6 +114,13 @@ python scripts/install.py --host both --scope global --uninstall
 2. Optional hooks: merge [../resources/hooks.global.json](../resources/hooks.global.json) into `~/.gemini/config/hooks.json`, or [../resources/hooks.project.json](../resources/hooks.project.json) into `<repo>/.agents/hooks.json`.
 3. Optional rule snippet: append [../resources/AGENTS.snippet.md](../resources/AGENTS.snippet.md) to `AGENTS.md` or `GEMINI.md`.
 
+### Codex Manual Setup
+
+1. Copy `aoci-index/` to `~/.agents/skills/aoci-index/` (or `<repo>/.agents/skills/aoci-index/`).
+2. Optional hooks: merge [../resources/codex.hooks.global.json](../resources/codex.hooks.global.json) into `~/.codex/hooks.json` (on Windows, use `python "C:/Users/<you>/.agents/skills/aoci-index/scripts/aoci_hook.py"`), or merge [../resources/codex.hooks.project.json](../resources/codex.hooks.project.json) into `<repo>/.codex/hooks.json` (then trust via `/hooks` inside Codex CLI).
+3. Optional rule snippet: append [../resources/AGENTS.snippet.md](../resources/AGENTS.snippet.md) to `~/.codex/AGENTS.md` or `<repo>/AGENTS.md`.
+4. Optional MCP server: add `[mcp_servers.aoci-index]` to `~/.codex/config.toml` or `<repo>/.codex/config.toml` pointing to `scripts/aoci_mcp.py`.
+
 ---
 
 ## 4. Manual Hook Contract Verification
@@ -102,6 +130,14 @@ python scripts/install.py --host both --scope global --uninstall
 ```powershell
 '{"cwd":"<your-indexed-repo>","session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' | python .\scripts\aoci_hook.py --host claude-code --event session-start
 '{"cwd":"<your-indexed-repo>","session_id":"s1","hook_event_name":"Stop","stop_hook_active":false}' | python .\scripts\aoci_hook.py --host claude-code --event stop
+```
+
+### Test Codex Hook Contract
+
+```powershell
+'{"cwd":"<your-indexed-repo>","session_id":"s1","hook_event_name":"SessionStart","source":"startup","model":"gpt-5","permission_mode":"default"}' | python .\scripts\aoci_hook.py --host codex --event session-start
+'{"cwd":"<your-indexed-repo>","session_id":"s1","turn_id":"t1","hook_event_name":"UserPromptSubmit","prompt":"check drift"}' | python .\scripts\aoci_hook.py --host codex --event turn-start
+'{"cwd":"<your-indexed-repo>","session_id":"s1","turn_id":"t1","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":null}' | python .\scripts\aoci_hook.py --host codex --event stop
 ```
 
 ### Test Antigravity Hook Contract

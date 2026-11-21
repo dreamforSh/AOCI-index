@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Dual-Host Lifecycle Hook Runner for AOCI Codebase Index (aoci_hook.py).
+Tri-Host Lifecycle Hook Runner for AOCI Codebase Index (aoci_hook.py).
 
-Supports both **Claude Code** (`settings.json` hooks) and **Antigravity**
-(`hooks.json`) via `--host auto | claude-code | antigravity`:
+Supports **Claude Code** (`settings.json` hooks), **Antigravity** (`hooks.json`),
+and **Codex** (`hooks.json`) via `--host auto | claude-code | antigravity | codex`:
 
   - SessionStart: When a workspace contains `.aoci/aoci.code.txt`, ensures
     `.git/info/exclude` covers `.aoci/`, runs a zero-read fast drift check,
     surfaces `#Global-Invariants:` from `aoci.txt`, injects startup context
     enforcing Read-Whole-First (including post-compaction refreshes in Claude
-    Code), and snapshots the drift that ALREADY exists into
+    Code and Codex), and snapshots the drift that ALREADY exists into
     `.aoci/.sessions/<session-id>.json`.
   - Stop: On normal turn completion, detects unsynced AOCI index drift
     (added/modified/renamed/deleted/malformed) or Git exclusion violations and
     asks the agent to synchronize `.aoci/` before stopping. Drift that was
     present at session start and is still byte-identical is NOT blamed on the
     agent (no wasted continuation turns for the user's own pending edits).
-    Loop protection: `stop_hook_active` (Claude Code) / `continuationActive`
+    Loop protection: `stop_hook_active` (Claude Code / Codex) / `continuationActive`
     (Antigravity); Antigravity stops with background work (`fullyIdle=false`)
     are never gated.
 
-Conforms strictly to both hosts' stdin/stdout JSON contracts and always exits
+Conforms strictly to all three hosts' stdin/stdout JSON contracts and always exits
 with code 0 + valid JSON so hook failures never break an interactive session.
 Failures are reported on stderr (and appended to `$AOCI_HOOK_LOG` if set).
 """
@@ -50,12 +50,16 @@ SESSION_TTL_S = 7 * 24 * 3600
 
 
 def detect_host(host_arg: str, payload: Dict[str, Any]) -> str:
-    if host_arg in ("antigravity", "claude-code"):
+    if host_arg in ("antigravity", "claude-code", "codex"):
         return host_arg
-    if any(k in payload for k in ("hook_event_name", "stop_hook_active", "session_id", "transcript_path")):
-        return "claude-code"
     if any(k in payload for k in ("hookEventName", "workspacePaths", "continuationActive", "terminationReason")):
         return "antigravity"
+    if "turn_id" in payload or "last_assistant_message" in payload:
+        return "codex"
+    if os.environ.get("CODEX_HOME") and not os.environ.get("CLAUDE_PROJECT_DIR"):
+        return "codex"
+    if any(k in payload for k in ("hook_event_name", "stop_hook_active", "session_id", "transcript_path")):
+        return "claude-code"
     if os.environ.get("CLAUDE_PROJECT_DIR"):
         return "claude-code"
     return "antigravity"
@@ -236,7 +240,7 @@ def handle_session_start(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
 
     message = "\n".join(lines)
 
-    if host == "claude-code":
+    if host in ("claude-code", "codex"):
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
@@ -519,7 +523,7 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     if ignored_total:
         reason += f" ({ignored_total} drifted path(s) that pre-date this session and are unchanged were not counted.)"
 
-    decision = "block" if host == "claude-code" else "continue"
+    decision = "block" if host in ("claude-code", "codex") else "continue"
     return {
         "decision": decision,
         "reason": reason,
@@ -543,10 +547,10 @@ def _log_failure() -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     aoci_index.configure_utf8_streams()
-    parser = argparse.ArgumentParser(description="Dual-host lifecycle hook runner (Claude Code & Antigravity)")
+    parser = argparse.ArgumentParser(description="Tri-host lifecycle hook runner (Claude Code, Antigravity & Codex)")
     parser.add_argument(
         "--host",
-        choices=("auto", "antigravity", "claude-code"),
+        choices=("auto", "antigravity", "claude-code", "codex"),
         default="auto",
         help="Target host protocol (default: auto-detect from stdin JSON)",
     )
