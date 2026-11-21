@@ -571,13 +571,46 @@ def build_task_pack(
 
     hub_sections_omitted = 0
     if hub_sections:
+        touched_keys: Set[Tuple[str, str]] = set()
+        files_with_touched_hubs: Set[str] = set()
+        if isinstance(diff_brief, Mapping) and diff_brief.get("ok"):
+            for t_sec in diff_brief.get("touched_hub_sections") or ():
+                if isinstance(t_sec, Mapping):
+                    tp = normalize_relpath(str(t_sec.get("path", "")))
+                    ts = str(t_sec.get("symbol", "")).strip()
+                    if tp and ts:
+                        touched_keys.add((tp, ts))
+                        files_with_touched_hubs.add(tp)
+
+        task_tokens = {tok for tok in re.split(r"[^a-z0-9_]+", (task or "").lower()) if len(tok) >= 3}
+        annotated_hubs: List[Dict[str, Any]] = []
+        for sec in hub_sections:
+            sec_c = dict(sec)
+            sp = normalize_relpath(str(sec_c.get("path", "")))
+            ss = str(sec_c.get("symbol", "")).strip()
+            is_touched = (sp, ss) in touched_keys
+            if is_touched:
+                sec_c["touched"] = True
+            # When a modified file has diff-hunk-matched hub sections and we are packing under a budget,
+            # filter out untouched sibling sections on that modified file unless matched by task keywords.
+            if budget > 0 and sp in files_with_touched_hubs and not is_touched:
+                hay = f"{ss} {sec_c.get('f', '')} {sec_c.get('s', '')}".lower()
+                if not any(tk in hay for tk in task_tokens):
+                    hub_sections_omitted += 1
+                    continue
+            annotated_hubs.append(sec_c)
+
         if budget > 0:
             seed_path_set = set(packed_seeds)
             ranked_hubs = [
                 sec
                 for _, sec in sorted(
-                    enumerate(hub_sections),
-                    key=lambda idx_sec: (0 if str(idx_sec[1].get("path", "")) in seed_path_set else 1, idx_sec[0]),
+                    enumerate(annotated_hubs),
+                    key=lambda idx_sec: (
+                        0 if idx_sec[1].get("touched") else 1,
+                        0 if str(idx_sec[1].get("path", "")) in seed_path_set else 1,
+                        idx_sec[0],
+                    ),
                 )
             ]
             kept_hubs: List[Dict[str, Any]] = []
@@ -592,6 +625,7 @@ def build_task_pack(
             if hub_sections_omitted > 0:
                 truncated = True
         else:
+            hub_sections = annotated_hubs
             for sec in hub_sections:
                 used_tokens += estimate_tokens(str(sec.get("entry", "")))
 

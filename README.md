@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-64748B?style=flat" alt="Linux · macOS · Windows">
 </p>
 <p>
-  <img src="https://img.shields.io/badge/MCP-27%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 27 tools · stdio">
+  <img src="https://img.shields.io/badge/MCP-29%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 29 tools · stdio">
   <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity%20%C2%B7%20Codex%20%C2%B7%20Cursor%20%C2%B7%20Windsurf%20%C2%B7%20VS%20Code-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity · Codex · Cursor · Windsurf · VS Code">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22C55E?style=flat" alt="License: MIT"></a>
 </p>
@@ -242,6 +242,7 @@ flowchart LR
 | Digest & core hubs | `overview --root <repo>` | `aoci_overview` |
 | Search / impact / tests | `query --root <repo> --search "<terms>"` / `--tests-for <path>` | `aoci_query` (`tests_for`, `live_test_imports`) |
 | Cross-file symbol lookup | `symbol <name> --root <repo> [--exact] [--live]` | `aoci_symbol` |
+| Graph-pruned symbol refs | `refs <symbol> --root <repo> [--path <def>] [--include-defs]` | `aoci_refs` |
 | Dependency subgraph | `context <path> --root <repo> --depth 1 [--with-tests]` | `aoci_context` (`with_tests`) |
 | Task-driven context pack | `pack --task "<description>" --root <repo> [--budget 2500] [--with-tests] [--live-anchors]` | `aoci_pack` |
 | Diff impact briefing | `diff [rev] --root <repo> [--with-tests]` | `aoci_diff` (`with_tests`) |
@@ -269,7 +270,8 @@ flowchart LR
 | Action | CLI (`python scripts/aoci_index.py ...`) | MCP Tool (`scripts/aoci_mcp.py`) |
 | :--- | :--- | :--- |
 | Full health gate | `verify --root <repo>` | `aoci_verify` |
-| FRAS quality lint | `lint --root <repo> [--limit 100]` | `aoci_lint` (`limit`) |
+| FRAS quality lint | `lint --root <repo> [--limit 100] [--fix]` | `aoci_lint` (`limit`) |
+| Mechanical self-healer | `doctor --root <repo> [--sync-static-r] [--dry-run]` | `aoci_doctor` |
 | Architecture & cycle audit | `audit --root <repo> [--co-change [--exclude-tests]]` | `aoci_audit` (`exclude_tests`) |
 | CI guard (SARIF/GitHub/PR) | `ci-check --root <repo> [--base-rev <rev>] [--format sarif\|github\|markdown] [--markdown-output <file>]` | `aoci_ci_check` (`sarif_output`, `markdown_output`) |
 | Per-directory shards | `shard --root <repo> [--depth 1 \| --clean]` | `aoci_shard` |

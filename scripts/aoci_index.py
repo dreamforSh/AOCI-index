@@ -55,6 +55,8 @@ Subcommands:
   zoom                Read, scaffold, or upsert symbol-level H-tier sections
                       in `.aoci/aoci.hubs.txt`.
   symbol              Search symbols across hubs, outlines, and FRAS A: exports.
+  refs                Locate cross-file symbol references & call sites via FRAS graph pruning.
+  doctor              Zero-token mechanical self-healer (duplicates, sizes, dangling refs, static R:).
   batch-pack          Assemble a self-contained subagent work-pack for batch N.
   ci-check            CI-native architecture guard (SARIF 2.1.0, GitHub Actions,
                       PR Markdown, layer redlines, cycles, and PR diff impact).
@@ -86,6 +88,7 @@ from aoci_core import cli_write as _cli_write  # noqa: E402
 from aoci_core import cochange as _cochange  # noqa: E402
 from aoci_core import diff_brief as _diff_brief  # noqa: E402
 from aoci_core import discovery as _discovery  # noqa: E402
+from aoci_core import doctor as _doctor  # noqa: E402
 from aoci_core import drift as _drift  # noqa: E402
 from aoci_core import git_ops as _git_ops  # noqa: E402
 from aoci_core import githooks as _githooks  # noqa: E402
@@ -96,6 +99,7 @@ from aoci_core import lock as _lock  # noqa: E402
 from aoci_core import pack as _pack  # noqa: E402
 from aoci_core import parsers as _parsers  # noqa: E402
 from aoci_core import pool as _pool  # noqa: E402
+from aoci_core import refs as _refs  # noqa: E402
 from aoci_core import shards as _shards  # noqa: E402
 from aoci_core import symbols as _symbols  # noqa: E402
 from aoci_core import sync_prep as _sync_prep  # noqa: E402
@@ -233,6 +237,7 @@ from aoci_core.git_ops import (  # noqa: E402
     ensure_git_exclusion,
     git_exclude_pattern,
     install_git_hooks,
+    read_git_blobs_batch,
     resolve_git_hooks_dir,
     resolve_root,
     run_git,
@@ -323,11 +328,15 @@ from aoci_core.parsers import (  # noqa: E402
     _static_ecosystem,
     _strip_c_comments,
     _strip_js_comments,
+    compute_contract_delta,
     compute_signature_hash,
     compute_signature_hash_from_bytes,
     extract_file_outline,
+    extract_signature_payload_from_bytes,
     resolve_go_package_imports,
 )
+from aoci_core.doctor import run_index_doctor  # noqa: E402
+from aoci_core.refs import find_symbol_references  # noqa: E402
 from aoci_core.pool import (  # noqa: E402
     _SHA256_HEX_RE,
     _legacy_semantic_pool_json_path,
@@ -395,6 +404,7 @@ from aoci_core.cli_read import (  # noqa: E402
     cmd_overview,
     cmd_pack,
     cmd_query,
+    cmd_refs,
     cmd_symbol,
     compute_zoom_read,
     search_entries_bm25,
@@ -404,6 +414,7 @@ from aoci_core.cli_write import (  # noqa: E402
     _capture_internal_cli,
     cmd_ack,
     cmd_apply_sync,
+    cmd_doctor,
     cmd_ensure_git_exclude,
     cmd_init,
     cmd_install_git_hooks,

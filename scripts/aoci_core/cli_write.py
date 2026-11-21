@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from . import apply_sync as _apply_sync
 from . import audit as _audit
 from . import cli_read as _cli_read
+from . import doctor as _doctor
 from . import drift as _drift
 from . import git_ops as _git_ops
 from . import hubs as _hubs
@@ -26,6 +27,7 @@ from .constants import (
     AOCI_DIR_NAME,
     BASELINE_FILE,
     CODE_FILE,
+    DEFAULT_MAX_BYTES,
     HUBS_FILE,
     IGNORE_FILE,
     MANIFEST_FILE,
@@ -810,4 +812,37 @@ def cmd_install_git_hooks(args: argparse.Namespace) -> int:
         print(f"[AOCI Git-Hooks {verb}{mode}] OK | Dir={res['hooks_dir']}")
         for hn, act in sorted(res["hooks"].items()):
             print(f"  * {hn}: {act}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Deterministically repair mechanical `.aoci/` drift (duplicates, sizes, dangling refs, static R:, hubs)."""
+    root = _git_ops.resolve_root(args.root)
+    as_json = bool(getattr(args, "json", False))
+    try:
+        res = _doctor.run_index_doctor(
+            root,
+            sync_static_r=bool(getattr(args, "sync_static_r", False)),
+            drop_malformed=bool(getattr(args, "drop_malformed", False)),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            max_bytes=int(getattr(args, "max_bytes", DEFAULT_MAX_BYTES)),
+        )
+    except TimeoutError as exc:
+        return _cli_read._emit_cli_error(as_json, str(exc), 3)
+
+    if not res.get("ok"):
+        code = 1 if res.get("malformed") else 2
+        return _cli_read._emit_cli_error(as_json, str(res.get("error", "Doctor failed.")), code, extra=res)
+
+    if as_json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    else:
+        mode = " DRY-RUN" if res["dry_run"] else ""
+        print(
+            f"[AOCI Doctor{mode}] OK | Indexed={res['indexed_files']} | "
+            f"TotalFixes={res['total_fixes']} | Dedup={len(res['deduplicated'])} | "
+            f"SizeRefreshed={len(res['size_refreshed'])} | "
+            f"DanglingPruned={len(res['dangling_refs_pruned'])} | "
+            f"StaticRAdded={len(res['static_deps_added'])}"
+        )
     return 0

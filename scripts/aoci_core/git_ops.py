@@ -14,6 +14,7 @@ from . import githooks as _githooks
 from .constants import (
     AOCI_DIR_NAME,
     CACHE_DIR,
+    DEFAULT_MAX_BYTES,
     EXCLUDE_BEGIN,
     EXCLUDE_END,
     GIT_DISCOVERY_CACHE,
@@ -550,3 +551,82 @@ def uninstall_git_hooks(
         dry_run=dry_run,
         run_git_fn=run_git,
     )
+
+
+def read_git_blobs_batch(
+    root: Path,
+    git_info: Dict[str, Any],
+    rev_prefix: str,
+    rels: Sequence[str],
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> Dict[str, bytes]:
+    """
+    Fetch multiple `<rev_prefix>:<git_relpath>` blobs in a single `git cat-file --batch` subprocess.
+    Supports revision prefixes (`HEAD`, `main`, `HEAD~1`) and index stage prefixes (`:0`).
+    """
+    if not git_info.get("is_git") or not rels or not _has_git_binary():
+        return {}
+    toplevel = git_info.get("toplevel")
+    if not isinstance(toplevel, Path):
+        return {}
+    try:
+        rel_sub = root.resolve().relative_to(toplevel.resolve()).as_posix()
+    except (OSError, ValueError):
+        rel_sub = ""
+    sub_prefix = "" if rel_sub in ("", ".") else rel_sub.strip("/") + "/"
+
+    ordered: List[str] = []
+    specs: List[str] = []
+    seen: Set[str] = set()
+    for raw_r in rels:
+        norm = normalize_relpath(str(raw_r))
+        if not norm or norm in seen or "\n" in norm or "\r" in norm:
+            continue
+        seen.add(norm)
+        git_rel = f"{sub_prefix}{norm}"
+        spec = f"{rev_prefix}:{git_rel}"
+        ordered.append(norm)
+        specs.append(spec)
+    if not ordered:
+        return {}
+
+    stdin_payload = ("\n".join(specs) + "\n").encode("utf-8")
+    try:
+        cp = subprocess.run(
+            ["git", "--no-optional-locks", "cat-file", "--batch"],
+            cwd=str(toplevel),
+            input=stdin_payload,
+            capture_output=True,
+        )
+    except OSError:
+        return {}
+    if cp.returncode != 0 or not cp.stdout:
+        return {}
+
+    out_buf = cp.stdout
+    n_buf = len(out_buf)
+    pos = 0
+    blobs: Dict[str, bytes] = {}
+    for norm in ordered:
+        nl = out_buf.find(b"\n", pos)
+        if nl == -1:
+            break
+        hdr = out_buf[pos:nl].decode("utf-8", errors="replace")
+        pos = nl + 1
+        if hdr.endswith(" missing") or hdr.endswith(" ambiguous"):
+            continue
+        parts = hdr.rsplit(" ", 2)
+        if len(parts) < 3 or not parts[2].isdigit():
+            break
+        obj_type = parts[1]
+        sz = int(parts[2])
+        if pos + sz > n_buf:
+            break
+        body = out_buf[pos : pos + sz]
+        pos += sz
+        if pos < n_buf and out_buf[pos : pos + 1] == b"\n":
+            pos += 1
+        if obj_type == "blob" and sz <= max_bytes:
+            blobs[norm] = body
+    return blobs
+

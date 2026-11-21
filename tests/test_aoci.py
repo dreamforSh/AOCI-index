@@ -2180,6 +2180,8 @@ class Phase1FixesTests(RepoTestCase):
                 "aoci_install_git_hooks",
                 "aoci_batch_pack",
                 "aoci_ci_check",
+                "aoci_refs",
+                "aoci_doctor",
             },
         )
         for t_name, t_spec in tools.items():

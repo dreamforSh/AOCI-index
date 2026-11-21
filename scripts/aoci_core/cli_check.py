@@ -14,6 +14,7 @@ from . import batch_pack as _batch_pack
 from . import ci_check as _ci_check
 from . import cli_read as _cli_read
 from . import diff_brief as _diff_brief
+from . import doctor as _doctor
 from . import drift as _drift
 from . import git_ops as _git_ops
 from . import graph as _graph
@@ -399,20 +400,43 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_lint(args: argparse.Namespace) -> int:
     """FRAS quality gate: vague/short F:, token budget vs Importance, empty S: on hubs, dangling refs, duplicates."""
     root = _git_ops.resolve_root(args.root)
+    as_json = bool(getattr(args, "json", False))
+    max_b = getattr(args, "max_bytes", DEFAULT_MAX_BYTES)
+    doctor_res: Optional[Dict[str, Any]] = None
+    if getattr(args, "fix", False):
+        try:
+            doctor_res = _doctor.run_index_doctor(
+                root,
+                sync_static_r=bool(getattr(args, "sync_static_r", False)),
+                dry_run=bool(getattr(args, "dry_run", False)),
+                max_bytes=max_b,
+            )
+        except TimeoutError as exc:
+            return _cli_read._emit_cli_error(as_json, str(exc), 3)
+        if not doctor_res.get("ok"):
+            code = 1 if doctor_res.get("malformed") else 2
+            return _cli_read._emit_cli_error(as_json, str(doctor_res.get("error", "Auto-fix failed.")), code, extra=doctor_res)
+
     res = _audit.compute_lint(
         root,
         code_filter=args.code,
-        max_bytes=getattr(args, "max_bytes", DEFAULT_MAX_BYTES),
+        max_bytes=max_b,
     )
     if res.get("error"):
-        return _cli_read._emit_cli_error(bool(getattr(args, "json", False)), str(res["error"]), 2, extra=res)
+        return _cli_read._emit_cli_error(as_json, str(res["error"]), 2, extra=res)
+    if doctor_res is not None:
+        res = dict(res)
+        res["doctor"] = doctor_res
 
     findings = res["findings"]
     by_code = res["counts"]
     indexed = res["indexed"]
-    if args.json:
+    if as_json:
         print(json.dumps(res, indent=2, ensure_ascii=False))
     else:
+        if doctor_res is not None:
+            d_mode = " (dry-run)" if doctor_res["dry_run"] else ""
+            print(f"[AOCI Lint --fix{d_mode}] AppliedFixes={doctor_res['total_fixes']}")
         label = "CLEAN" if not findings else f"{len(findings)} finding(s)"
         print(f"[AOCI Lint] {label} | Indexed={indexed}")
         if by_code:
@@ -455,7 +479,23 @@ def cmd_diff(args: argparse.Namespace) -> int:
             print(f"  * {item['path']} [I={item['importance']}]: {item['s']}")
     for ln in brief["changed_entries"]:
         print(ln)
-    if brief.get("hub_sections"):
+    if brief.get("contract_deltas"):
+        print(f"\n## API Contract Deltas ({len(brief['contract_deltas'])})")
+        for cd in brief["contract_deltas"]:
+            print(f"  ~ {cd['path']}:")
+            for sig in cd.get("added_signatures", ()):
+                print(f"      + sig: {sig}")
+            for sig in cd.get("removed_signatures", ()):
+                print(f"      - sig: {sig}")
+            for imp in cd.get("added_imports", ()):
+                print(f"      + imp: {imp}")
+            for imp in cd.get("removed_imports", ()):
+                print(f"      - imp: {imp}")
+    if brief.get("touched_hub_sections"):
+        print(f"\n## Touched Hub Sections ({len(brief['touched_hub_sections'])}/{len(brief.get('hub_sections', []))})")
+        for sec in brief["touched_hub_sections"]:
+            print(sec["entry"])
+    elif brief.get("hub_sections"):
         print(f"\n## Hub Sections ({len(brief['hub_sections'])})")
         for sec in brief["hub_sections"]:
             print(sec["entry"])

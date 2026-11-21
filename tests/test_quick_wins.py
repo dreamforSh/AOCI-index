@@ -233,7 +233,7 @@ class QuickWinsRegressionTests(RepoTestCase):
     def test_4_mcp_all_27_tools_declare_output_schema_and_reinit_clears_subscriptions(self) -> None:
         tools_resp = aoci_mcp.handle_rpc_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = tools_resp["result"]["tools"]
-        self.assertEqual(len(tools), 27)
+        self.assertEqual(len(tools), 29)
         missing_schema = [t["name"] for t in tools if not isinstance(t.get("outputSchema"), dict)]
         self.assertEqual(missing_schema, [])
         for t in tools:

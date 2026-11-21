@@ -18,6 +18,7 @@ from . import graph as _graph
 from . import hubs as _hubs
 from . import ignore as _ignore
 from . import pack as _pack
+from . import refs as _refs
 from . import shards as _shards
 from . import symbols as _symbols
 from . import test_impact as _test_impact
@@ -746,4 +747,52 @@ def cmd_export(args: argparse.Namespace) -> int:
         )
     else:
         print(res["content"], end="")
+    return 0
+
+
+def cmd_refs(args: argparse.Namespace) -> int:
+    """Locate cross-file symbol references and call sites pruned by the FRAS dependency graph."""
+    root = _git_ops.resolve_root(args.root)
+    aoci_dir = root / AOCI_DIR_NAME
+    code_path = aoci_dir / CODE_FILE
+    as_json = bool(getattr(args, "json", False))
+    if not code_path.exists():
+        return _emit_cli_error(as_json, f"`{code_path}` not found. Run `init` first.", 2)
+
+    entries, _ = _shards.parse_code_volume(code_path)
+    parsed_map = parse_entries_map(entries)
+    deps_adj, dependents_adj = build_fras_graph(entries, parsed_entries=parsed_map)
+    res = _refs.find_symbol_references(
+        root,
+        entries,
+        deps_adj,
+        dependents_adj,
+        args.symbol,
+        def_path=getattr(args, "path", None),
+        depth=int(getattr(args, "depth", 2)),
+        all_files=bool(getattr(args, "all_files", False)),
+        include_defs=bool(getattr(args, "include_defs", False)),
+        limit=int(getattr(args, "limit", 50)),
+        max_bytes=int(getattr(args, "max_bytes", DEFAULT_MAX_BYTES)),
+        parsed_entries=parsed_map,
+    )
+    if not res.get("ok"):
+        return _emit_cli_error(as_json, str(res.get("error", "Reference search failed.")), 2, extra=res)
+
+    if as_json:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"# AOCI Symbol References: {res['query']} "
+            f"(mode={res['mode']}, searched={res['candidate_files_searched']}/{res['total_indexed_files']}, "
+            f"hits={res['total_references']})"
+        )
+        if res.get("definitions"):
+            for d in res["definitions"]:
+                sp = f" [L{d['line_span'][0]}-L{d['line_span'][1]}]" if d.get("line_span") else ""
+                print(f"  def: {d['path']}{sp} ({d.get('symbol')})")
+        for ref in res["references"]:
+            print(f"  [{ref['kind']}] {ref['path']}:L{ref['line']}: {ref['snippet']}")
+        if res.get("truncated"):
+            print(f"  ... (truncated to {len(res['references'])} hits; pass --limit 0 for all)")
     return 0

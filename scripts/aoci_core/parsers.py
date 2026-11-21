@@ -1741,6 +1741,145 @@ def _compute_py_sig_hash_from_tree(tree: ast.Module) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def extract_signature_payload_from_bytes(
+    norm_bytes: bytes,
+    ext: str,
+    rel: str = "",
+) -> Optional[Dict[str, List[str]]]:
+    """
+    Extract human-readable normalized `(imports, signatures)` sets for structural contract diffing.
+    Class headers and public/contract methods are emitted as distinct items so single-method changes
+    report granular `Owner::method` deltas instead of re-emitting unchanged sibling methods.
+    """
+    del rel
+    ext_l = ext.lower()
+    if ext_l not in SIG_HASH_EXTS:
+        return None
+    clean_bytes = strip_utf8_bom_bytes(norm_bytes)
+    if b"\r\n" in clean_bytes:
+        clean_bytes = clean_bytes.replace(b"\r\n", b"\n")
+    text = clean_bytes.decode("utf-8", errors="replace")
+
+    if ext_l == ".py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return None
+        py_imps: List[str] = []
+        py_sigs: List[str] = []
+        for node in _iter_py_import_nodes(tree.body):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    py_imps.append(f"import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                dots = "." * node.level
+                mod = f"{dots}{node.module}" if node.module else dots
+                names = ", ".join(sorted(a.name for a in node.names))
+                py_imps.append(f"from {mod} import {names}")
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not node.name.startswith("_") or node.name in _PY_CONTRACT_DUNDERS:
+                    py_sigs.append(_py_fn_sig(node))
+            elif isinstance(node, ast.ClassDef):
+                bases = ",".join(_ast_type_str(b) for b in node.bases)
+                cls_decs = [t for t in (_ast_decorator_str(d) for d in getattr(node, "decorator_list", ())) if t]
+                cls_dec_prefix = f"[{','.join(cls_decs)}] " if cls_decs else ""
+                py_sigs.append(f"{cls_dec_prefix}class {node.name}({bases})")
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                        not sub.name.startswith("__") or sub.name in _PY_CONTRACT_DUNDERS
+                    ):
+                        if not sub.name.startswith("_") or sub.name in _PY_CONTRACT_DUNDERS:
+                            py_sigs.append(f"{node.name}::{_py_fn_sig(sub)}")
+                    elif (
+                        isinstance(sub, ast.AnnAssign)
+                        and isinstance(sub.target, ast.Name)
+                        and not sub.target.id.startswith("_")
+                    ):
+                        py_sigs.append(f"{node.name}::{sub.target.id}:{_ast_type_str(sub.annotation)}")
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        if t.id == "__all__":
+                            py_sigs.append(_py_all_sig(node.value))
+                        elif not t.id.startswith("_") and any(c.isupper() for c in t.id) and t.id == t.id.upper():
+                            py_sigs.append(f"const {t.id}={_ast_default_str(node.value)}")
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                ann = _ast_type_str(node.annotation)
+                if node.target.id == "__all__":
+                    py_sigs.append(f"__all__[{ann}]:{_py_all_sig(node.value)}")
+                elif not node.target.id.startswith("_"):
+                    val_part = f"={_ast_default_str(node.value)}" if node.value is not None else ""
+                    py_sigs.append(f"{node.target.id}:{ann}{val_part}")
+            elif type(node).__name__ == "TypeAlias":
+                ta_name = _ast_type_str(getattr(node, "name", None))
+                ta_val = _ast_type_str(getattr(node, "value", None))
+                py_sigs.append(f"type {ta_name}={ta_val}")
+        return {"imports": sorted(set(py_imps)), "signatures": sorted(set(py_sigs))}
+
+    if ext_l in {".graphql", ".gql", ".prisma", ".sql", ".proto"}:
+        out_idl = _extract_outline_from_bytes(clean_bytes, ext_l, "", max_items=200, max_imports=200)
+        idl_syms = [re.sub(r"\s*\[L\d+\]\s*$", "", str(s)).strip() for s in out_idl.get("symbols", ())]
+        return {
+            "imports": sorted(set(str(i) for i in out_idl.get("imports", ()))),
+            "signatures": sorted(s for s in set(idl_syms) if s),
+        }
+
+    rich = _extract_rich_non_py_signatures(clean_bytes, ext_l, predecoded_text=text)
+    if rich is None:
+        return None
+    return {"imports": list(rich["i"]), "signatures": list(rich["s"])}
+
+
+def compute_contract_delta(
+    old_bytes: Optional[bytes],
+    new_bytes: Optional[bytes],
+    ext: str,
+    rel: str = "",
+    max_items: int = 20,
+) -> Optional[Dict[str, Any]]:
+    """
+    Compare normalized public contract payloads `(imports, signatures)` between `old_bytes` and `new_bytes`.
+    Returns a compact delta dict when public imports or signatures changed, else `None`.
+    """
+    if old_bytes is None or new_bytes is None:
+        return None
+    old_p = extract_signature_payload_from_bytes(old_bytes, ext, rel)
+    new_p = extract_signature_payload_from_bytes(new_bytes, ext, rel)
+    if old_p is None or new_p is None:
+        return None
+
+    old_s_set = set(old_p["signatures"])
+    new_s_set = set(new_p["signatures"])
+    old_i_set = set(old_p["imports"])
+    new_i_set = set(new_p["imports"])
+
+    added_sigs = [s for s in new_p["signatures"] if s not in old_s_set]
+    removed_sigs = [s for s in old_p["signatures"] if s not in new_s_set]
+    added_imps = [i for i in new_p["imports"] if i not in old_i_set]
+    removed_imps = [i for i in old_p["imports"] if i not in new_i_set]
+
+    if not (added_sigs or removed_sigs or added_imps or removed_imps):
+        return None
+
+    cap = max(1, int(max_items))
+    delta: Dict[str, Any] = {}
+    truncated = False
+    for key, items in (
+        ("added_signatures", added_sigs),
+        ("removed_signatures", removed_sigs),
+        ("added_imports", added_imps),
+        ("removed_imports", removed_imps),
+    ):
+        if items:
+            if len(items) > cap:
+                truncated = True
+            delta[key] = items[:cap]
+    if truncated:
+        delta["truncated"] = True
+    return delta
+
+
 def extract_outline_and_sig_hash_from_bytes(
     norm_bytes: bytes,
     ext: str,

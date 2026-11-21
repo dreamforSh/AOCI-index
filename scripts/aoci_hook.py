@@ -357,7 +357,77 @@ def handle_turn_start(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     return {}
 
 
-def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
+def _auto_heal_enabled(cli_flag: bool = False) -> bool:
+    if cli_flag:
+        return True
+    return os.environ.get("AOCI_HOOK_AUTO_HEAL", "").strip().lower() in ("1", "true", "yes", "on", "safe", "auto")
+
+
+def _try_safe_stop_auto_heal(
+    root: Path,
+    git_info: Dict[str, Any],
+    drift: Dict[str, Any],
+    *,
+    display_added: List[str],
+    modified: List[str],
+    missing: List[str],
+    display_deleted: List[str],
+    renamed_count: int,
+    similar_count: int,
+    malformed_new: int,
+    invalid_new: int,
+    hub_new: int,
+) -> bool:
+    """
+    Attempt zero-token mechanical sync ONLY when all session-new drift items are strictly deterministic
+    (exact byte-identical renames, exact semantic-pool hits, or deletions leaving zero dangling R:/A: refs).
+    Never runs if any file was modified, similarly moved+edited, malformed, or lacks a pool entry.
+    """
+    if modified or similar_count > 0 or malformed_new > 0 or invalid_new > 0 or hub_new > 0:
+        return False
+    if not (renamed_count > 0 or display_added or missing or display_deleted):
+        return False
+
+    need_restore = bool(display_added or missing)
+    if need_restore:
+        if len(drift["added"]) != len(display_added) or len(drift["missing_in_code"]) != len(missing):
+            return False
+        restorable = aoci_index.count_restorable_from_pool(root, git_info, drift)
+        if restorable < (len(display_added) + len(missing)):
+            return False
+
+    need_migrate = renamed_count > 0
+    if need_migrate and len(drift["renamed"]) != renamed_count:
+        return False
+
+    need_prune = bool(display_deleted)
+    if need_prune:
+        if len(drift["deleted"]) != len(display_deleted):
+            return False
+        del_set = set(display_deleted)
+        code_entries = drift.get("_code_entries") or {}
+        remaining_entries = {k: v for k, v in code_entries.items() if k not in del_set}
+        live_paths = set((drift.get("_fingerprints") or {}).keys())
+        dangling_after = aoci_index.find_dangling_refs(root, remaining_entries, existing_paths=live_paths)
+        for bad_refs in dangling_after.values():
+            if any(dp in del_set for dp in bad_refs):
+                return False
+
+    sync_res = aoci_index._apply_sync.run_apply_sync(
+        root,
+        aoci_index._capture_internal_cli,
+        restore=need_restore,
+        migrate_renames=need_migrate,
+        exact_only=True,
+        prune_only=need_prune,
+        no_prune=not need_prune,
+        verify=False,
+        lock_cls=aoci_index.IndexLock,
+    )
+    return bool(sync_res.get("ok"))
+
+
+def handle_stop(payload: Dict[str, Any], host: str, *, auto_heal: bool = False) -> Dict[str, Any]:
     # Antigravity: only gate normal model completion; never block cancels, errors, or budget stops
     term_reason = payload.get("terminationReason", "")
     if term_reason and term_reason != "NO_TOOL_CALL":
@@ -392,6 +462,7 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
         if not can_retry:
             return {}
 
+    heal_active = _auto_heal_enabled(auto_heal)
     findings: List[str] = []
     ignored_total = 0
     total_unsynced = 0
@@ -400,6 +471,8 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     blocked_root_hubs: Dict[Path, List[str]] = {}
     for root, git_info in roots:
         git_status = aoci_index.check_git_exclusion(root, git_info, check_status=False)
+        if heal_active and git_status["is_git"] and not git_status["excluded"] and not git_status["tracked_files"]:
+            git_status = aoci_index.ensure_git_exclusion(root, git_info, check_status=False)
         drift = aoci_index.compute_drift(root, git_info, fast_mtime=True)
 
         snapshot = snapshots_by_root.get(root) if sid else None
@@ -421,6 +494,51 @@ def handle_stop(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
             for sr in drift.get("similar_renames", [])
             if is_new(sr["to"]) or is_new(sr["from"])
         ]
+        if heal_active and (git_status["ok"] or not git_status["is_git"]):
+            sim_new_pre = [
+                sr for sr in drift.get("similar_renames", []) if is_new(sr["to"]) or is_new(sr["from"])
+            ]
+            pre_added = [p for p in added if p not in {sr["to"] for sr in sim_new_pre}]
+            pre_deleted = [p for p in deleted if p not in {sr["from"] for sr in sim_new_pre}]
+            mal_pre = len(drift["malformed_lines"]) if snapshot is None else sum(
+                (
+                    Counter(m["text"] for m in drift["malformed_lines"])
+                    - Counter(str(x) for x in (snapshot.get("malformed_texts") or ()))
+                ).values()
+            )
+            inv_pre = len(drift.get("invalid_entries", [])) if snapshot is None else sum(
+                (
+                    Counter(f"{it['path']}:{it['code']}:{it['message']}" for it in drift.get("invalid_entries", []))
+                    - Counter(str(x) for x in (snapshot.get("invalid_texts") or ()))
+                ).values()
+            )
+            hub_pre = len(_collect_hub_issues(root, drift))
+            if _try_safe_stop_auto_heal(
+                root,
+                git_info,
+                drift,
+                display_added=pre_added,
+                modified=modified,
+                missing=missing,
+                display_deleted=pre_deleted,
+                renamed_count=len(renamed),
+                similar_count=len(similar),
+                malformed_new=mal_pre,
+                invalid_new=inv_pre,
+                hub_new=hub_pre,
+            ):
+                drift = aoci_index.compute_drift(root, git_info, fast_mtime=True)
+                cur_sig = aoci_index.drift_signature(drift)
+                added = [x["path"] for x in drift["added"] if is_new(x["path"])]
+                modified = [x["path"] for x in drift["modified"] if is_new(x["path"])]
+                missing = [x["path"] for x in drift["missing_in_code"] if is_new(x["path"])]
+                deleted = [p for p in drift["deleted"] if is_new(p)]
+                renamed = [f"{r['from']}->{r['to']}" for r in drift["renamed"] if is_new(r["to"]) or is_new(r["from"])]
+                similar = [
+                    f"{sr['from']}~>{sr['to']}"
+                    for sr in drift.get("similar_renames", [])
+                    if is_new(sr["to"]) or is_new(sr["from"])
+                ]
         total_drift = (
             len(drift["added"]) + len(drift["modified"]) + len(drift["missing_in_code"])
             + len(drift["deleted"]) + len(drift["renamed"])
@@ -676,6 +794,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default="auto",
         help="Hook event type (default: auto-detect from stdin event field)",
     )
+    parser.add_argument(
+        "--auto-heal",
+        action="store_true",
+        help="Silently apply safe zero-token mechanical sync (exact renames, pool restores, clean prunes) on Stop",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -703,7 +826,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif event == "turn-start":
             out = handle_turn_start(payload, host)
         elif event == "stop":
-            out = handle_stop(payload, host)
+            out = handle_stop(payload, host, auto_heal=bool(args.auto_heal))
         else:
             out = {}
     except Exception:

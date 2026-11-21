@@ -6,9 +6,10 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
-from .constants import DEFAULT_MAX_BYTES, _is_within_root, normalize_relpath
+from .constants import DEFAULT_MAX_BYTES, SIG_HASH_EXTS, _is_within_root, normalize_relpath
+from .git_ops import read_git_blobs_batch
 from .graph import build_explicit_mention_index, build_fras_graph, parse_entries_map
-from .parsers import extract_file_outline
+from .parsers import compute_contract_delta, extract_file_outline
 from .pool import count_restorable_from_pool
 from .test_impact import _load_outline_cache, is_outline_record_fresh
 
@@ -237,8 +238,26 @@ def prepare_sync_briefing(
     diff_previews = _batch_bounded_git_diff_previews(
         root, contract_rels, git_info, run_git_fn, max_diff_lines
     )
+    sig_rels = [r for r in contract_rels if Path(r).suffix.lower() in SIG_HASH_EXTS]
+    head_blobs = (
+        read_git_blobs_batch(root, git_info, "HEAD", sig_rels, max_bytes=max_bytes)
+        if sig_rels and git_info.get("is_git")
+        else {}
+    )
     for enriched in contract_or_unknown_modified:
-        enriched["diff_preview"] = diff_previews.get(enriched["path"], "")
+        rel_e = enriched["path"]
+        enriched["diff_preview"] = diff_previews.get(rel_e, "")
+        old_b = head_blobs.get(rel_e)
+        if old_b is not None:
+            full_e = root / rel_e
+            if _is_within_root(root, full_e):
+                try:
+                    if not full_e.is_symlink() and full_e.is_file() and full_e.stat().st_size <= max_bytes:
+                        delta = compute_contract_delta(old_b, full_e.read_bytes(), full_e.suffix, rel_e)
+                        if delta is not None:
+                            enriched["contract_delta"] = delta
+                except OSError:
+                    pass
 
     added_scaffolds: List[Dict[str, Any]] = []
     for it in added_non_sim:

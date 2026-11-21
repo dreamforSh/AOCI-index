@@ -23,11 +23,13 @@ from .cli_read import (
     cmd_overview,
     cmd_pack,
     cmd_query,
+    cmd_refs,
     cmd_symbol,
 )
 from .cli_write import (
     cmd_ack,
     cmd_apply_sync,
+    cmd_doctor,
     cmd_ensure_git_exclude,
     cmd_init,
     cmd_install_git_hooks,
@@ -148,6 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_lint.add_argument("--root", help="Target codebase root")
     p_lint.add_argument("--code", help="Comma-separated finding codes to keep (e.g. ref-dangling,F-vague)")
     p_lint.add_argument("--limit", type=int, default=100, help="Max findings to print (default: 100)")
+    p_lint.add_argument("--fix", action="store_true", help="Apply mechanical index fixes (`doctor`) before linting")
+    p_lint.add_argument("--sync-static-r", action="store_true", help="With `--fix`: append missing internal static imports to `R:`")
+    p_lint.add_argument("--dry-run", action="store_true", help="With `--fix`: preview mechanical fixes without writing")
     p_lint.add_argument("--strict", action="store_true", help="Exit 1 when any finding exists")
     p_lint.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_lint.add_argument("--json", action="store_true", help="Output JSON")
@@ -508,6 +513,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_ci.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_ci.add_argument("--json", action="store_true", help="Shortcut for `--format json`")
     p_ci.set_defaults(func=cmd_ci_check)
+
+    p_refs = sub.add_parser(
+        "refs",
+        help="Locate cross-file symbol references and call sites pruned by the FRAS dependency graph",
+    )
+    p_refs.add_argument("symbol", help="Symbol identifier (or `<path>#<symbol>` / `Class.method`) to search")
+    p_refs.add_argument("--root", help="Target codebase root")
+    p_refs.add_argument("--path", help="Restrict symbol definition lookup to this relative file path")
+    p_refs.add_argument("--depth", type=int, default=2, help="FRAS caller expansion hops for search pruning (default: 2)")
+    p_refs.add_argument("--all-files", action="store_true", help="Scan all indexed files instead of FRAS-pruned candidates")
+    p_refs.add_argument("--include-defs", action="store_true", help="Include symbol definition lines in results")
+    p_refs.add_argument("--limit", type=int, default=50, help="Maximum reference hits to return (default: 50; 0 = unlimited)")
+    p_refs.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_refs.add_argument("--json", action="store_true", help="Output JSON")
+    p_refs.set_defaults(func=cmd_refs)
+
+    p_doc = sub.add_parser(
+        "doctor",
+        help="Zero-token mechanical self-healer (duplicates, Size tiers, dangling R:/A: refs, optional static R: sync, hubs)",
+    )
+    p_doc.add_argument("--root", help="Target codebase root")
+    p_doc.add_argument("--sync-static-r", action="store_true", help="Append confirmed internal static imports into `R:`")
+    p_doc.add_argument("--drop-malformed", action="store_true", help="Allow discarding pre-existing malformed lines")
+    p_doc.add_argument("--dry-run", action="store_true", help="Preview mechanical repairs without modifying `.aoci/`")
+    p_doc.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    p_doc.add_argument("--json", action="store_true", help="Output JSON")
+    p_doc.set_defaults(func=cmd_doctor)
 
     return p
 

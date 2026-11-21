@@ -1088,6 +1088,46 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
             "required": ["root"],
         },
     },
+    {
+        "name": "aoci_refs",
+        "description": (
+            "Locate exact line-level cross-file symbol references and call sites by pruning the search space "
+            "with the FRAS dependency graph, cached static imports, and T-layer test stems."
+        ),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "symbol": {"type": "string", "description": "Symbol identifier (or `<path>#<symbol>` / `Class.method`) to search"},
+                "path": {"type": "string", "description": "Optional definition file path filter"},
+                "depth": {"type": "integer", "default": 2, "description": "FRAS caller expansion hops for candidate pruning"},
+                "all_files": {"type": "boolean", "default": False, "description": "Scan all indexed files instead of FRAS-pruned candidates"},
+                "include_defs": {"type": "boolean", "default": False, "description": "Include symbol definition lines in results"},
+                "limit": {"type": "integer", "default": 50, "description": "Maximum references to return (0 = unlimited)"},
+            },
+            "required": ["root", "symbol"],
+        },
+    },
+    {
+        "name": "aoci_doctor",
+        "description": (
+            "Zero-token mechanical `.aoci/` self-healer: deduplicates entries, refreshes `[LDIS]` Size tiers, "
+            "prunes dangling deleted-file refs in `R:`/`A:`, optionally syncs confirmed internal static imports "
+            "into `R:`, and repairs `aoci.hubs.txt` spans/registration and shards without fabricating F:/S:."
+        ),
+        "annotations": _MUTATE_IDEMPOTENT_ANNOTATIONS,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "root": {"type": "string", "description": "Target repository root path"},
+                "sync_static_r": {"type": "boolean", "default": False, "description": "Append confirmed internal static imports into `R:`"},
+                "drop_malformed": {"type": "boolean", "default": False, "description": "Allow discarding pre-existing malformed lines"},
+                "dry_run": {"type": "boolean", "default": False, "description": "Preview mechanical repairs without modifying disk"},
+            },
+            "required": ["root"],
+        },
+    },
 ]
 
 _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
@@ -1217,6 +1257,34 @@ _TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "query": {"type": "string"},
             "count": {"type": "integer"},
             "matches": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_refs": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "query": {"type": "string"},
+            "symbol": {"type": "string"},
+            "mode": {"type": "string"},
+            "candidate_files_searched": {"type": "integer"},
+            "total_indexed_files": {"type": "integer"},
+            "total_references": {"type": "integer"},
+            "definitions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "references": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_doctor": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "total_fixes": {"type": "integer"},
+            "deduplicated": {"type": "array", "items": {"type": "string"}},
+            "size_refreshed": {"type": "array", "items": {"type": "string"}},
+            "dangling_refs_pruned": {"type": "object", "additionalProperties": True},
+            "static_deps_added": {"type": "object", "additionalProperties": True},
         },
         "additionalProperties": True,
     },
@@ -2249,6 +2317,39 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if fmt_ci == "markdown":
             return is_ci_err, aoci_index._ci_check.format_ci_markdown(report)
         return is_ci_err, json.dumps(report, indent=2, ensure_ascii=False)
+
+    if name == "aoci_refs":
+        slot = _CACHE.get(root)
+        if slot is None:
+            return True, f"ERROR: `.aoci/aoci.code.txt` not found at {root}. Run `init` first."
+        res = aoci_index.find_symbol_references(
+            root,
+            slot["entries"],
+            slot["deps"],
+            slot["dependents"],
+            str(args.get("symbol", "")),
+            def_path=args.get("path"),
+            depth=int(args["depth"]) if args.get("depth") is not None else 2,
+            all_files=bool(args.get("all_files", False)),
+            include_defs=bool(args.get("include_defs", False)),
+            limit=int(args["limit"]) if args.get("limit") is not None else 50,
+            parsed_entries=slot["parsed"],
+            preloaded_outline_files=_CACHE.get_outline_files(root),
+            hub_records=_CACHE.get_hub_records(root),
+        )
+        return (not res.get("ok")), json.dumps(res, indent=2, ensure_ascii=False)
+
+    if name == "aoci_doctor":
+        dry_run = bool(args.get("dry_run", False))
+        res = aoci_index.run_index_doctor(
+            root,
+            sync_static_r=bool(args.get("sync_static_r", False)),
+            drop_malformed=bool(args.get("drop_malformed", False)),
+            dry_run=dry_run,
+        )
+        if not dry_run:
+            _on_root_mutated(root, ok=bool(res.get("ok")))
+        return (not res.get("ok")), json.dumps(res, indent=2, ensure_ascii=False)
 
     return True, f"Unknown tool: `{name}`"
 

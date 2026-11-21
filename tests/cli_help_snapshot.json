@@ -196,6 +196,7 @@
     "cmd_ci_check",
     "cmd_context",
     "cmd_diff",
+    "cmd_doctor",
     "cmd_ensure_git_exclude",
     "cmd_export",
     "cmd_init",
@@ -208,6 +209,7 @@
     "cmd_pool",
     "cmd_prepare_sync",
     "cmd_query",
+    "cmd_refs",
     "cmd_restore",
     "cmd_scaffold",
     "cmd_scan",
@@ -218,6 +220,7 @@
     "cmd_zoom",
     "code_dependency_view",
     "compile_path_ref_rewriter",
+    "compute_contract_delta",
     "compute_diff_briefing",
     "compute_drift",
     "compute_lint",
@@ -239,9 +242,11 @@
     "export_semantic_pool",
     "extract_file_outline",
     "extract_path_refs",
+    "extract_signature_payload_from_bytes",
     "find_dangling_refs",
     "find_dependency_cycles",
     "find_impacted_tests",
+    "find_symbol_references",
     "fingerprint_file",
     "git_exclude_pattern",
     "import_semantic_pool",
@@ -270,6 +275,7 @@
     "path_skip_reason",
     "pool_stats",
     "public_drift",
+    "read_git_blobs_batch",
     "record_semantic_pool_entries",
     "render_code_volume",
     "render_ignore_template",
@@ -284,6 +290,7 @@
     "rewrite_path_refs",
     "run_ci_architecture_check",
     "run_git",
+    "run_index_doctor",
     "save_baseline",
     "scaffold_entries",
     "search_entries_bm25",
@@ -372,7 +379,9 @@
           "apply-sync",
           "symbol",
           "batch-pack",
-          "ci-check"
+          "ci-check",
+          "refs",
+          "doctor"
         ]
       }
     ],
@@ -1296,6 +1305,51 @@
             "choices": null,
             "required": false,
             "help": "Max findings to print (default: 100)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--fix"
+            ],
+            "dest": "fix",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Apply mechanical index fixes (`doctor`) before linting",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--sync-static-r"
+            ],
+            "dest": "sync_static_r",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "With `--fix`: append missing internal static imports to `R:`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "With `--fix`: preview mechanical fixes without writing",
             "version": null
           },
           {
@@ -4967,17 +5021,288 @@
           }
         ],
         "subparsers": {}
+      },
+      "refs": {
+        "prog": "aoci_index.py refs",
+        "description": null,
+        "func_name": "cmd_refs",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [],
+            "dest": "symbol",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": true,
+            "help": "Symbol identifier (or `<path>#<symbol>` / `Class.method`) to search",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--path"
+            ],
+            "dest": "path",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Restrict symbol definition lookup to this relative file path",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--depth"
+            ],
+            "dest": "depth",
+            "nargs": null,
+            "const": null,
+            "default": 2,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "FRAS caller expansion hops for search pruning (default: 2)",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--all-files"
+            ],
+            "dest": "all_files",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Scan all indexed files instead of FRAS-pruned candidates",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--include-defs"
+            ],
+            "dest": "include_defs",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Include symbol definition lines in results",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--limit"
+            ],
+            "dest": "limit",
+            "nargs": null,
+            "const": null,
+            "default": 50,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": "Maximum reference hits to return (default: 50; 0 = unlimited)",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
+      },
+      "doctor": {
+        "prog": "aoci_index.py doctor",
+        "description": null,
+        "func_name": "cmd_doctor",
+        "actions": [
+          {
+            "kind": "_HelpAction",
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "dest": "help",
+            "nargs": 0,
+            "const": null,
+            "default": "==SUPPRESS==",
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "show this help message and exit",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--root"
+            ],
+            "dest": "root",
+            "nargs": null,
+            "const": null,
+            "default": null,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Target codebase root",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--sync-static-r"
+            ],
+            "dest": "sync_static_r",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Append confirmed internal static imports into `R:`",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--drop-malformed"
+            ],
+            "dest": "drop_malformed",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Allow discarding pre-existing malformed lines",
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--dry-run"
+            ],
+            "dest": "dry_run",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Preview mechanical repairs without modifying `.aoci/`",
+            "version": null
+          },
+          {
+            "kind": "_StoreAction",
+            "option_strings": [
+              "--max-bytes"
+            ],
+            "dest": "max_bytes",
+            "nargs": null,
+            "const": null,
+            "default": 524288,
+            "type": "int",
+            "choices": null,
+            "required": false,
+            "help": null,
+            "version": null
+          },
+          {
+            "kind": "_StoreTrueAction",
+            "option_strings": [
+              "--json"
+            ],
+            "dest": "json",
+            "nargs": 0,
+            "const": true,
+            "default": false,
+            "type": null,
+            "choices": null,
+            "required": false,
+            "help": "Output JSON",
+            "version": null
+          }
+        ],
+        "subparsers": {}
       }
     }
   },
   "help_texts": {
-    "aoci_index.py": "usage: aoci_index.py [-h] [-V]\n                     {init,scan,status,upsert,ack,lint,migrate-renames,verify,query,context,overview,outline,shard,restore,diff,scaffold,ensure-git-exclude,audit,export,pool,install-git-hooks,pack,prepare-sync,zoom,apply-sync,symbol,batch-pack,ci-check} ...\n\nAOCI Fast Codebase Index Manager\n\npositional arguments:\n  {init,scan,status,upsert,ack,lint,migrate-renames,verify,query,context,overview,outline,shard,restore,diff,scaffold,ensure-git-exclude,audit,export,pool,install-git-hooks,pack,prepare-sync,zoom,apply-sync,symbol,batch-pack,ci-check}\n    init                Initialize `.aoci/` index repository and enforce `.git/info/exclude`\n    scan                Detect codebase drift and generate line-balanced batching plan\n    status              Detect codebase drift and generate line-balanced batching plan\n    upsert              Validate & merge FRAS entries into `aoci.code.txt` and `baseline.json`\n    ack                 Re-baseline modified files whose existing FRAS entries are still accurate\n                        (auto Size tier refresh)\n    lint                FRAS quality checks (vague F, token budget, hub S, dangling refs, dups)\n    migrate-renames     Migrate exact-content (and high-similarity moved+edited) renamed files and\n                        rewrite R:/A: refs\n    verify              Verify Git exclusion, entry format, and zero SHA-256 drift\n    query               Filter or BM25-search `.aoci/aoci.code.txt` entries or trace impact\n                        neighbors\n    context             Expand architectural subgraph (targets + R: deps + upstream callers)\n    overview            Print compact global digest for fast orientation\n    outline             Extract static imports and top-level symbols to assist R:/A: authoring\n    shard               Split `aoci.code.txt` into per-directory `.aoci/shards/<dir>.code.txt`\n                        slices (auto-synced once enabled)\n    restore             Zero-token restore of FRAS entries from `<git-common-dir>/aoci-cache`\n                        after branch switches or worktrees\n    diff                Generate architectural impact briefing (FRAS + S: traps + affected\n                        callers) for Git diffs\n    scaffold            Draft FRAS entry skeletons with auto-resolved R: imports and repo-wide A:\n                        callers (<TODO> F:/S:)\n    ensure-git-exclude  Idempotently enforce `.aoci/` in `.git/info/exclude`\n    audit               Audit FRAS graph vs static imports, dependency cycles (Tarjan SCC), and\n                        forbidden layer edges\n    export              Export FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML\n                        format\n    pool                Inspect, export, or import `.pool.sqlite3` semantic cache entries\n    install-git-hooks   Install or remove idempotent local Git hooks (`post-checkout`/`post-\n                        merge`/`post-rewrite` + optional `pre-commit`)\n    pack                Build a task-driven, token-budgeted context pack (seeds + R:/A:\n                        neighborhood + S: traps + open_next)\n    prepare-sync        Collect single-pass agent sync briefing (scaffolds, outlines, bounded\n                        diffs, neighbors, actions)\n    zoom                Read, scaffold, or upsert symbol-level H-tier sections in\n                        `.aoci/aoci.hubs.txt`\n    apply-sync          Run ordered sync workflow (restore -> migrate-renames -> ack -> upsert ->\n                        verify) in one pass\n    symbol              Search symbols across `.aoci/aoci.hubs.txt`, outline cache, and FRAS `A:`\n                        exports\n    batch-pack          Assemble a self-contained subagent work-pack (scaffolds + outlines +\n                        optional source) for batch N\n    ci-check            CI-native architecture guard (layer rules, cycles, PR diff impact, GitHub\n                        annotations & SARIF 2.1.0)\n\noptions:\n  -h, --help            show this help message and exit\n  -V, --version         show program's version number and exit\n",
+    "aoci_index.py": "usage: aoci_index.py [-h] [-V]\n                     {init,scan,status,upsert,ack,lint,migrate-renames,verify,query,context,overview,outline,shard,restore,diff,scaffold,ensure-git-exclude,audit,export,pool,install-git-hooks,pack,prepare-sync,zoom,apply-sync,symbol,batch-pack,ci-check,refs,doctor} ...\n\nAOCI Fast Codebase Index Manager\n\npositional arguments:\n  {init,scan,status,upsert,ack,lint,migrate-renames,verify,query,context,overview,outline,shard,restore,diff,scaffold,ensure-git-exclude,audit,export,pool,install-git-hooks,pack,prepare-sync,zoom,apply-sync,symbol,batch-pack,ci-check,refs,doctor}\n    init                Initialize `.aoci/` index repository and enforce `.git/info/exclude`\n    scan                Detect codebase drift and generate line-balanced batching plan\n    status              Detect codebase drift and generate line-balanced batching plan\n    upsert              Validate & merge FRAS entries into `aoci.code.txt` and `baseline.json`\n    ack                 Re-baseline modified files whose existing FRAS entries are still accurate\n                        (auto Size tier refresh)\n    lint                FRAS quality checks (vague F, token budget, hub S, dangling refs, dups)\n    migrate-renames     Migrate exact-content (and high-similarity moved+edited) renamed files and\n                        rewrite R:/A: refs\n    verify              Verify Git exclusion, entry format, and zero SHA-256 drift\n    query               Filter or BM25-search `.aoci/aoci.code.txt` entries or trace impact\n                        neighbors\n    context             Expand architectural subgraph (targets + R: deps + upstream callers)\n    overview            Print compact global digest for fast orientation\n    outline             Extract static imports and top-level symbols to assist R:/A: authoring\n    shard               Split `aoci.code.txt` into per-directory `.aoci/shards/<dir>.code.txt`\n                        slices (auto-synced once enabled)\n    restore             Zero-token restore of FRAS entries from `<git-common-dir>/aoci-cache`\n                        after branch switches or worktrees\n    diff                Generate architectural impact briefing (FRAS + S: traps + affected\n                        callers) for Git diffs\n    scaffold            Draft FRAS entry skeletons with auto-resolved R: imports and repo-wide A:\n                        callers (<TODO> F:/S:)\n    ensure-git-exclude  Idempotently enforce `.aoci/` in `.git/info/exclude`\n    audit               Audit FRAS graph vs static imports, dependency cycles (Tarjan SCC), and\n                        forbidden layer edges\n    export              Export FRAS dependency graph in Mermaid, Graphviz DOT, or standalone HTML\n                        format\n    pool                Inspect, export, or import `.pool.sqlite3` semantic cache entries\n    install-git-hooks   Install or remove idempotent local Git hooks (`post-checkout`/`post-\n                        merge`/`post-rewrite` + optional `pre-commit`)\n    pack                Build a task-driven, token-budgeted context pack (seeds + R:/A:\n                        neighborhood + S: traps + open_next)\n    prepare-sync        Collect single-pass agent sync briefing (scaffolds, outlines, bounded\n                        diffs, neighbors, actions)\n    zoom                Read, scaffold, or upsert symbol-level H-tier sections in\n                        `.aoci/aoci.hubs.txt`\n    apply-sync          Run ordered sync workflow (restore -> migrate-renames -> ack -> upsert ->\n                        verify) in one pass\n    symbol              Search symbols across `.aoci/aoci.hubs.txt`, outline cache, and FRAS `A:`\n                        exports\n    batch-pack          Assemble a self-contained subagent work-pack (scaffolds + outlines +\n                        optional source) for batch N\n    ci-check            CI-native architecture guard (layer rules, cycles, PR diff impact, GitHub\n                        annotations & SARIF 2.1.0)\n    refs                Locate cross-file symbol references and call sites pruned by the FRAS\n                        dependency graph\n    doctor              Zero-token mechanical self-healer (duplicates, Size tiers, dangling R:/A:\n                        refs, optional static R: sync, hubs)\n\noptions:\n  -h, --help            show this help message and exit\n  -V, --version         show program's version number and exit\n",
     "aoci_index.py init": "usage: aoci_index.py init [-h] [--root ROOT] [--project PROJECT] [--locale LOCALE] [--force]\n                          [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root (defaults to Git toplevel or CWD)\n  --project PROJECT     Project name for `aoci.txt`\n  --locale LOCALE       Locale label (default: en-US)\n  --force               Overwrite existing template files\n  --max-bytes MAX_BYTES\n                        Max file size in bytes (default: 524288)\n  --json                Output JSON\n",
     "aoci_index.py scan": "usage: aoci_index.py scan [-h] [--root ROOT] [--batches BATCHES]\n                          [--max-batch-lines MAX_BATCH_LINES] [--reset-batches] [--fast]\n                          [--git-fast] [--auto-restore] [--check-only] [--fail-on-drift]\n                          [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --batches, --batch-size BATCHES\n                        Split pending files into batches of up to N files per batch (`--batch-size\n                        N`)\n  --max-batch-lines MAX_BATCH_LINES\n                        Maximum line budget per batch (default: 2500)\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` from current pending files\n  --fast                Skip disk reads when mtime & byte size match baseline\n  --git-fast            Use cached Git index + `git status` incremental discovery (auto-enabled on\n                        >=2000-file repos with --fast)\n  --auto-restore        Automatically restore matching `(path, sha256)` entries from semantic\n                        cache pool before scanning\n  --check-only          Do not auto-repair `.git/info/exclude`\n  --fail-on-drift       Exit with code 1 if any drift exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
     "aoci_index.py status": "usage: aoci_index.py status [-h] [--root ROOT] [--batches BATCHES]\n                            [--max-batch-lines MAX_BATCH_LINES] [--reset-batches] [--fast]\n                            [--git-fast] [--auto-restore] [--check-only] [--fail-on-drift]\n                            [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --batches, --batch-size BATCHES\n                        Split pending files into batches of up to N files per batch (`--batch-size\n                        N`)\n  --max-batch-lines MAX_BATCH_LINES\n                        Maximum line budget per batch (default: 2500)\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` from current pending files\n  --fast                Skip disk reads when mtime & byte size match baseline\n  --git-fast            Use cached Git index + `git status` incremental discovery (auto-enabled on\n                        >=2000-file repos with --fast)\n  --auto-restore        Automatically restore matching `(path, sha256)` entries from semantic\n                        cache pool before scanning\n  --check-only          Do not auto-repair `.git/info/exclude`\n  --fail-on-drift       Exit with code 1 if any drift exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
     "aoci_index.py upsert": "usage: aoci_index.py upsert [-h] [--root ROOT] [--entries-file ENTRIES_FILE]\n                            [--pending-dir PENDING_DIR] [--clean-pending] [--entry ENTRY]\n                            [--stdin] [--prune-only] [--no-prune] [--strict-size] [--dry-run]\n                            [--drop-malformed] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --entries-file ENTRIES_FILE\n                        Path to a text file containing object-fras-v2 lines\n  --pending-dir PENDING_DIR\n                        Directory containing `*.txt` subagent batch entry files to validate and\n                        merge atomically\n  --clean-pending       Remove consumed `*.txt` files in `--pending-dir` after a successful non-\n                        dry-run merge\n  --entry ENTRY         Single object-fras-v2 line (repeatable)\n  --stdin               Read object-fras-v2 lines from stdin\n  --prune-only          Only prune deleted/ignored files from index\n  --no-prune            Do not automatically prune deleted files\n  --strict-size         Fail instead of auto-fixing stale Size tier\n  --dry-run             Validate entries without writing to disk\n  --drop-malformed      Allow the rewrite to delete pre-existing malformed lines in aoci.code.txt\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
     "aoci_index.py ack": "usage: aoci_index.py ack [-h] [--root ROOT] [--all-modified] [--impl-only] [--reviewed]\n                         [--dry-run] [--max-bytes MAX_BYTES] [--json]\n                         [paths ...]\n\npositional arguments:\n  paths                 Relative file paths to acknowledge\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --all-modified        Acknowledge every currently modified file (requires --reviewed)\n  --impl-only           Acknowledge only modified files whose interface signature hash is\n                        unchanged (requires --reviewed unless --dry-run)\n  --reviewed            Confirm every file matched by --all-modified was read and its FRAS entry\n                        verified accurate\n  --dry-run             Preview without writing\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
-    "aoci_index.py lint": "usage: aoci_index.py lint [-h] [--root ROOT] [--code CODE] [--limit LIMIT] [--strict]\n                          [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --code CODE           Comma-separated finding codes to keep (e.g. ref-dangling,F-vague)\n  --limit LIMIT         Max findings to print (default: 100)\n  --strict              Exit 1 when any finding exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py lint": "usage: aoci_index.py lint [-h] [--root ROOT] [--code CODE] [--limit LIMIT] [--fix]\n                          [--sync-static-r] [--dry-run] [--strict] [--max-bytes MAX_BYTES]\n                          [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --code CODE           Comma-separated finding codes to keep (e.g. ref-dangling,F-vague)\n  --limit LIMIT         Max findings to print (default: 100)\n  --fix                 Apply mechanical index fixes (`doctor`) before linting\n  --sync-static-r       With `--fix`: append missing internal static imports to `R:`\n  --dry-run             With `--fix`: preview mechanical fixes without writing\n  --strict              Exit 1 when any finding exists\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
     "aoci_index.py migrate-renames": "usage: aoci_index.py migrate-renames [-h] [--root ROOT] [--exact-only] [--no-rewrite-refs]\n                                     [--drop-malformed] [--dry-run] [--max-bytes MAX_BYTES]\n                                     [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --exact-only          Only migrate byte-identical renames, skip moved+edited matches\n  --no-rewrite-refs     Do not rewrite path mentions in other R:/A: fields\n  --drop-malformed      Allow the rewrite to delete pre-existing malformed lines in aoci.code.txt\n  --dry-run             Preview migrations without writing to disk\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
     "aoci_index.py verify": "usage: aoci_index.py verify [-h] [--root ROOT] [--max-bytes MAX_BYTES] [--fast] [--git-fast]\n                            [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --max-bytes MAX_BYTES\n  --fast                Trust (mtime,size) for unchanged non-racy files (quick pre-check; full\n                        hashing is the default)\n  --git-fast            Use cached Git index + `git status` incremental scan\n  --json                Output JSON\n",
     "aoci_index.py query": "usage: aoci_index.py query [-h] [--root ROOT] [--layer LAYER] [--domain DOMAIN]\n                           [--min-importance MIN_IMPORTANCE] [--path PATH] [--keyword KEYWORD]\n                           [--search SEARCH] [--top TOP] [--impact IMPACT] [--tests-for TESTS_FOR]\n                           [--live-test-imports] [--depth DEPTH] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --layer LAYER         Filter by Layer code(s), e.g. `M` or `E,A,M`\n  --domain DOMAIN       Filter by Domain code(s), e.g. `O` or `A,O`\n  --min-importance MIN_IMPORTANCE\n                        Filter entries with Importance >= N\n  --path PATH           Glob pattern on relative path (e.g. `src/auth/*`)\n  --keyword KEYWORD     Case-insensitive exact substring filter\n  --search SEARCH       Ranked multi-term BM25 + Importance search across path/symbols/F/R/A/S\n  --top TOP             Maximum entries to return (default: 20 with --search; 0 = unlimited)\n  --impact IMPACT       Target file plus every entry that depends on it (via R: or A: callers)\n  --tests-for TESTS_FOR\n                        Target file to find impacted T-layer test files (FRAS + outline + naming)\n  --live-test-imports   Read uncached T-layer test imports in memory when outline_cache.json is\n                        missing/stale\n  --depth DEPTH         Transitive hops (default: 1 for --impact, 3 for --tests-for)\n  --json                Output JSON\n",
@@ -5002,6 +5327,8 @@
     "aoci_index.py apply-sync": "usage: aoci_index.py apply-sync [-h] [--root ROOT] [--restore] [--allow-sha-fallback]\n                                [--migrate-renames] [--exact-only] [--no-rewrite-refs]\n                                [--ack-path ACK_PATH] [--ack-impl-only] [--reviewed]\n                                [--entry ENTRY] [--entries-file ENTRIES_FILE]\n                                [--pending-dir PENDING_DIR] [--clean-pending] [--prune-only]\n                                [--no-prune] [--strict-size] [--drop-malformed] [--no-verify]\n                                [--full-verify] [--max-bytes MAX_BYTES] [--dry-run] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --restore             Run semantic pool restore (`--no-prune`) first\n  --allow-sha-fallback  Pass `--allow-sha-fallback` to `restore`\n  --migrate-renames     Migrate exact and similar renames\n  --exact-only          Pass `--exact-only` to `migrate-renames`\n  --no-rewrite-refs     Pass `--no-rewrite-refs` to `migrate-renames`\n  --ack-path ACK_PATH   Path to acknowledge via `ack` (repeatable; requires --reviewed)\n  --ack-impl-only       Acknowledge `impl_only` modified files (requires --reviewed)\n  --reviewed            Confirm acknowledged files were read and verified\n  --entry ENTRY         object-fras-v2 line to merge in `upsert` (repeatable)\n  --entries-file ENTRIES_FILE\n                        File containing object-fras-v2 lines to merge in `upsert`\n  --pending-dir PENDING_DIR\n                        Directory of `*.txt` batch files to merge in `upsert`\n  --clean-pending       Remove consumed `*.txt` batch files after `upsert`\n  --prune-only          Pass `--prune-only` to `upsert`\n  --no-prune            Pass `--no-prune` to `upsert`\n  --strict-size         Pass `--strict-size` to `upsert`\n  --drop-malformed      Allow dropping pre-existing malformed lines\n  --no-verify           Skip trailing `verify` check\n  --full-verify         Run full `verify` instead of `verify --fast`\n  --max-bytes MAX_BYTES\n                        Override max source file size in bytes across stages\n  --dry-run             Preview mutating stages without writing to disk\n  --json                Output JSON\n",
     "aoci_index.py symbol": "usage: aoci_index.py symbol [-h] [--root ROOT] [--exact] [--depth DEPTH] [--limit LIMIT] [--live]\n                            [--json]\n                            name\n\npositional arguments:\n  name           Symbol name or substring to look up\n\noptions:\n  -h, --help     show this help message and exit\n  --root ROOT    Target codebase root\n  --exact        Restrict to exact / qualified suffix matches\n  --depth DEPTH  FRAS neighbor expansion hops per matched file (default: 1)\n  --limit LIMIT  Maximum matched symbols to return (default: 20; 0 = unlimited)\n  --live         Read-only live outline fallback for files missing from outline cache\n  --json         Output JSON\n",
     "aoci_index.py batch-pack": "usage: aoci_index.py batch-pack [-h] --batch BATCH [--root ROOT] [--batch-size BATCH_SIZE]\n                                [--max-batch-lines MAX_BATCH_LINES] [--reset-batches]\n                                [--with-source] [--max-source-lines MAX_SOURCE_LINES]\n                                [--output OUTPUT] [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --batch BATCH         1-indexed batch number to pack\n  --root ROOT           Target codebase root\n  --batch-size BATCH_SIZE\n                        Files per batch (inherits active batch_plan.json if omitted)\n  --max-batch-lines MAX_BATCH_LINES\n                        Line budget per batch\n  --reset-batches       Rebuild `.aoci/.cache/batch_plan.json` before packing\n  --with-source         Embed bounded source excerpts per file\n  --max-source-lines MAX_SOURCE_LINES\n                        Maximum source lines per file with `--with-source` (default: 200)\n  --output OUTPUT       Optional output file path\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
-    "aoci_index.py ci-check": "usage: aoci_index.py ci-check [-h] [--root ROOT] [--format {text,json,github,sarif,markdown}]\n                              [--base-rev BASE_REV] [--pool-bundle POOL_BUNDLE] [--forbid FORBID]\n                              [--no-default-rules] [--no-static] [--no-cycles] [--no-layers]\n                              [--check-drift] [--exclude-tests] [--sarif-output SARIF_OUTPUT]\n                              [--markdown-output MARKDOWN_OUTPUT] [--output OUTPUT] [--strict]\n                              [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --format {text,json,github,sarif,markdown}\n                        Report output format (default: text)\n  --base-rev BASE_REV   Base Git revision (e.g. `origin/main`) for PR diff impact & test\n                        derivation\n  --pool-bundle POOL_BUNDLE\n                        Optional exported semantic pool bundle (`.json` or `.json.gz`) for zero-\n                        index CI\n  --forbid FORBID       Extra layer redlines (e.g. `D!->E,U; P!->E`)\n  --no-default-rules    Disable built-in layer redline defaults\n  --no-static           Skip static import vs FRAS cross-check\n  --no-cycles           Skip dependency cycle detection\n  --no-layers           Skip layer redline validation\n  --check-drift         Also report unsynced `.aoci/` drift when `.aoci/` exists\n  --exclude-tests       Exclude T-layer test files from layer/cycle checks\n  --sarif-output SARIF_OUTPUT\n                        Optional file path to write SARIF 2.1.0 output alongside stdout\n  --markdown-output MARKDOWN_OUTPUT\n                        Optional file path to write PR Markdown summary alongside stdout\n  --output OUTPUT       Optional file path to write formatted report\n  --strict              Exit with code 1 when any architectural finding exists\n  --max-bytes MAX_BYTES\n  --json                Shortcut for `--format json`\n"
+    "aoci_index.py ci-check": "usage: aoci_index.py ci-check [-h] [--root ROOT] [--format {text,json,github,sarif,markdown}]\n                              [--base-rev BASE_REV] [--pool-bundle POOL_BUNDLE] [--forbid FORBID]\n                              [--no-default-rules] [--no-static] [--no-cycles] [--no-layers]\n                              [--check-drift] [--exclude-tests] [--sarif-output SARIF_OUTPUT]\n                              [--markdown-output MARKDOWN_OUTPUT] [--output OUTPUT] [--strict]\n                              [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --format {text,json,github,sarif,markdown}\n                        Report output format (default: text)\n  --base-rev BASE_REV   Base Git revision (e.g. `origin/main`) for PR diff impact & test\n                        derivation\n  --pool-bundle POOL_BUNDLE\n                        Optional exported semantic pool bundle (`.json` or `.json.gz`) for zero-\n                        index CI\n  --forbid FORBID       Extra layer redlines (e.g. `D!->E,U; P!->E`)\n  --no-default-rules    Disable built-in layer redline defaults\n  --no-static           Skip static import vs FRAS cross-check\n  --no-cycles           Skip dependency cycle detection\n  --no-layers           Skip layer redline validation\n  --check-drift         Also report unsynced `.aoci/` drift when `.aoci/` exists\n  --exclude-tests       Exclude T-layer test files from layer/cycle checks\n  --sarif-output SARIF_OUTPUT\n                        Optional file path to write SARIF 2.1.0 output alongside stdout\n  --markdown-output MARKDOWN_OUTPUT\n                        Optional file path to write PR Markdown summary alongside stdout\n  --output OUTPUT       Optional file path to write formatted report\n  --strict              Exit with code 1 when any architectural finding exists\n  --max-bytes MAX_BYTES\n  --json                Shortcut for `--format json`\n",
+    "aoci_index.py refs": "usage: aoci_index.py refs [-h] [--root ROOT] [--path PATH] [--depth DEPTH] [--all-files]\n                          [--include-defs] [--limit LIMIT] [--max-bytes MAX_BYTES] [--json]\n                          symbol\n\npositional arguments:\n  symbol                Symbol identifier (or `<path>#<symbol>` / `Class.method`) to search\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --path PATH           Restrict symbol definition lookup to this relative file path\n  --depth DEPTH         FRAS caller expansion hops for search pruning (default: 2)\n  --all-files           Scan all indexed files instead of FRAS-pruned candidates\n  --include-defs        Include symbol definition lines in results\n  --limit LIMIT         Maximum reference hits to return (default: 50; 0 = unlimited)\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n",
+    "aoci_index.py doctor": "usage: aoci_index.py doctor [-h] [--root ROOT] [--sync-static-r] [--drop-malformed] [--dry-run]\n                            [--max-bytes MAX_BYTES] [--json]\n\noptions:\n  -h, --help            show this help message and exit\n  --root ROOT           Target codebase root\n  --sync-static-r       Append confirmed internal static imports into `R:`\n  --drop-malformed      Allow discarding pre-existing malformed lines\n  --dry-run             Preview mechanical repairs without modifying `.aoci/`\n  --max-bytes MAX_BYTES\n  --json                Output JSON\n"
   }
 }
