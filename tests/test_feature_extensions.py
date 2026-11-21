@@ -435,8 +435,8 @@ class FeatureExtensionsTests(RepoTestCase):
         self_bundle = SKILL_DIR / "examples" / "self-pool.json.gz"
         self.assertTrue(self_bundle.is_file(), f"Missing {self_bundle}")
         bundle_data = json.loads(gzip.decompress(self_bundle.read_bytes()).decode("utf-8"))
-        self.assertGreaterEqual(len(bundle_data["by_path_sha"]), 20)
-        self.assertGreaterEqual(len(bundle_data["hubs_by_symbol_sha"]), 4)
+        self.assertGreaterEqual(len(bundle_data["by_path_sha"]), 60)
+        self.assertGreaterEqual(len(bundle_data["hubs_by_symbol_sha"]), 6)
 
         with tempfile.TemporaryDirectory() as td:
             clone_dir = Path(td) / "aoci_clone"
@@ -444,7 +444,7 @@ class FeatureExtensionsTests(RepoTestCase):
                 SKILL_DIR,
                 clone_dir,
                 ignore=shutil.ignore_patterns(
-                    ".git", ".aoci", "__pycache__", "tests", "dist", "build", ".venv", "venv", ".idea", "*.egg-info"
+                    ".git", ".aoci", "__pycache__", "dist", "build", ".venv", "venv", ".idea", "*.egg-info"
                 ),
             )
             cli_json("init", "--root", str(clone_dir))
@@ -464,12 +464,12 @@ class FeatureExtensionsTests(RepoTestCase):
             self.assertTrue(rest_self["ok"], rest_self)
             self.assertGreaterEqual(
                 len(rest_self["restored"]),
-                20,
+                60,
                 "examples/self-pool.json.gz is out of date; run `python .github/scripts/refresh_self_pool.py`.",
             )
             self.assertGreaterEqual(
                 len(rest_self.get("restored_hubs", [])),
-                4,
+                6,
                 "examples/self-pool.json.gz hubs are out of date; run `python .github/scripts/refresh_self_pool.py`.",
             )
 
