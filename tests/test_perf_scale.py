@@ -231,7 +231,7 @@ class PerfScaleTests(RepoTestCase):
             return orig_exists(p)
 
         with mock.patch.object(Path, "exists", autospec=True, side_effect=tracked_exists), mock.patch.object(
-            aoci_index, "parse_entries_map", wraps=aoci_index.parse_entries_map
+            graph, "parse_entries_map", wraps=graph.parse_entries_map
         ) as spy_parse:
             ns = aoci_index.build_parser().parse_args(["verify", "--root", str(self.root), "--fast", "--json"])
             buf_rc = []

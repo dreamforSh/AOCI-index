@@ -354,7 +354,7 @@ class V16OptimizationsTests(RepoTestCase):
 
         calls = 0
         orig_sig_bytes = parsers.compute_signature_hash_from_bytes
-        orig_sig = aoci_index.compute_signature_hash
+        orig_sig = parsers.compute_signature_hash
 
         def spy_sig_bytes(*a, **kw):
             nonlocal calls
@@ -367,7 +367,7 @@ class V16OptimizationsTests(RepoTestCase):
             return orig_sig(*a, **kw)
 
         with mock.patch.object(parsers, "compute_signature_hash_from_bytes", side_effect=spy_sig_bytes):
-            with mock.patch.object(aoci_index, "compute_signature_hash", side_effect=spy_sig):
+            with mock.patch.object(parsers, "compute_signature_hash", side_effect=spy_sig):
                 rc_dry, out_dry = aoci_index._capture_internal_cli(
                     ["ack", "--root", str(self.root), "--impl-only", "--dry-run", "--json"]
                 )

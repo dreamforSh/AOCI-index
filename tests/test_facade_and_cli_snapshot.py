@@ -24,7 +24,7 @@ if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
 from test_aoci import HAS_GIT, RepoTestCase, SKILL_DIR, aoci_index  # noqa: E402
-from aoci_core import discovery, git_ops, graph, lock, parsers  # noqa: E402
+from aoci_core import discovery, git_ops, graph, lock, parsers, shards  # noqa: E402
 
 SNAPSHOT_PATH = _TESTS_DIR / "cli_help_snapshot.json"
 
@@ -34,9 +34,9 @@ SEAM_TARGETS: Dict[str, Any] = {
     "detect_git_info": git_ops,
     "_fingerprint_bytes_norm": discovery,
     "inspect_and_fingerprint_one": discovery,
-    "parse_code_volume": aoci_index,
+    "parse_code_volume": shards,
     "extract_file_outline": aoci_index,
-    "compute_signature_hash": aoci_index,
+    "compute_signature_hash": parsers,
     "compute_signature_hash_from_bytes": parsers,
     "IndexLock": aoci_index,
     "BM25Index": aoci_index,

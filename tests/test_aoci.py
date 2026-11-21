@@ -35,7 +35,7 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import aoci_hook  # noqa: E402
 import aoci_index  # noqa: E402
-from aoci_core import discovery, git_ops  # noqa: E402
+from aoci_core import discovery, git_ops, parsers  # noqa: E402
 
 HAS_GIT = shutil.which("git") is not None
 
@@ -3754,7 +3754,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         self.write("src/other.py", "def run(flag: bool = False) -> int:\n    return 2 if flag else 1\n")
 
         # `scan` must compute `sig_hash` inside `inspect_and_fingerprint_one` on the single read (0 `compute_signature_hash` calls)
-        with mock.patch.object(aoci_index, "compute_signature_hash", side_effect=AssertionError("must not re-read modified files")):
+        with mock.patch.object(parsers, "compute_signature_hash", side_effect=AssertionError("must not re-read modified files")):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = aoci_index.main(["scan", "--root", str(self.root), "--fast", "--json"])

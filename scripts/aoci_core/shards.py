@@ -14,6 +14,7 @@ from .constants import (
     SHARDS_INDEX,
     SHARDS_MANIFEST,
     atomic_write_text,
+    normalize_relpath,
     utc_now_iso,
 )
 from .graph import estimate_tokens
@@ -26,6 +27,38 @@ _WIN_RESERVED_SHARD_NAMES: Set[str] = {
     *(f"com{i}" for i in range(1, 10)),
     *(f"lpt{i}" for i in range(1, 10)),
 }
+
+
+def parse_code_volume(
+    code_path: Path,
+    duplicates: Optional[List[str]] = None,
+    raw_text_out: Optional[List[str]] = None,
+) -> Tuple[Dict[str, str], List[Tuple[int, str]]]:
+    """
+    Parse `aoci.code.txt` into `{relpath: raw_line}` and list of `(lineno, malformed_line)`.
+    Repeated paths keep the last occurrence; pass `duplicates` to collect them.
+    """
+    entries: Dict[str, str] = {}
+    malformed: List[Tuple[int, str]] = []
+    if not code_path.exists():
+        return entries, malformed
+
+    text = code_path.read_text(encoding="utf-8-sig", errors="replace")
+    if raw_text_out is not None:
+        raw_text_out.append(text)
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#") or (line.startswith("===") and line.endswith("===")):
+            continue
+        m = ENTRY_RE.match(line)
+        if not m:
+            malformed.append((lineno, line))
+            continue
+        rel = normalize_relpath(m.group("path"))
+        if rel in entries and duplicates is not None:
+            duplicates.append(rel)
+        entries[rel] = line
+    return entries, malformed
 
 
 def render_code_volume(entries: Dict[str, str], updated_at: Optional[str] = None) -> str:
