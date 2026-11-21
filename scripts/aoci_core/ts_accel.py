@@ -30,6 +30,8 @@ EXT_TO_TS_LANG: Dict[str, str] = {
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
     ".cs": "c_sharp",
     ".c": "c",
     ".h": "cpp",
@@ -46,7 +48,7 @@ _BACKEND_LANG_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 # Bumped whenever extraction semantics change so mtime-keyed outline caches built by an older
 # accelerator (or by the regex path) are re-extracted instead of served stale.
-TS_EXTRACTOR_REV = 2
+TS_EXTRACTOR_REV = 3
 
 _PROBE_LOCK = threading.Lock()
 _PROBE_DONE = False
@@ -167,6 +169,31 @@ def _node_line_1based(node: Any) -> int:
     return int(sp[0]) + 1
 
 
+def _node_end_line_1based(node: Any, start_1based: int) -> int:
+    ep = getattr(node, "end_point", None)
+    if ep is None:
+        return start_1based
+    row0 = int(ep[0])
+    col0 = int(ep[1])
+    end_1based = row0 if (col0 == 0 and row0 >= start_1based) else (row0 + 1)
+    return max(start_1based, end_1based)
+
+
+def _emit_sym(
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]],
+    body: str,
+    start_ln: int,
+    end_ln: int,
+    line_offset: int,
+) -> None:
+    s_adj = start_ln + line_offset
+    e_adj = max(s_adj, end_ln + line_offset)
+    symbols.append(f"{body} [L{s_adj}]")
+    if spans is not None:
+        spans.append((body, s_adj, e_adj))
+
+
 def _children(node: Any) -> Tuple[Any, ...]:
     return tuple(getattr(node, "children", ()) or ())
 
@@ -226,7 +253,13 @@ def _js_export_clause_names(src: bytes, clause: Any) -> List[str]:
 
 
 def _js_visit(
-    src: bytes, node: Any, parent_type: str, imports: List[str], symbols: List[str]
+    src: bytes,
+    node: Any,
+    parent_type: str,
+    imports: List[str],
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
 ) -> bool:
     """Handle one JS/TS node; return True to descend into its children."""
     ntype = getattr(node, "type", "")
@@ -244,36 +277,61 @@ def _js_visit(
         if spec:
             imports.append(spec)
         line_no = _node_line_1based(node)
+        end_no = _node_end_line_1based(node, line_no)
         for ch in _children(node):
             ch_type = getattr(ch, "type", "")
             if ch_type == "export_clause":
                 for nm in _js_export_clause_names(src, ch):
-                    symbols.append(f"export {nm} [L{line_no}]")
+                    _emit_sym(symbols, spans, f"export {nm}", line_no, end_no, line_offset)
             elif ch_type == "namespace_export":
                 idents = [c for c in _children(ch) if getattr(c, "type", "") in ("identifier", "string")]
                 if idents:
                     nm = _node_text(src, idents[-1]).strip(_STRING_QUOTES)
                     if _JS_IDENT_RE.match(nm):
-                        symbols.append(f"export {nm} [L{line_no}]")
+                        _emit_sym(symbols, spans, f"export {nm}", line_no, end_no, line_offset)
         return True
 
     if ntype in _JS_FN_DECLS:
         nm = _child_by_field_or_type(node, "name", ("identifier",))
         if nm is not None:
-            symbols.append(f"function {_node_text(src, nm)} [L{_node_line_1based(nm)}]")
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"function {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return True
 
     if ntype in _JS_CLASS_DECLS:
         nm = _child_by_field_or_type(node, "name", ("type_identifier", "identifier"))
         if nm is not None:
-            symbols.append(f"class {_node_text(src, nm)} [L{_node_line_1based(nm)}]")
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"class {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return True
 
     kind = _JS_TYPE_DECLS.get(ntype)
     if kind is not None:
         nm = _child_by_field_or_type(node, "name", ("type_identifier", "identifier"))
         if nm is not None:
-            symbols.append(f"{kind} {_node_text(src, nm)} [L{_node_line_1based(nm)}]")
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"{kind} {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return False
 
     if ntype in ("lexical_declaration", "variable_declaration") and parent_type == "export_statement":
@@ -285,7 +343,15 @@ def _js_visit(
                 continue
             nm = _child_by_field_or_type(decl, "name", ("identifier",))
             if nm is not None and getattr(nm, "type", "identifier") == "identifier":
-                symbols.append(f"{label} {_node_text(src, nm)} [L{_node_line_1based(nm)}]")
+                s_ln = _node_line_1based(nm)
+                _emit_sym(
+                    symbols,
+                    spans,
+                    f"{label} {_node_text(src, nm)}",
+                    s_ln,
+                    _node_end_line_1based(decl, s_ln),
+                    line_offset,
+                )
         return True
 
     if ntype == "call_expression":
@@ -311,7 +377,15 @@ def _js_visit(
                 if obj_txt in ("exports", "module.exports"):
                     nm = _node_text(src, prop).strip()
                     if _JS_IDENT_RE.match(nm):
-                        symbols.append(f"export {nm} [L{_node_line_1based(node)}]")
+                        s_ln = _node_line_1based(node)
+                        _emit_sym(
+                            symbols,
+                            spans,
+                            f"export {nm}",
+                            s_ln,
+                            _node_end_line_1based(node, s_ln),
+                            line_offset,
+                        )
         return True
 
     return True
@@ -324,7 +398,15 @@ def _js_visit(
 _GO_DESCEND = frozenset({"source_file", "import_declaration", "import_spec_list", "type_declaration"})
 
 
-def _go_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols: List[str]) -> bool:
+def _go_visit(
+    src: bytes,
+    node: Any,
+    _parent: str,
+    imports: List[str],
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
+) -> bool:
     ntype = getattr(node, "type", "")
     if ntype == "import_spec":
         path_n = _child_by_field_or_type(node, "path", ("interpreted_string_literal", "raw_string_literal"))
@@ -336,14 +418,30 @@ def _go_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols: 
     if ntype == "function_declaration":
         nm = _child_by_field_or_type(node, "name", ("identifier",))
         if nm is not None:
-            symbols.append(f"func {_node_text(src, nm)} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"func {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return False
     if ntype == "method_declaration":
         nm = _child_by_field_or_type(node, "name", ("field_identifier", "identifier"))
         recv = _child_by_field_or_type(node, "receiver", ("parameter_list",))
         if nm is not None:
             recv_txt = f" {_collapse(_node_text(src, recv))}" if recv is not None else ""
-            symbols.append(f"func{recv_txt} {_node_text(src, nm)} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"func{recv_txt} {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return False
     if ntype in ("type_spec", "type_alias"):
         nm = _child_by_field_or_type(node, "name", ("type_identifier",))
@@ -351,7 +449,15 @@ def _go_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols: 
             ty = _child_by_field_or_type(node, "type")
             ty_type = getattr(ty, "type", "") if ty is not None else ""
             suffix = " struct" if ty_type == "struct_type" else (" interface" if ty_type == "interface_type" else "")
-            symbols.append(f"type {_node_text(src, nm)}{suffix} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"type {_node_text(src, nm)}{suffix}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return False
     return ntype in _GO_DESCEND
 
@@ -372,7 +478,15 @@ _RS_ITEMS = {
 _RS_DESCEND = frozenset({"source_file", "declaration_list", "impl_item", "trait_item", "mod_item", "foreign_mod_item"})
 
 
-def _rs_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols: List[str]) -> bool:
+def _rs_visit(
+    src: bytes,
+    node: Any,
+    _parent: str,
+    imports: List[str],
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
+) -> bool:
     ntype = getattr(node, "type", "")
     if ntype == "use_declaration":
         raw_u = _collapse(_node_text(src, node)).rstrip(";")
@@ -384,12 +498,20 @@ def _rs_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols: 
     if kind is not None:
         nm = _child_by_field_or_type(node, "name", ("identifier", "type_identifier"))
         if nm is not None:
-            symbols.append(f"{kind} {_node_text(src, nm)} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"{kind} {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
     return ntype in _RS_DESCEND
 
 
 # ---------------------------------------------------------------------------------------------
-# Java / C#
+# Java / C# / Kotlin
 # ---------------------------------------------------------------------------------------------
 
 _JVM_TYPE_DECLS = frozenset(
@@ -415,9 +537,26 @@ _JVM_DESCEND = frozenset(
         "enum_body_declarations",
     }
 )
+_KT_DESCEND = frozenset(
+    {
+        "source_file",
+        "import_list",
+        "class_body",
+        "enum_class_body",
+        "companion_object",
+    }
+)
 
 
-def _jvm_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols: List[str]) -> bool:
+def _jvm_visit(
+    src: bytes,
+    node: Any,
+    _parent: str,
+    imports: List[str],
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
+) -> bool:
     ntype = getattr(node, "type", "")
     if ntype in ("import_declaration", "using_directive"):
         raw_i = _collapse(_node_text(src, node)).rstrip(";").strip()
@@ -428,9 +567,81 @@ def _jvm_visit(src: bytes, node: Any, _parent: str, imports: List[str], symbols:
         kind = ntype.split("_", 1)[0]
         nm = _child_by_field_or_type(node, "name", ("identifier",))
         if nm is not None:
-            symbols.append(f"{kind} {_node_text(src, nm)} [L{_node_line_1based(nm)}]")
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"{kind} {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return True
     return ntype in _JVM_DESCEND
+
+
+def _kt_visit(
+    src: bytes,
+    node: Any,
+    _parent: str,
+    imports: List[str],
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
+) -> bool:
+    ntype = getattr(node, "type", "")
+    if ntype == "import_header":
+        raw_i = _collapse(_node_text(src, node)).rstrip(";").strip()
+        if raw_i:
+            imports.append(raw_i)
+        return False
+    if ntype == "class_declaration":
+        kids = _children(node)
+        if any(getattr(c, "type", "") == "interface" for c in kids):
+            kind = "interface"
+        elif any(getattr(c, "type", "") == "enum" for c in kids):
+            kind = "enum"
+        else:
+            kind = "class"
+        nm = _child_by_field_or_type(node, "name", ("type_identifier", "simple_identifier", "identifier"))
+        if nm is not None:
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"{kind} {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
+        return True
+    if ntype == "object_declaration":
+        nm = _child_by_field_or_type(node, "name", ("type_identifier", "simple_identifier", "identifier"))
+        if nm is not None:
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"object {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
+        return True
+    if ntype == "function_declaration":
+        nm = _child_by_field_or_type(node, "name", ("simple_identifier", "identifier"))
+        if nm is not None:
+            s_ln = _node_line_1based(nm)
+            _emit_sym(
+                symbols,
+                spans,
+                f"fun {_node_text(src, nm)}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
+        return False
+    return ntype in _KT_DESCEND
 
 
 # ---------------------------------------------------------------------------------------------
@@ -495,7 +706,15 @@ def _c_function_name(src: bytes, declarator: Optional[Any]) -> Optional[str]:
     return None
 
 
-def _c_visit(src: bytes, node: Any, parent_type: str, imports: List[str], symbols: List[str]) -> bool:
+def _c_visit(
+    src: bytes,
+    node: Any,
+    parent_type: str,
+    imports: List[str],
+    symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
+) -> bool:
     ntype = getattr(node, "type", "")
     in_class = parent_type in ("field_declaration_list", "field_declaration")
     if ntype == "preproc_include":
@@ -508,27 +727,59 @@ def _c_visit(src: bytes, node: Any, parent_type: str, imports: List[str], symbol
     if ntype == "namespace_definition":
         nm = _child_by_field_or_type(node, "name", ("namespace_identifier", "nested_namespace_specifier", "identifier"))
         if nm is not None:
-            symbols.append(f"namespace {_collapse(_node_text(src, nm))} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"namespace {_collapse(_node_text(src, nm))}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return True
     kind = _C_TYPE_SPECS.get(ntype)
     if kind is not None:
         nm = _child_by_field_or_type(node, "name", ("type_identifier",))
         has_body = any(getattr(c, "type", "") in _C_TYPE_BODIES for c in _children(node))
         if nm is not None and has_body:
-            symbols.append(f"{kind} {_collapse(_node_text(src, nm))} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"{kind} {_collapse(_node_text(src, nm))}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return has_body
     if ntype == "function_definition":
         # In-class inline methods are skipped (parity with the regex path's brace-depth-0 rule)
         if not in_class:
             fn_name = _c_function_name(src, _child_by_field_or_type(node, "declarator", ("function_declarator",)))
             if fn_name:
-                symbols.append(f"fn {fn_name} [L{_node_line_1based(node)}]")
+                s_ln = _node_line_1based(node)
+                _emit_sym(
+                    symbols,
+                    spans,
+                    f"fn {fn_name}",
+                    s_ln,
+                    _node_end_line_1based(node, s_ln),
+                    line_offset,
+                )
         return False
     if ntype == "declaration" and not in_class:
         # File/namespace-scope prototypes (`int *foo(int);`) mirror the regex path's `;`-terminated match
         fn_name = _c_function_name(src, _child_by_field_or_type(node, "declarator"))
         if fn_name:
-            symbols.append(f"fn {fn_name} [L{_node_line_1based(node)}]")
+            s_ln = _node_line_1based(node)
+            _emit_sym(
+                symbols,
+                spans,
+                f"fn {fn_name}",
+                s_ln,
+                _node_end_line_1based(node, s_ln),
+                line_offset,
+            )
         return True
     return ntype in _C_SCOPE_CONTAINERS or ntype in _C_TYPE_CONTAINERS
 
@@ -537,38 +788,62 @@ def _c_visit(src: bytes, node: Any, parent_type: str, imports: List[str], symbol
 # Driver
 # ---------------------------------------------------------------------------------------------
 
+_VisitorFn = Callable[
+    [bytes, Any, str, List[str], List[str], Optional[List[Tuple[str, int, int]]], int],
+    bool,
+]
+
+
+def _visitor_for_lang(lang: str) -> Optional[_VisitorFn]:
+    if lang in ("javascript", "typescript", "tsx"):
+        return _js_visit
+    if lang == "go":
+        return _go_visit
+    if lang == "rust":
+        return _rs_visit
+    if lang in ("java", "c_sharp"):
+        return _jvm_visit
+    if lang == "kotlin":
+        return _kt_visit
+    if lang in ("c", "cpp"):
+        return _c_visit
+    return None
+
 
 def _walk(
     root: Any,
     src: bytes,
-    visit: Callable[[bytes, Any, str, List[str], List[str]], bool],
+    visit: _VisitorFn,
     imports: List[str],
     symbols: List[str],
+    spans: Optional[List[Tuple[str, int, int]]] = None,
+    line_offset: int = 0,
 ) -> None:
     """Iterative pre-order traversal (source order, no recursion/depth limits)."""
     stack: List[Tuple[Any, str]] = [(ch, getattr(root, "type", "")) for ch in reversed(_children(root))]
     while stack:
         node, parent_type = stack.pop()
-        if visit(src, node, parent_type, imports, symbols):
+        if visit(src, node, parent_type, imports, symbols, spans, line_offset):
             ntype = getattr(node, "type", "")
             kids = _children(node)
             for ch in reversed(kids):
                 stack.append((ch, ntype))
 
 
-def extract_outline_with_treesitter(
+def _parse_and_collect(
     norm_bytes: bytes,
     ext: str,
-) -> Optional[Tuple[List[str], List[str]]]:
-    """
-    Extract `(imports, symbols)` from `norm_bytes` via `tree-sitter` when available.
-    Returns `None` when `tree-sitter` is disabled, unavailable, does not cover `ext`, or the parse tree
-    contains syntax errors (so the caller falls back to the regex extractor instead of degrading).
-    """
+    *,
+    want_spans: bool,
+    line_offset: int = 0,
+) -> Optional[Tuple[List[str], List[str], List[Tuple[str, int, int]]]]:
     if not is_enabled():
         return None
     lang = EXT_TO_TS_LANG.get(ext.lower())
     if not lang:
+        return None
+    visit = _visitor_for_lang(lang)
+    if visit is None:
         return None
     parser = _get_parser(lang)
     if parser is None:
@@ -583,21 +858,40 @@ def extract_outline_with_treesitter(
 
     imports: List[str] = []
     symbols: List[str] = []
-    visit: Callable[[bytes, Any, str, List[str], List[str]], bool]
-    if lang in ("javascript", "typescript", "tsx"):
-        visit = _js_visit
-    elif lang == "go":
-        visit = _go_visit
-    elif lang == "rust":
-        visit = _rs_visit
-    elif lang in ("java", "c_sharp"):
-        visit = _jvm_visit
-    elif lang in ("c", "cpp"):
-        visit = _c_visit
-    else:
-        return None
+    spans: Optional[List[Tuple[str, int, int]]] = [] if want_spans else None
     try:
-        _walk(root, norm_bytes, visit, imports, symbols)
+        _walk(root, norm_bytes, visit, imports, symbols, spans, line_offset)
     except Exception:
         return None
-    return imports, symbols
+    return imports, symbols, (spans if spans is not None else [])
+
+
+def extract_outline_with_treesitter(
+    norm_bytes: bytes,
+    ext: str,
+    line_offset: int = 0,
+) -> Optional[Tuple[List[str], List[str]]]:
+    """
+    Extract `(imports, symbols)` from `norm_bytes` via `tree-sitter` when available.
+    Returns `None` when `tree-sitter` is disabled, unavailable, does not cover `ext`, or the parse tree
+    contains syntax errors (so the caller falls back to the regex extractor instead of degrading).
+    """
+    res = _parse_and_collect(norm_bytes, ext, want_spans=False, line_offset=line_offset)
+    if res is None:
+        return None
+    return res[0], res[1]
+
+
+def extract_raw_symbol_spans_with_treesitter(
+    norm_bytes: bytes,
+    ext: str,
+    line_offset: int = 0,
+) -> Optional[List[Tuple[str, int, int]]]:
+    """
+    Extract `[(symbol_body, start_line_1based, end_line_1based), ...]` via `tree-sitter` AST nodes.
+    Returns `None` when `tree-sitter` is disabled, unavailable, unsupported for `ext`, or `has_error` is set.
+    """
+    res = _parse_and_collect(norm_bytes, ext, want_spans=True, line_offset=line_offset)
+    if res is None:
+        return None
+    return res[2]

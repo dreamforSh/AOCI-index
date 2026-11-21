@@ -111,8 +111,9 @@ class McpStructuredContentTests(RepoTestCase):
         # Errors never carry structuredContent; tools without outputSchema are untouched
         with mock.patch.object(aoci_mcp, "call_tool", return_value=(True, "boom")):
             self.assertNotIn("structuredContent", _tools_call("aoci_export", {"root": str(self.root)}))
-        with mock.patch.object(aoci_mcp, "call_tool", return_value=(False, "done")):
-            self.assertNotIn("structuredContent", _tools_call("aoci_ensure_git_exclude", {"root": str(self.root)}))
+        with mock.patch.dict(aoci_mcp._TOOL_BY_NAME, {"aoci_custom_untyped": {"name": "aoci_custom_untyped"}}):
+            with mock.patch.object(aoci_mcp, "call_tool", return_value=(False, "done")):
+                self.assertNotIn("structuredContent", _tools_call("aoci_custom_untyped", {"root": str(self.root)}))
 
     def test_root_hints_and_subscriptions_are_lock_guarded_under_concurrency(self):
         aoci_mcp._SUBSCRIBED_URIS.clear()

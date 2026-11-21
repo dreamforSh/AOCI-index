@@ -13,6 +13,14 @@ Supports installing and uninstalling `aoci-index` for:
                  + optional hooks in `~/.codex/hooks.json` / `<repo>/.codex/hooks.json`
                  + optional `AGENTS.md` snippet (`~/.codex/AGENTS.md` / `<repo>/AGENTS.md`)
                  + optional MCP in `~/.codex/config.toml` / `<repo>/.codex/config.toml`
+  - Cursor       (`~/.cursor/skills/aoci-index` or `<repo>/.cursor/skills/aoci-index`)
+                 + optional hooks in `hooks.json` + optional `.cursor/rules/aoci-index.mdc`
+                 + optional MCP in `mcp.json`
+  - Windsurf     (`~/.codeium/windsurf/skills/aoci-index` or `<repo>/.windsurf/skills/aoci-index`)
+                 + optional rules + optional MCP in `mcp_config.json`
+  - VS Code      (`~/.copilot/skills/aoci-index` or `<repo>/.github/skills/aoci-index`)
+                 + optional `.github/copilot-instructions.md`
+                 + optional MCP in VS Code user `Code/User/mcp.json` or `<repo>/.vscode/mcp.json`
 """
 
 from __future__ import annotations

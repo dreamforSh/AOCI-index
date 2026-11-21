@@ -22,12 +22,14 @@ from .constants import (
     strip_utf8_bom_bytes,
     utc_now_iso,
 )
+from . import ts_accel as _ts_accel
 from .parsers import (
     _CLEAN_SYM_RE,
     _JS_REGEX_PREV_CHARS,
     _JS_REGEX_PREV_KW,
     _SFC_SCRIPT_RE,
     _find_matching_delim,
+    _sfc_script_ext,
     _skip_js_regex,
     _skip_string_literal,
     _strip_c_comments,
@@ -440,8 +442,59 @@ def _extract_outline_spans(full_path: Path, rel: str, ext: str) -> List[Dict[str
     return spans
 
 
+def _extract_treesitter_spans(norm_bytes: bytes, rel: str, ext: str) -> Optional[List[Dict[str, Any]]]:
+    if not _ts_accel.is_enabled():
+        return None
+    line_count = _count_norm_lines(norm_bytes)
+    if line_count <= 0:
+        return []
+
+    raw_ts_items: Optional[List[Tuple[str, int, int]]] = None
+    if ext in (".vue", ".svelte"):
+        raw_text = norm_bytes.decode("utf-8", errors="replace")
+        collected: List[Tuple[str, int, int]] = []
+        for m_sfc in _SFC_SCRIPT_RE.finditer(raw_text):
+            offset = raw_text.count("\n", 0, m_sfc.start(1))
+            open_tag = raw_text[m_sfc.start(0) : m_sfc.start(1)]
+            block_spans = _ts_accel.extract_raw_symbol_spans_with_treesitter(
+                m_sfc.group(1).encode("utf-8"),
+                _sfc_script_ext(open_tag),
+                line_offset=offset,
+            )
+            if block_spans is None:
+                return None
+            collected.extend(block_spans)
+        raw_ts_items = collected
+    elif ext in _ts_accel.EXT_TO_TS_LANG:
+        raw_ts_items = _ts_accel.extract_raw_symbol_spans_with_treesitter(norm_bytes, ext, line_offset=0)
+
+    if raw_ts_items is None:
+        return None
+    if not raw_ts_items:
+        return []
+
+    ordered: List[Tuple[int, int, str, str, int]] = []
+    for order_idx, (body, raw_start, raw_end) in enumerate(raw_ts_items):
+        sym, kind = _clean_outline_symbol(body, ext)
+        if not sym:
+            continue
+        start = max(1, min(int(raw_start), line_count))
+        end = max(start, min(int(raw_end), line_count))
+        ordered.append((start, order_idx, sym, kind, end))
+
+    ordered.sort(key=lambda row: (row[0], row[1]))
+    spans: List[Dict[str, Any]] = []
+    seen_syms: Set[str] = set()
+    for start, _, sym, kind, end in ordered:
+        if sym in seen_syms:
+            continue
+        seen_syms.add(sym)
+        spans.append({"path": rel, "symbol": sym, "kind": kind, "start": start, "end": end})
+    return spans
+
+
 def extract_symbol_spans(full_path: Path, rel: str) -> List[Dict[str, Any]]:
-    """Extract top-level classes/methods/functions (`.py`) or outline spans (JS/TS/Go/Rust/JVM/C#)."""
+    """Extract top-level classes/methods/functions (`.py`) or AST/outline spans (JS/TS/Go/Rust/JVM/C#/C++)."""
     ext = full_path.suffix.lower()
     if ext == ".py":
         norm_bytes = _read_norm_bytes(full_path)
@@ -455,6 +508,12 @@ def extract_symbol_spans(full_path: Path, rel: str) -> List[Dict[str, Any]]:
                 return []
         except OSError:
             return []
+        if _ts_accel.is_enabled() and (ext in _ts_accel.EXT_TO_TS_LANG or ext in (".vue", ".svelte")):
+            norm_bytes = _read_norm_bytes(full_path)
+            if norm_bytes is not None:
+                ts_spans = _extract_treesitter_spans(norm_bytes, rel, ext)
+                if ts_spans is not None:
+                    return ts_spans
         return _extract_outline_spans(full_path, rel, ext)
     return []
 
@@ -598,7 +657,12 @@ def _extract_live_symbol_span_map(
         if not parsed_ok:
             return None, False
     elif ext in _OUTLINE_SPAN_EXTS:
-        spans = _extract_outline_spans(full_path, rel, ext)
+        ts_spans: Optional[List[Dict[str, Any]]] = None
+        if _ts_accel.is_enabled() and (ext in _ts_accel.EXT_TO_TS_LANG or ext in (".vue", ".svelte")):
+            norm_bytes = _read_norm_bytes(full_path)
+            if norm_bytes is not None:
+                ts_spans = _extract_treesitter_spans(norm_bytes, rel, ext)
+        spans = ts_spans if ts_spans is not None else _extract_outline_spans(full_path, rel, ext)
     else:
         return None, False
     span_map: Dict[str, Tuple[int, int]] = {}

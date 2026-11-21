@@ -255,7 +255,7 @@ flowchart LR
 | Initialize `.aoci/` | `init --root <repo>` | `aoci_init` |
 | Drift & batch plan | `scan` / `status --root <repo> --batch-size 20` | `aoci_scan` |
 | Single-pass sync briefing | `prepare-sync --root <repo> [--max-diff-lines 40]` | `aoci_prepare_sync` |
-| One-shot ordered sync | `apply-sync --root <repo> [--restore] [--migrate-renames] ...` | `aoci_apply_sync` |
+| One-shot ordered sync | `apply-sync --root <repo> [--restore] [--migrate-renames] [--pending-dir <dir>] ...` | `aoci_apply_sync` (`pending_dir`, `clean_pending`) |
 | Subagent batch work-pack | `batch-pack --root <repo> --batch 1 [--with-source]` | `aoci_batch_pack` |
 | Pre-filled batch scaffold | `scaffold --root <repo> --batch 1` | `aoci_scaffold` |
 | H-tier symbol sub-volume | `zoom <path> --root <repo>` / `--scaffold` / `--upsert` | `aoci_zoom` |
@@ -271,7 +271,7 @@ flowchart LR
 | Full health gate | `verify --root <repo>` | `aoci_verify` |
 | FRAS quality lint | `lint --root <repo> [--limit 100]` | `aoci_lint` (`limit`) |
 | Architecture & cycle audit | `audit --root <repo> [--co-change [--exclude-tests]]` | `aoci_audit` (`exclude_tests`) |
-| CI guard (SARIF/GitHub/PR) | `ci-check --root <repo> [--base-rev <rev>] [--format sarif\|github\|markdown]` | `aoci_ci_check` |
+| CI guard (SARIF/GitHub/PR) | `ci-check --root <repo> [--base-rev <rev>] [--format sarif\|github\|markdown] [--markdown-output <file>]` | `aoci_ci_check` (`sarif_output`, `markdown_output`) |
 | Per-directory shards | `shard --root <repo> [--depth 1 \| --clean]` | `aoci_shard` |
 | Semantic pool cache | `pool stats\|export\|import --root <repo>` | `aoci_pool` |
 | Repair Git exclusion | `ensure-git-exclude --root <repo>` | `aoci_ensure_git_exclude` |

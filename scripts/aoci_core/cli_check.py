@@ -669,6 +669,12 @@ def cmd_ci_check(args: argparse.Namespace) -> int:
         write_text_lf(sarif_path, _ci_check.format_ci_sarif(report))
         report["sarif_output_path"] = str(sarif_path)
 
+    if getattr(args, "markdown_output", None):
+        md_path = _resolve_cli_file_path(root, args.markdown_output, must_exist=False)
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        write_text_lf(md_path, _ci_check.format_ci_markdown(report))
+        report["markdown_output_path"] = str(md_path)
+
     if fmt == "json":
         rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
     elif fmt == "sarif":

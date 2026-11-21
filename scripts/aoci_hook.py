@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Tri-Host Lifecycle Hook Runner for AOCI Codebase Index (aoci_hook.py).
+Multi-Host Lifecycle Hook Runner for AOCI Codebase Index (aoci_hook.py).
 
 Supports **Claude Code** (`settings.json` hooks), **Antigravity** (`hooks.json`),
-and **Codex** (`hooks.json`) via `--host auto | claude-code | antigravity | codex`:
+**Codex** (`hooks.json`), and **Cursor** (`hooks.json`) via
+`--host auto | claude-code | antigravity | codex | cursor`:
 
   - SessionStart: When a workspace contains `.aoci/aoci.code.txt`, ensures
     `.git/info/exclude` covers `.aoci/`, runs a zero-read fast drift check,
@@ -11,16 +12,19 @@ and **Codex** (`hooks.json`) via `--host auto | claude-code | antigravity | code
     enforcing Read-Whole-First (including post-compaction refreshes in Claude
     Code and Codex), and snapshots the drift that ALREADY exists into
     `.aoci/.sessions/<session-id>.json`.
+  - UserPromptSubmit / PreInvocation / beforeSubmitPrompt: Injects deduplicated
+    prompt-time working-tree `aoci_diff` architectural risk briefings when
+    modified files carry non-obvious `S:` constraints or affected callers.
   - Stop: On normal turn completion, detects unsynced AOCI index drift
     (added/modified/renamed/deleted/malformed) or Git exclusion violations and
     asks the agent to synchronize `.aoci/` before stopping. Drift that was
     present at session start and is still byte-identical is NOT blamed on the
     agent (no wasted continuation turns for the user's own pending edits).
     Loop protection: `stop_hook_active` (Claude Code / Codex) / `continuationActive`
-    (Antigravity); Antigravity stops with background work (`fullyIdle=false`)
-    are never gated.
+    (Antigravity) / `loop_limit` (Cursor); Antigravity stops with background
+    work (`fullyIdle=false`) are never gated.
 
-Conforms strictly to all three hosts' stdin/stdout JSON contracts and always exits
+Conforms strictly to each host's stdin/stdout JSON contract and always exits
 with code 0 + valid JSON so hook failures never break an interactive session.
 Failures are reported on stderr (and appended to `$AOCI_HOOK_LOG` if set).
 """

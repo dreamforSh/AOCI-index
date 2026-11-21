@@ -55,6 +55,9 @@ Subcommands:
   zoom                Read, scaffold, or upsert symbol-level H-tier sections
                       in `.aoci/aoci.hubs.txt`.
   symbol              Search symbols across hubs, outlines, and FRAS A: exports.
+  batch-pack          Assemble a self-contained subagent work-pack for batch N.
+  ci-check            CI-native architecture guard (SARIF 2.1.0, GitHub Actions,
+                      PR Markdown, layer redlines, cycles, and PR diff impact).
 
 All index writers serialize through `.aoci/.lock` so parallel agents cannot lose
 updates.

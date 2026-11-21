@@ -42,6 +42,8 @@ def run_apply_sync(
     reviewed: bool = False,
     entries: Optional[Sequence[str]] = None,
     entries_file: Optional[str] = None,
+    pending_dir: Optional[str] = None,
+    clean_pending: bool = False,
     prune_only: bool = False,
     no_prune: bool = False,
     strict_size: bool = False,
@@ -59,7 +61,7 @@ def run_apply_sync(
     ack_list = list(dict.fromkeys(str(p) for p in (ack_paths or ()) if str(p).strip()))
     entry_list = [str(e) for e in (entries or ()) if str(e).strip()]
     want_ack = bool(ack_impl_only or ack_list)
-    want_upsert = bool(entry_list or entries_file or prune_only)
+    want_upsert = bool(entry_list or entries_file or pending_dir or prune_only)
 
     if want_ack and not dry_run and not reviewed:
         err_msg = "Refusing `ack` in apply-sync without `reviewed=True` / `--reviewed` (pass `--dry-run` to preview)."
@@ -134,6 +136,10 @@ def run_apply_sync(
         cmd_u = _with_max_bytes(["upsert", "--root", str(root), "--json"])
         if entries_file:
             cmd_u.append(f"--entries-file={entries_file}")
+        if pending_dir:
+            cmd_u.append(f"--pending-dir={pending_dir}")
+        if clean_pending:
+            cmd_u.append("--clean-pending")
         if prune_only or (need_trailing_prune and not want_upsert):
             cmd_u.append("--prune-only")
         elif no_prune:

@@ -706,6 +706,8 @@ def cmd_apply_sync(args: argparse.Namespace) -> int:
         reviewed=bool(getattr(args, "reviewed", False)),
         entries=getattr(args, "entry", None) or [],
         entries_file=getattr(args, "entries_file", None),
+        pending_dir=getattr(args, "pending_dir", None),
+        clean_pending=bool(getattr(args, "clean_pending", False)),
         prune_only=bool(getattr(args, "prune_only", False)),
         no_prune=bool(getattr(args, "no_prune", False)),
         strict_size=bool(getattr(args, "strict_size", False)),

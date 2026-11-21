@@ -34,6 +34,10 @@ inputs:
     description: "Also check `.aoci/` drift when `.aoci/aoci.code.txt` is present ('true' or 'false')"
     required: false
     default: "false"
+  exclude-tests:
+    description: "Exclude T-layer test files from layer/cycle checks ('true' or 'false')"
+    required: false
+    default: "false"
   strict:
     description: "Fail the step with exit code 1 when architectural findings exist ('true' or 'false')"
     required: false
@@ -52,6 +56,7 @@ runs:
         INPUT_FORMAT: ${{ inputs.format }}
         INPUT_SARIF_OUT: ${{ inputs.sarif-output }}
         INPUT_CHECK_DRIFT: ${{ inputs.check-drift }}
+        INPUT_EXCLUDE_TESTS: ${{ inputs.exclude-tests }}
         INPUT_STRICT: ${{ inputs.strict }}
         ACTION_DIR: ${{ github.action_path }}
       run: |
@@ -72,10 +77,23 @@ runs:
         if [[ "$INPUT_CHECK_DRIFT" == "true" ]]; then
           ARGS+=("--check-drift")
         fi
+        if [[ "$INPUT_EXCLUDE_TESTS" == "true" ]]; then
+          ARGS+=("--exclude-tests")
+        fi
         if [[ "$INPUT_STRICT" == "true" ]]; then
           ARGS+=("--strict")
         fi
+        SUMMARY_TMP=""
         if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-          "$PY_BIN" -B "$ACTION_DIR/scripts/aoci_index.py" ci-check --root "$INPUT_ROOT" ${INPUT_BASE_REV:+--base-rev "$INPUT_BASE_REV"} ${INPUT_POOL_BUNDLE:+--pool-bundle "$INPUT_POOL_BUNDLE"} ${INPUT_FORBID:+--forbid "$INPUT_FORBID"} --format markdown >> "$GITHUB_STEP_SUMMARY" || true
+          SUMMARY_TMP="$(mktemp)"
+          ARGS+=("--markdown-output" "$SUMMARY_TMP")
         fi
-        "$PY_BIN" -B "$ACTION_DIR/scripts/aoci_index.py" "${ARGS[@]}"
+        RC=0
+        "$PY_BIN" -B "$ACTION_DIR/scripts/aoci_index.py" "${ARGS[@]}" || RC=$?
+        if [[ -n "$SUMMARY_TMP" ]]; then
+          if [[ -s "$SUMMARY_TMP" ]]; then
+            cat "$SUMMARY_TMP" >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          rm -f "$SUMMARY_TMP"
+        fi
+        exit "$RC"

@@ -308,6 +308,11 @@ _PARITY_FIXTURES: Dict[str, bytes] = {
         b"impl P {\n    pub fn method_a(&self) {}\n}\ntrait T {\n    fn sig(&self);\n}\npub async fn top() {}\n"
     ),
     "Outer.java": b"package p;\nimport java.util.List;\npublic class Outer {\n  class Inner {}\n}\nenum E { A }\nrecord R(int x) {}\n",
+    "Service.kt": (
+        b"package com.app\nimport foo.Bar\nimport baz.*\nclass User(val id: Int) {\n  fun greet(): String = \"hi\"\n  class Inner\n}\n"
+        b"interface Repo {\n  suspend fun find(id: Int): User?\n}\nobject Singleton\nenum class Status { OK, ERR }\n"
+        b"data class Dto(val x: Int)\nsealed interface Event\nfun topFn() {}\n"
+    ),
     "Prog.cs": b"using System;\nnamespace A.B {\n  namespace C {\n    public class Outer { public class Inner {} }\n  }\n}\npublic struct S {}\n",
     "w.hpp": (
         b'#pragma once\n#include "a.h"\n#include <vector>\nnamespace outer {\nnamespace inner {\nclass Widget {\npublic:\n'

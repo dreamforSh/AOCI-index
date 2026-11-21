@@ -59,6 +59,46 @@ def build_static_import_graph(
     )
 
 
+_DOMAIN_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+_DOMAIN_PATH_HINT_RE = re.compile(r"(?:^|[\s(\[,;])([a-z0-9_.-]+(?:/[a-z0-9_.-]+)+)/?(?=$|[\s)\],;])")
+_DOMAIN_STOPWORDS: Set[str] = {
+    "and",
+    "the",
+    "for",
+    "with",
+    "from",
+    "src",
+    "lib",
+    "pkg",
+    "app",
+    "core",
+    "service",
+    "services",
+    "module",
+    "modules",
+    "layer",
+    "system",
+    "common",
+    "shared",
+    "utils",
+    "util",
+    "test",
+    "tests",
+}
+
+
+def _tokenize_domain_words(text: str) -> List[str]:
+    return [tok for tok in _DOMAIN_WORD_SPLIT_RE.split(text.lower()) if len(tok) >= 3 and tok not in _DOMAIN_STOPWORDS]
+
+
+def _singular_stem(tok: str) -> str:
+    if len(tok) >= 5 and tok.endswith("ies"):
+        return tok[:-3] + "y"
+    if len(tok) >= 4 and tok.endswith("s") and not tok.endswith("ss"):
+        return tok[:-1]
+    return tok
+
+
 def _infer_layer_and_domain(rel: str, declared_domains: Dict[str, str]) -> Tuple[str, str]:
     low = rel.lower()
     parts = low.split("/")
@@ -110,13 +150,62 @@ def _infer_layer_and_domain(rel: str, declared_domains: Dict[str, str]) -> Tuple
     domain = "X" if "X" in declared_domains or not declared_domains else next(iter(sorted(declared_domains)))
     if layer in ("R", "O") and ("G" in declared_domains or not declared_domains):
         domain = "G"
+
+    dir_parts = parts[:-1]
+    # 1) Explicit slash-containing path prefix hints inside domain label (longest prefix wins)
+    best_prefix_len = 0
+    best_prefix_code: Optional[str] = None
+    for code, label in sorted(declared_domains.items()):
+        if code in ("G", "X") or not label:
+            continue
+        for m_hint in _DOMAIN_PATH_HINT_RE.finditer(label.lower()):
+            hint = m_hint.group(1).strip("/")
+            if hint and (low == hint or low.startswith(f"{hint}/")) and len(hint) > best_prefix_len:
+                best_prefix_len = len(hint)
+                best_prefix_code = code
+    if best_prefix_code is not None:
+        return layer, best_prefix_code
+
+    # 2) Direct full-label substring match against directory segments (preserves legacy priority)
     for code, label in declared_domains.items():
         if code in ("G", "X"):
             continue
-        lbl_low = label.lower()
-        if lbl_low and any(lbl_low in seg for seg in parts[:-1]):
-            domain = code
-            break
+        lbl_low = label.lower().strip()
+        if lbl_low and any(lbl_low in seg for seg in dir_parts):
+            return layer, code
+
+    # 3) Token / singular-stem / >=4-char prefix matching across directory segments & filename stem
+    dir_tokens = _tokenize_domain_words("/".join(dir_parts))
+    dir_stems = {_singular_stem(t) for t in dir_tokens} | set(dir_tokens)
+    stem_name = bname.rsplit(".", 1)[0]
+    file_tokens = _tokenize_domain_words(stem_name)
+    file_stems = {_singular_stem(t) for t in file_tokens} | set(file_tokens)
+
+    best_score = 0
+    best_code: Optional[str] = None
+    for code, label in sorted(declared_domains.items()):
+        if code in ("G", "X") or not label:
+            continue
+        ltoks = _tokenize_domain_words(label)
+        if not ltoks:
+            continue
+        lstems = {_singular_stem(t) for t in ltoks} | set(ltoks)
+        score = 0
+        for d_st in dir_stems:
+            if d_st in lstems:
+                score += 4
+            elif len(d_st) >= 4 and any(
+                len(l_t) >= 4 and (l_t.startswith(d_st) or d_st.startswith(l_t)) for l_t in ltoks
+            ):
+                score += 3
+        for f_st in file_stems:
+            if f_st in lstems:
+                score += 2
+        if score > best_score:
+            best_score = score
+            best_code = code
+    if best_code is not None:
+        domain = best_code
     return layer, domain
 
 

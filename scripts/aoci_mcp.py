@@ -247,12 +247,12 @@ class _MemoryIndexCache:
         hub_records: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
         resolved, root_key = self._canonical_root(root)
-        git_marker = resolved / ".git"
+        git_info = aoci_index.detect_git_info(resolved)
         git_idx_stat: Any = None
         git_head_stat: Any = None
-        if git_marker.is_dir():
-            git_idx_stat = aoci_index._stat_key(git_marker / "index")
-            git_head_stat = aoci_index._stat_key(git_marker / "HEAD")
+        if git_info.get("is_git"):
+            git_idx_stat = aoci_index._stat_key(git_info.get("index_file"))
+            git_head_stat = aoci_index._git_head_key(git_info)
         hubs_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
         hubs_stat = aoci_index._stat_key(hubs_path) if hubs_path.is_file() else None
         diff_key = (slot.get("key"), hubs_stat, git_idx_stat, git_head_stat)
@@ -969,6 +969,15 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "reviewed": {"type": "boolean", "default": False, "description": "Confirm acknowledged files were read and verified"},
                 "entries": {"type": "array", "items": {"type": "string"}, "description": "object-fras-v2 entry lines for `upsert`"},
                 "entries_file": {"type": "string", "description": "Optional batch file of object-fras-v2 lines for `upsert`"},
+                "pending_dir": {
+                    "type": "string",
+                    "description": "Optional directory of `*.txt` subagent batch files to validate and merge in `upsert`",
+                },
+                "clean_pending": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Remove consumed `*.txt` files in `pending_dir` after a successful `upsert`",
+                },
                 "prune_only": {"type": "boolean", "default": False, "description": "Only prune deleted files in `upsert`"},
                 "no_prune": {"type": "boolean", "default": False, "description": "Skip pruning deleted files in `upsert`"},
                 "strict_size": {"type": "boolean", "default": False, "description": "Fail instead of auto-fixing Size tier in `upsert`"},
@@ -1073,6 +1082,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 "check_drift": {"type": "boolean", "default": False, "description": "Also report unsynced `.aoci/` drift when initialized"},
                 "exclude_tests": {"type": "boolean", "default": False, "description": "Exclude T-layer test files from layer/cycle checks"},
                 "sarif_output": {"type": "string", "description": "Optional path to write SARIF 2.1.0 output"},
+                "markdown_output": {"type": "string", "description": "Optional path to write PR Markdown summary"},
                 "strict": {"type": "boolean", "default": False, "description": "Return `isError=True` when any finding exists"},
             },
             "required": ["root"],
@@ -1080,22 +1090,143 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
     },
 ]
 
-_STRUCTURED_TOOL_NAMES = {
-    "aoci_overview",
-    "aoci_query",
-    "aoci_context",
-    "aoci_diff",
-    "aoci_lint",
-    "aoci_audit",
-    "aoci_export",
-    "aoci_pack",
-    "aoci_prepare_sync",
-    "aoci_apply_sync",
-    "aoci_symbol",
-    "aoci_batch_pack",
+_TOOL_OUTPUT_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "aoci_overview": {
+        "type": "object",
+        "properties": {
+            "root": {"type": "string"},
+            "project": {"type": "string"},
+            "git_excluded": {"type": "string"},
+            "global_invariants": {"type": "string"},
+            "indexed_files": {"type": "integer"},
+            "estimated_full_tokens": {"type": "integer"},
+            "domains": {"type": "object", "additionalProperties": {"type": "string"}},
+            "layers": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "top_dirs": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "core_entries": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_query": {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+            "entries": {"type": "array", "items": {"type": "string"}},
+            "scores": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "impacted_tests": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_context": {
+        "type": "object",
+        "properties": {
+            "global_invariants": {"type": "string"},
+            "targets": {"type": "array", "items": {"type": "string"}},
+            "dependencies": {"type": "array", "items": {"type": "string"}},
+            "dependents": {"type": "array", "items": {"type": "string"}},
+            "unindexed_targets": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_diff": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "changed_entries": {"type": "array", "items": {"type": "string"}},
+            "affected_neighbors": {"type": "array", "items": {"type": "string"}},
+            "high_risk_constraints": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "unindexed_changed": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_pack": {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string"},
+            "budget": {"type": "integer"},
+            "used_tokens": {"type": "integer"},
+            "seeds": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "open_next": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_scan": {
+        "type": "object",
+        "properties": {
+            "root": {"type": "string"},
+            "has_drift": {"type": "boolean"},
+            "drift": {"type": "object", "additionalProperties": True},
+            "git": {"type": "object", "additionalProperties": True},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_verify": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "indexed_files": {"type": "integer"},
+            "issues": {"type": "array", "items": {"type": "string"}},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_lint": {
+        "type": "object",
+        "properties": {
+            "findings": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "total_findings": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_audit": {
+        "type": "object",
+        "properties": {
+            "total_findings": {"type": "integer"},
+            "missing_static_deps": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "phantom_fras_deps": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "cycles": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "layer_violations": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_ci_check": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "mode": {"type": "string"},
+            "indexed_files": {"type": "integer"},
+            "total_findings": {"type": "integer"},
+            "summary": {"type": "object", "additionalProperties": True},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_apply_sync": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "root": {"type": "string"},
+            "steps": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
+    "aoci_symbol": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "query": {"type": "string"},
+            "count": {"type": "integer"},
+            "matches": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "additionalProperties": True,
+    },
 }
+
+_STRUCTURED_TOOL_NAMES = {t["name"] for t in TOOLS_SPEC}
 for _t_entry in TOOLS_SPEC:
-    if _t_entry["name"] in _STRUCTURED_TOOL_NAMES:
+    if _t_entry["name"] in _TOOL_OUTPUT_SCHEMAS:
+        _t_entry["outputSchema"] = _TOOL_OUTPUT_SCHEMAS[_t_entry["name"]]
+    elif _t_entry["name"] in _STRUCTURED_TOOL_NAMES:
         _t_entry.setdefault("outputSchema", _STRUCTURED_OBJECT_OUTPUT_SCHEMA)
 _TOOL_BY_NAME: Dict[str, Dict[str, Any]] = {t["name"]: t for t in TOOLS_SPEC}
 
@@ -1978,6 +2109,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             reviewed=bool(args.get("reviewed", False)),
             entries=[str(e) for e in (args.get("entries") or [])],
             entries_file=args.get("entries_file"),
+            pending_dir=args.get("pending_dir"),
+            clean_pending=bool(args.get("clean_pending", False)),
             prune_only=bool(args.get("prune_only", False)),
             no_prune=bool(args.get("no_prune", False)),
             strict_size=bool(args.get("strict_size", False)),
@@ -2098,6 +2231,14 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 report["sarif_output_path"] = str(sarif_p)
             except OSError as exc:
                 return True, f"ERROR: Cannot write SARIF output to `{sarif_p}`: {exc}"
+        if args.get("markdown_output"):
+            md_p = aoci_index._resolve_cli_file_path(root, str(args["markdown_output"]), must_exist=False)
+            try:
+                md_p.parent.mkdir(parents=True, exist_ok=True)
+                aoci_index.write_text_lf(md_p, aoci_index._ci_check.format_ci_markdown(report))
+                report["markdown_output_path"] = str(md_p)
+            except OSError as exc:
+                return True, f"ERROR: Cannot write Markdown output to `{md_p}`: {exc}"
         is_ci_err = bool(args.get("strict") and not report.get("ok"))
         if fmt_ci in ("sarif", "github", "markdown"):
             _publish_structured(report)
@@ -2148,7 +2289,9 @@ def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str
 
 
 def _render_prompt(name: str, arguments: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    root_hint = str(arguments.get("root") or _CLIENT_ROOT_HINT or "<repo>")
+    with _STATE_LOCK:
+        cached_hint = _CLIENT_ROOT_HINT
+    root_hint = str(arguments.get("root") or cached_hint or "<repo>")
     if name == "aoci-bootstrap":
         text = (
             f"Bootstrap a complete `.aoci/` index for `{root_hint}`:\n"
@@ -2212,7 +2355,9 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         elif method == "notifications/roots/list_changed":
             if isinstance(params.get("roots"), list):
                 update_client_roots(params["roots"])
-            if _CLIENT_SUPPORTS_ROOTS:
+            with _STATE_LOCK:
+                supports_roots_now = _CLIENT_SUPPORTS_ROOTS
+            if supports_roots_now:
                 _enqueue_roots_list_request()
         return None
 
@@ -2224,7 +2369,7 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if method == "initialize":
         client_caps = params.get("capabilities")
-        _CLIENT_SUPPORTS_ROOTS = bool(isinstance(client_caps, dict) and isinstance(client_caps.get("roots"), dict))
+        supports_roots = bool(isinstance(client_caps, dict) and isinstance(client_caps.get("roots"), dict))
         ws_folders = params.get("workspaceFolders")
         collected_hints: List[str] = []
         if isinstance(ws_folders, list):
@@ -2244,13 +2389,15 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             h_ru = _file_uri_to_path(root_uri.strip())
             if h_ru and h_ru not in collected_hints:
                 collected_hints.insert(0, h_ru)
-        if collected_hints:
-            with _STATE_LOCK:
-                _CLIENT_ROOT_HINTS[:] = collected_hints
-                _CLIENT_ROOT_HINT = _select_default_root_hint() or collected_hints[0]
         client_ver = str(params.get("protocolVersion", DEFAULT_PROTOCOL_VERSION))
         chosen_ver = client_ver if client_ver in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL_VERSION
-        _NEGOTIATED_PROTOCOL = chosen_ver
+        with _STATE_LOCK:
+            _CLIENT_SUPPORTS_ROOTS = supports_roots
+            _NEGOTIATED_PROTOCOL = chosen_ver
+            _SUBSCRIBED_URIS.clear()
+            if collected_hints:
+                _CLIENT_ROOT_HINTS[:] = collected_hints
+                _CLIENT_ROOT_HINT = _select_default_root_hint() or collected_hints[0]
         return _ok(
             {
                 "protocolVersion": chosen_ver,

@@ -49,8 +49,23 @@ _JS_LEADING_EXPORT_RE = re.compile(r"^\s*export\b")
 _GO_SYM_RE = re.compile(r"^(func(?:\s*\([^)]+\))?\s+[A-Za-z_]\w*|type\s+[A-Za-z_]\w*\s+(?:struct|interface))")
 _RS_SYM_RE = re.compile(r"^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|mod)\s+([A-Za-z_]\w*)")
 _JVM_CS_SYM_RE = re.compile(
-    r"^\s*(?:public|private|protected|internal|export|suspend|inline)?\s*(?:static\s+)?(?:abstract\s+|final\s+|sealed\s+|data\s+)?(class|interface|enum|record|object|struct|fun)\s+([A-Za-z_]\w*)"
+    r"^\s*(?:public|private|protected|internal|export|suspend|inline)?\s*(?:static\s+)?(?:abstract\s+|final\s+|sealed\s+|data\s+)?(class|interface|enum(?:\s+class)?|record|object|struct|fun)\s+([A-Za-z_]\w*)"
 )
+_SFC_LANG_RE = re.compile(r"""\blang\s*=\s*['"]?([A-Za-z0-9_-]+)""", re.IGNORECASE)
+
+
+def _sfc_script_ext(open_tag: str) -> str:
+    m_lang = _SFC_LANG_RE.search(open_tag)
+    if not m_lang:
+        return ".js"
+    lang = m_lang.group(1).lower()
+    if lang == "tsx":
+        return ".tsx"
+    if lang in ("ts", "typescript"):
+        return ".ts"
+    if lang == "jsx":
+        return ".jsx"
+    return ".js"
 
 _JS_RESOLVE_EXTS: Tuple[str, ...] = (
     "",
@@ -1507,7 +1522,18 @@ def _extract_outline_from_bytes(
     elif ext in {".vue", ".svelte"}:
         for m in _SFC_SCRIPT_RE.finditer(text):
             offset = text.count("\n", 0, m.start(1))
-            _extract_js_ts_outline(m.group(1), offset, imports, symbols)
+            open_tag = text[m.start(0) : m.start(1)]
+            script_body = m.group(1)
+            sfc_ts = _ts_accel.extract_outline_with_treesitter(
+                script_body.encode("utf-8"),
+                _sfc_script_ext(open_tag),
+                line_offset=offset,
+            )
+            if sfc_ts is not None:
+                imports.extend(sfc_ts[0])
+                symbols.extend(sfc_ts[1])
+            else:
+                _extract_js_ts_outline(script_body, offset, imports, symbols)
     elif ext == ".go":
         clean_go = precleaned_text if precleaned_text is not None else _strip_c_comments(text, allow_backtick=True)
         go_lines = clean_go[:-1].split("\n") if clean_go.endswith("\n") else (clean_go.split("\n") if clean_go else [])
@@ -1567,7 +1593,8 @@ def _extract_outline_from_bytes(
                 continue
             ms = _JVM_CS_SYM_RE.match(ln)
             if ms:
-                symbols.append(f"{ms.group(1)} {ms.group(2)} [L{idx}]")
+                kind_jvm = "enum" if ms.group(1).startswith("enum") else ms.group(1)
+                symbols.append(f"{kind_jvm} {ms.group(2)} [L{idx}]")
     elif ext == ".proto":
         clean_p = precleaned_text if precleaned_text is not None else _strip_c_comments(text)
         p_lines = clean_p[:-1].split("\n") if clean_p.endswith("\n") else (clean_p.split("\n") if clean_p else [])
