@@ -39,7 +39,7 @@ SEAM_TARGETS: Dict[str, Any] = {
     "compute_signature_hash": parsers,
     "compute_signature_hash_from_bytes": parsers,
     "IndexLock": lock,
-    "BM25Index": aoci_index,
+    "BM25Index": graph,
 }
 
 
