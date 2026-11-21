@@ -66,6 +66,9 @@ def _serialize_parser(p: argparse.ArgumentParser, prog_override: str) -> Dict[st
         default_val = act.default
         default_repr: Any = "==SUPPRESS==" if default_val is argparse.SUPPRESS else default_val
         type_name = getattr(act.type, "__name__", str(act.type)) if act.type is not None else None
+        # CPython <3.10 (bpo-41854) sets `act.required = True` on `nargs="*"` positionals without explicit `default`.
+        is_optional_positional = (not act.option_strings) and (act.nargs in ("?", "*", argparse.REMAINDER))
+        req_val = False if is_optional_positional else bool(getattr(act, "required", False))
         actions_out.append(
             {
                 "kind": type(act).__name__,
@@ -76,7 +79,7 @@ def _serialize_parser(p: argparse.ArgumentParser, prog_override: str) -> Dict[st
                 "default": default_repr,
                 "type": type_name,
                 "choices": list(act.choices) if act.choices is not None else None,
-                "required": bool(getattr(act, "required", False)),
+                "required": req_val,
                 "help": act.help,
                 "version": getattr(act, "version", None),
             }
@@ -163,6 +166,25 @@ class FacadeAndCliSnapshotTests(RepoTestCase):
 
         actual_spec = _strip_help_text(tree)
         self.assertEqual(actual_spec, self.snapshot["parser_spec"])
+
+        # Simulate CPython 3.8 bpo-41854 (`act.required = True` on `nargs="*"` positionals without `default`)
+        py38_parser = aoci_index.build_parser()
+
+        def _force_py38_star_required(p: argparse.ArgumentParser) -> int:
+            mutated = 0
+            for act in p._actions:
+                if isinstance(act, argparse._SubParsersAction):
+                    for sub_p in act.choices.values():
+                        mutated += _force_py38_star_required(sub_p)
+                elif (not act.option_strings) and act.nargs == "*":
+                    act.required = True
+                    mutated += 1
+            return mutated
+
+        self.assertGreaterEqual(_force_py38_star_required(py38_parser), 2)
+        with mock.patch.dict(os.environ, {"COLUMNS": "100", "NO_COLOR": "1", "FORCE_COLOR": "0"}, clear=False):
+            py38_spec = _strip_help_text(_serialize_parser(py38_parser, "aoci_index.py"))
+        self.assertEqual(py38_spec, self.snapshot["parser_spec"])
 
         actual_help: Dict[str, str] = {}
         _collect_help_texts(tree, actual_help)
