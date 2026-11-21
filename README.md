@@ -21,6 +21,7 @@
 <p>
   <img src="https://img.shields.io/badge/MCP-24%20tools%20%C2%B7%20stdio-6366F1?style=flat&logo=modelcontextprotocol&logoColor=white" alt="MCP 24 tools · stdio">
   <img src="https://img.shields.io/badge/hosts-Claude%20Code%20%C2%B7%20Antigravity%20%C2%B7%20Codex-D97757?style=flat&logo=claude&logoColor=white" alt="Hosts: Claude Code · Antigravity · Codex">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22C55E?style=flat" alt="License: MIT"></a>
 </p>
 
 <p>
@@ -271,7 +272,7 @@ python -B -m unittest discover -s tests -p "test_*.py"
 <div align="center">
   <img src="assets/logo.svg" width="28" height="28" alt="">
   <br>
-  <sub>Zero dependencies &middot; Local-only <code>.aoci/</code> &middot; Built for Claude Code, Antigravity &amp; Codex</sub>
+  <sub>Zero dependencies &middot; Local-only <code>.aoci/</code> &middot; Built for Claude Code, Antigravity &amp; Codex &middot; <a href="./LICENSE">MIT License</a></sub>
   <br>
   <sub><a href="#top">Back to top</a></sub>
 </div>

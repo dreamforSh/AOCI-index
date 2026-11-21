@@ -7,6 +7,7 @@ name = "aoci-index"
 version = "1.5.0"
 description = "Zero-dependency AI-Oriented Codebase Indexer (.aoci/) with BM25/FRAS graph reader, task context packer, symbol zoom, lifecycle hooks, and stdio MCP server."
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.8"
 dependencies = []
 
