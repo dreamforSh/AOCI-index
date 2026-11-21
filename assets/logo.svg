@@ -1,44 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none" role="img" aria-label="AOCI logo">
   <defs>
-    <linearGradient id="aoci-bg" x1="10" y1="10" x2="118" y2="118" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0F172A"/>
-      <stop offset="1" stop-color="#1E1B4B"/>
-    </linearGradient>
-    <radialGradient id="aoci-glow" cx="64" cy="58" r="54" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#6366F1" stop-opacity="0.38"/>
-      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="aoci-rim" x1="10" y1="10" x2="118" y2="118" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#38BDF8"/>
-      <stop offset="0.5" stop-color="#A78BFA"/>
-      <stop offset="1" stop-color="#34D399"/>
-    </linearGradient>
-    <linearGradient id="aoci-bar" x1="30" y1="0" x2="98" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#38BDF8"/>
-      <stop offset="0.5" stop-color="#A78BFA"/>
-      <stop offset="1" stop-color="#34D399"/>
+    <linearGradient id="aoci-stroke" x1="20" y1="20" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284C7"/>
+      <stop offset="50%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#0D9488"/>
     </linearGradient>
   </defs>
-
-  <!-- tile -->
-  <rect x="10" y="10" width="108" height="108" rx="26" fill="url(#aoci-bg)"/>
-  <rect x="10" y="10" width="108" height="108" rx="26" fill="url(#aoci-glow)"/>
-  <rect x="11.5" y="11.5" width="105" height="105" rx="24.5" stroke="url(#aoci-rim)" stroke-width="3"/>
-
-  <!-- dependency edges -->
-  <path d="M50 42H78M45 50L59 74M83 50L69 74" stroke="#E2E8F0" stroke-width="3.5" stroke-linecap="round" opacity="0.9"/>
-
-  <!-- graph nodes -->
-  <circle cx="42" cy="42" r="13" fill="#38BDF8" opacity="0.18"/>
-  <circle cx="86" cy="42" r="13" fill="#A78BFA" opacity="0.18"/>
-  <circle cx="64" cy="81" r="14" fill="#34D399" opacity="0.18"/>
-  <circle cx="42" cy="42" r="8" fill="#38BDF8"/>
-  <circle cx="86" cy="42" r="8" fill="#A78BFA"/>
-  <circle cx="64" cy="81" r="9" fill="#34D399"/>
-  <circle cx="64" cy="81" r="3" fill="#0F172A"/>
-
-  <!-- index line -->
-  <rect x="30" y="99" width="40" height="6" rx="3" fill="url(#aoci-bar)"/>
-  <rect x="74" y="99" width="12" height="6" rx="3" fill="#A78BFA" opacity="0.7"/>
-  <rect x="90" y="99" width="8" height="6" rx="3" fill="#34D399" opacity="0.55"/>
+  <g stroke="url(#aoci-stroke)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="64" cy="30" r="10"/>
+    <circle cx="32" cy="85" r="10"/>
+    <circle cx="96" cy="85" r="10"/>
+    <path d="M58.97 38.64L37.03 76.36M69.03 38.64L90.97 76.36M42 85H86"/>
+    <path d="M24 108H78M90 108H104"/>
+  </g>
 </svg>
