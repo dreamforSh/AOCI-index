@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Optional `tree-sitter` Accelerator & Self-Hosting Seed Pool**: Added optional `aoci-index[treesitter]` AST acceleration (`aoci_core.ts_accel`), interactive HTML/Mermaid `--diff` / `--diff-rev` highlighting, and `examples/self-pool.json.gz`.
 
 ### Changed
+- **Modular `aoci_core` Split with Full `aoci_index` Facade Compatibility**: Split the monolithic `scripts/aoci_index.py` into unidirectional flat modules under `scripts/aoci_core/` (`git_ops.py`, `discovery.py`, `drift.py`, `write_ops.py`, `diff_brief.py`, `audit.py`, `cli_read.py`, `cli_write.py`, `cli_check.py`, `cli_parser.py`, plus `parse_code_volume` in `shards.py`). `scripts/aoci_index.py` remains a lightweight `<450`-line CLI entrypoint and backwards-compatible facade re-exporting all existing public and internal symbols for `aoci_mcp.py`, `aoci_hook.py`, and external scripts; added `.github/scripts/refresh_self_pool.py --check` for deterministic `examples/self-pool.json.gz` maintenance.
 - **Monorepo Scale Optimizations**: Added dual positive/negation union regexes in `IgnoreMatcher`, `O(1)` Python suffix index + single-pass comment stripping in `parsers.py`, zero-stat dangling-ref checks + single-parse `verify`, bucketed `TestImpactIndex`, composite PK row-value SQLite pool lookups, same-thread re-entrant `IndexLock` across `apply-sync`, and per-root locks + short-TTL diff caching in `aoci_mcp.py`.
 
 ### Fixed

@@ -217,6 +217,22 @@ aoci-install --help               # cross-host skill/hook/MCP installer
 > [!NOTE]
 > `.aoci/` is excluded locally via `.git/info/exclude` (never modifying tracked `.gitignore`), keeping repository history and teammate checkouts untouched.
 
+### Engine Module Graph (`scripts/`)
+
+```mermaid
+flowchart LR
+    constants["constants · templates · batches · lock"] --> base["ignore · parsers · graph · shards · pool · hubs"]
+    base --> git_ops["git_ops.py"]
+    git_ops --> discovery["discovery.py"]
+    discovery --> drift["drift.py"]
+    drift --> write_ops["write_ops.py"]
+    base --> diff_brief["diff_brief.py"] --> audit["audit.py"]
+    write_ops & audit & diff_brief --> cli["cli_read · cli_write · cli_check"]
+    cli --> cli_parser["cli_parser.py"]
+    cli_parser --> facade["aoci_index.py (CLI + facade)"]
+    facade --> hosts["aoci_mcp.py · aoci_hook.py"]
+```
+
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%236366F1" width="24" height="24" align="top" alt=""> CLI & MCP Reference
 
 ### Read, Search & Context

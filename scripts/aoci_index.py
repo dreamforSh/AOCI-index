@@ -62,24 +62,9 @@ updates.
 
 from __future__ import annotations
 
-import argparse
-import concurrent.futures
-import contextlib
-import fnmatch
-import hashlib
-import heapq
-import io
-import json
-import os
-import re
-import shutil
-import stat
-import subprocess
 import sys
-import time
-import zlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Optional, Sequence
 
 sys.dont_write_bytecode = True
 
