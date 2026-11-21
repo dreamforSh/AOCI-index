@@ -35,7 +35,7 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 import aoci_hook  # noqa: E402
 import aoci_index  # noqa: E402
-from aoci_core import git_ops  # noqa: E402
+from aoci_core import discovery, git_ops  # noqa: E402
 
 HAS_GIT = shutil.which("git") is not None
 
@@ -3340,12 +3340,12 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         self.assertEqual(scan_plan["batch_plan"]["remaining_batches"], [1, 2, 3])
 
         # 1st `scaffold --batch 1` runs IN-PROCESS with ZERO file hashes, populating `outline_cache.json`
-        with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=AssertionError("must reuse scan_fps.json")):
+        with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must reuse scan_fps.json")):
             sc1 = _run_inproc("scaffold", "--root", str(self.root), "--batch", "1", "--batch-size", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc1["entries"]], ["a.py", "b.py"])
 
         # 2nd `scaffold --batch 2` before upsert -> 0 hashes & 0 outline extractions
-        with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
+        with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
             with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_before = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2", "--batch-size", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_before["entries"]], ["c.py", "d.py"])
@@ -3361,14 +3361,14 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
         # After upserting Batch 1 (`a.py`, `b.py` are still <3s old so `baseline.json` guards them as racy):
         # requesting Batch 2 STILL returns [c.py, d.py] (no drift!) and incurs ZERO hashes on unindexed [c..f] & 0 outlines!
-        orig_fp_norm = aoci_index._fingerprint_bytes_norm
+        orig_fp_norm = discovery._fingerprint_bytes_norm
         fp_headers: list = []
 
         def _track_fp(norm, st_arg):
             fp_headers.append(norm.decode("utf-8", errors="replace").splitlines()[0])
             return orig_fp_norm(norm, st_arg)
 
-        with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=_track_fp):
+        with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=_track_fp):
             with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_after = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_after["entries"]], ["c.py", "d.py"])
@@ -3387,14 +3387,14 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
             extracted_paths.append(rel_p)
             return orig_extract(path_p, rel_p, *rest, **kw)
 
-        with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
+        with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
             with mock.patch.object(aoci_index, "extract_file_outline", side_effect=_track_outline):
                 sc2_aged = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_aged["entries"]], ["c.py", "d.py"])
         self.assertEqual(sorted(extracted_paths), ["a.py", "b.py"])
 
         # Repeated Batch 2 now hits 0 hashes AND 0 outline extractions across all 6 files
-        with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
+        with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=AssertionError("must not re-hash")):
             with mock.patch.object(aoci_index, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
                 sc2_warm = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2")
         self.assertEqual([ln.split("[", 1)[0] for ln in sc2_warm["entries"]], ["c.py", "d.py"])
@@ -3411,7 +3411,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         def _counting_fp(norm, st):
             return orig_fp_norm(norm, st)
 
-        with mock.patch.object(aoci_index, "_fingerprint_bytes_norm", side_effect=_counting_fp) as fp_spy:
+        with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=_counting_fp) as fp_spy:
             sc2_mod = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2", "--batch-size", "2")
         self.assertEqual(fp_spy.call_count, 1)
         by_p = {ln.split("[", 1)[0]: ln for ln in sc2_mod["entries"]}

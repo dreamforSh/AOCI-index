@@ -20,7 +20,7 @@ if _TESTS_DIR not in sys.path:
 
 from test_aoci import HAS_GIT, RepoTestCase, aoci_index, cli_json  # noqa: E402
 import aoci_mcp  # noqa: E402
-from aoci_core import graph, hubs, parsers, sync_prep, test_impact  # noqa: E402
+from aoci_core import discovery, graph, hubs, parsers, sync_prep, test_impact  # noqa: E402
 
 
 class V16OptimizationsTests(RepoTestCase):
@@ -255,7 +255,7 @@ class V16OptimizationsTests(RepoTestCase):
         (self.root / "assets" / "dirty.bin").write_bytes(b"\x00\x01\x02hello")
 
         with mock.patch.object(
-            aoci_index,
+            discovery,
             "inspect_and_fingerprint_one",
             side_effect=AssertionError("compute_diff_briefing must use lightweight stat/head check"),
         ):
@@ -353,7 +353,7 @@ class V16OptimizationsTests(RepoTestCase):
         self.write("src/api.py", "def endpoint(x: int, y: int) -> int:\n    return x + y\n")
 
         calls = 0
-        orig_sig_bytes = aoci_index.compute_signature_hash_from_bytes
+        orig_sig_bytes = parsers.compute_signature_hash_from_bytes
         orig_sig = aoci_index.compute_signature_hash
 
         def spy_sig_bytes(*a, **kw):
@@ -366,7 +366,7 @@ class V16OptimizationsTests(RepoTestCase):
             calls += 1
             return orig_sig(*a, **kw)
 
-        with mock.patch.object(aoci_index, "compute_signature_hash_from_bytes", side_effect=spy_sig_bytes):
+        with mock.patch.object(parsers, "compute_signature_hash_from_bytes", side_effect=spy_sig_bytes):
             with mock.patch.object(aoci_index, "compute_signature_hash", side_effect=spy_sig):
                 rc_dry, out_dry = aoci_index._capture_internal_cli(
                     ["ack", "--root", str(self.root), "--impl-only", "--dry-run", "--json"]
