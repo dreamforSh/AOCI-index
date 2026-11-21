@@ -272,10 +272,10 @@ def _lookup_pool_entries(
                     s_hits[sha] = ent
             return ps_hits, s_hits
 
-    want_ps = set(ps_queries)
-    unique_ps_shas = sorted({sha for _, sha in want_ps})
+    want_ps = sorted(set(ps_queries))
     unique_shas = sorted(set(sha_queries))
     chunk_size = 400
+    pair_chunk_size = 200
     try:
         with contextlib.closing(
             _open_semantic_pool(
@@ -284,15 +284,33 @@ def _lookup_pool_entries(
                 readonly=not touch_lru,
             )
         ) as conn:
-            for i in range(0, len(unique_ps_shas), chunk_size):
-                chunk = unique_ps_shas[i : i + chunk_size]
-                ph = ",".join("?" for _ in chunk)
-                for rel, sha, entry in conn.execute(
-                    f"SELECT relpath, sha256, entry FROM pool_by_path_sha WHERE sha256 IN ({ph})",
-                    chunk,
-                ):
-                    if (rel, sha) in want_ps:
-                        ps_hits[(rel, sha)] = entry
+            if want_ps:
+                row_value_supported = True
+                for i in range(0, len(want_ps), pair_chunk_size):
+                    pair_chunk = want_ps[i : i + pair_chunk_size]
+                    pair_ph = ",".join("(?,?)" for _ in pair_chunk)
+                    flat_params = [val for pair in pair_chunk for val in pair]
+                    try:
+                        for rel, sha, entry in conn.execute(
+                            f"SELECT relpath, sha256, entry FROM pool_by_path_sha WHERE (relpath, sha256) IN ({pair_ph})",
+                            flat_params,
+                        ):
+                            ps_hits[(rel, sha)] = entry
+                    except sqlite3.OperationalError:
+                        row_value_supported = False
+                        break
+                if not row_value_supported:
+                    want_ps_set = set(want_ps)
+                    unique_ps_shas = sorted({sha for _, sha in want_ps})
+                    for i in range(0, len(unique_ps_shas), chunk_size):
+                        chunk = unique_ps_shas[i : i + chunk_size]
+                        ph = ",".join("?" for _ in chunk)
+                        for rel, sha, entry in conn.execute(
+                            f"SELECT relpath, sha256, entry FROM pool_by_path_sha WHERE sha256 IN ({ph})",
+                            chunk,
+                        ):
+                            if (rel, sha) in want_ps_set:
+                                ps_hits[(rel, sha)] = entry
 
             for i in range(0, len(unique_shas), chunk_size):
                 chunk = unique_shas[i : i + chunk_size]

@@ -264,6 +264,7 @@ def build_task_pack(
     live_anchors: bool = False,
     with_tests: bool = False,
     live_test_imports: bool = False,
+    test_index: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Assemble a task-driven, token-budgeted context packet from FRAS index entries,
@@ -608,6 +609,7 @@ def build_task_pack(
                 parsed_entries=parsed_map,
                 preloaded_outline_files=preloaded_outline_files,
                 live_imports=live_test_imports,
+                test_index=test_index,
             )
         else:
             raw_tests = []

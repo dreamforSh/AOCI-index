@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .constants import LOCK_FILE, LOCK_STALE_S, LOCK_TIMEOUT_S, utc_now_iso
+
+_THREAD_LOCKS = threading.local()
+
+
+def _canonical_lock_key(path: Path) -> str:
+    try:
+        return os.path.normcase(str(path.resolve()))
+    except OSError:
+        return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _thread_held_map() -> Dict[str, int]:
+    held = getattr(_THREAD_LOCKS, "held", None)
+    if held is None:
+        held = {}
+        _THREAD_LOCKS.held = held
+    return held
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -55,10 +73,12 @@ class IndexLock:
 
     def __init__(self, aoci_dir: Path, timeout: float = LOCK_TIMEOUT_S, stale: float = LOCK_STALE_S) -> None:
         self.path = aoci_dir / LOCK_FILE
+        self._key = _canonical_lock_key(self.path)
         self.timeout = timeout
         self.stale = stale
         self._fd: Optional[int] = None
         self._token: Optional[str] = None
+        self._reentrant: bool = False
 
     def _stale_snapshot(self) -> Optional[Tuple[int, str]]:
         """Return `(st_mtime_ns, raw_content)` when `.lock` is confirmed stale, else `None`."""
@@ -111,6 +131,11 @@ class IndexLock:
             return False
 
     def __enter__(self) -> "IndexLock":
+        held = _thread_held_map()
+        if held.get(self._key, 0) > 0 and self.path.exists():
+            held[self._key] += 1
+            self._reentrant = True
+            return self
         deadline = time.monotonic() + self.timeout
         delay = 0.02
         while True:
@@ -118,7 +143,9 @@ class IndexLock:
                 self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 token = os.urandom(6).hex()
                 self._token = token
+                self._reentrant = False
                 os.write(self._fd, f"{os.getpid()} {utc_now_iso()} {token}\n".encode("ascii"))
+                held[self._key] = 1
                 return self
             except (FileExistsError, PermissionError) as exc:
                 if isinstance(exc, PermissionError) and not self.path.exists():
@@ -134,6 +161,16 @@ class IndexLock:
                 delay = min(delay * 1.5, 0.2)
 
     def __exit__(self, *exc: Any) -> None:
+        held = _thread_held_map()
+        if self._reentrant:
+            cur = held.get(self._key, 1)
+            if cur > 1:
+                held[self._key] = cur - 1
+            else:
+                held.pop(self._key, None)
+            self._reentrant = False
+            return
+        held.pop(self._key, None)
         if self._fd is not None:
             try:
                 os.close(self._fd)

@@ -446,13 +446,42 @@ def attach_budgeted_context_extras(
         payload["truncated"] = True
 
 
+_FILE_EXT_TAIL_RE = re.compile(r"(\.[A-Za-z][A-Za-z0-9]*)$")
+_ROOT_DOTFILES_REF = frozenset({".gitignore", ".dockerignore", ".editorconfig", ".env"})
+
+
 def _find_dangling_refs_from_parsed(
     root: Path,
     known: Set[str],
     parsed: Mapping[str, ParsedEntry],
+    existing_paths: Optional[Set[str]] = None,
 ) -> Dict[str, List[str]]:
     known_top_dirs = {p.split("/", 1)[0] for p in known if "/" in p}
+    if existing_paths:
+        known_top_dirs.update(p.split("/", 1)[0] for p in existing_paths if "/" in p)
+    exists_cache: Dict[str, bool] = {}
+    dir_cache: Dict[str, bool] = {}
     dangling: Dict[str, List[str]] = {}
+
+    def _path_exists(rel_ref: str) -> bool:
+        if existing_paths is not None and rel_ref in existing_paths:
+            return True
+        cached = exists_cache.get(rel_ref)
+        if cached is not None:
+            return cached
+        res = (root / rel_ref).exists()
+        exists_cache[rel_ref] = res
+        return res
+
+    def _dir_exists(top_dir: str) -> bool:
+        if top_dir in known_top_dirs:
+            return True
+        cached = dir_cache.get(top_dir)
+        if cached is not None:
+            return cached
+        res = (root / top_dir).is_dir()
+        dir_cache[top_dir] = res
+        return res
 
     def _ref_segments(field: str, is_api_field: bool) -> List[str]:
         if not field or field.strip() == "-":
@@ -471,36 +500,44 @@ def _find_dangling_refs_from_parsed(
                 cleaned = seg.replace("<-", " ")
                 for tok in RELPATH_TOKEN_RE.findall(cleaned):
                     ref = normalize_relpath(tok.lstrip("-").rstrip("."))
-                    if not ref or ref in known or (root / ref).exists():
+                    if not ref or ref in known or (existing_paths is not None and ref in existing_paths):
                         continue
                     bname = ref.rsplit("/", 1)[-1]
-                    m_ext = re.search(r"(\.[A-Za-z][A-Za-z0-9]*)$", bname)
+                    m_ext = _FILE_EXT_TAIL_RE.search(bname)
                     if not m_ext:
                         continue
                     ext = m_ext.group(1).lower()
                     top_dir = ref.split("/", 1)[0]
-                    if ext in _LIKELY_FILE_EXTS or top_dir in known_top_dirs or (root / top_dir).is_dir():
-                        bad.append(ref)
+                    if not (ext in _LIKELY_FILE_EXTS or _dir_exists(top_dir)):
+                        continue
+                    if _path_exists(ref):
+                        continue
+                    bad.append(ref)
                 for tok in ROOT_FILE_TOKEN_RE.findall(cleaned):
                     ref = normalize_relpath(tok.rstrip("."))
-                    if not ref or "/" in ref or ref in known or (root / ref).exists():
+                    if not ref or "/" in ref or ref in known or (existing_paths is not None and ref in existing_paths):
                         continue
-                    m_ext = re.search(r"(\.[A-Za-z][A-Za-z0-9]*)$", ref)
-                    if (m_ext and m_ext.group(1).lower() in _LIKELY_FILE_EXTS) or ref in {
-                        ".gitignore",
-                        ".dockerignore",
-                        ".editorconfig",
-                        ".env",
-                    }:
-                        bad.append(ref)
+                    m_ext = _FILE_EXT_TAIL_RE.search(ref)
+                    if not ((m_ext and m_ext.group(1).lower() in _LIKELY_FILE_EXTS) or ref in _ROOT_DOTFILES_REF):
+                        continue
+                    if _path_exists(ref):
+                        continue
+                    bad.append(ref)
         if bad:
             dangling[rel] = sorted(set(bad))
     return dangling
 
 
-def find_dangling_refs(root: Path, entries: Dict[str, str]) -> Dict[str, List[str]]:
+def find_dangling_refs(
+    root: Path,
+    entries: Dict[str, str],
+    *,
+    parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+    existing_paths: Optional[Set[str]] = None,
+) -> Dict[str, List[str]]:
     """Path-like R:/A: references that point neither to an indexed entry nor to a file/dir on disk."""
-    return _find_dangling_refs_from_parsed(root, set(entries.keys()), parse_entries_map(entries))
+    parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
+    return _find_dangling_refs_from_parsed(root, set(entries.keys()), parsed, existing_paths=existing_paths)
 
 
 def semantic_word_count(text: str) -> int:
@@ -549,7 +586,13 @@ def lint_entries(
         if declared_domains and pe.domain not in declared_domains:
             add(rel, "domain-undeclared", f"Domain `{pe.domain}` is not declared in aoci.meta.txt")
 
-    for rel, refs in _find_dangling_refs_from_parsed(root, set(entries.keys()), parsed).items():
+    existing_fp = set(fingerprints.keys()) if fingerprints is not None else None
+    for rel, refs in _find_dangling_refs_from_parsed(
+        root,
+        set(entries.keys()),
+        parsed,
+        existing_paths=existing_fp,
+    ).items():
         add(rel, "ref-dangling", f"R:/A: references missing path(s): {', '.join(refs)}")
     return findings
 
@@ -1144,8 +1187,14 @@ def _render_html_dependency_graph(
   zoomInBtn.addEventListener("click", () => zoomAt(1.2));
   zoomOutBtn.addEventListener("click", () => zoomAt(1 / 1.2));
   zoomResetBtn.addEventListener("click", () => {{ panX = 0; panY = 0; scale = 1.0; applyTransform(); }});
-  [qEl, layerEl, domainEl, minImpEl, layoutEl, cyclesEl].forEach(el => el.addEventListener("input", render));
+  let qTimer = null;
+  qEl.addEventListener("input", () => {{
+    if (qTimer !== null) clearTimeout(qTimer);
+    qTimer = setTimeout(() => {{ qTimer = null; render(); }}, 120);
+  }});
+  [layerEl, domainEl, minImpEl, layoutEl, cyclesEl].forEach(el => el.addEventListener("input", render));
   document.getElementById("resetBtn").addEventListener("click", () => {{
+    if (qTimer !== null) {{ clearTimeout(qTimer); qTimer = null; }}
     qEl.value = ""; layerEl.value = ""; domainEl.value = ""; minImpEl.value = "0"; layoutEl.value = "grouped";
     cyclesEl.checked = false; selectedId = null; panX = 0; panY = 0; scale = 1.0; render();
   }});
@@ -1477,16 +1526,31 @@ def parse_glossary(aoci_dir: Path) -> List[List[str]]:
     return groups
 
 
+_ALIAS_SPLIT_RE = re.compile(r"[\s_-]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_ALIAS_REGEX_CACHE: Dict[str, Optional[re.Pattern[str]]] = {}
+_ALIAS_REGEX_CACHE_MAX = 4096
+
+
 def _query_contains_alias(query_text: str, camel_norm_query: str, alias: str) -> bool:
     if not alias:
         return False
     if CJK_CHAR_RE.search(alias):
         return alias.lower() in query_text.lower()
-    parts = [re.escape(p) for p in re.split(r"[\s_-]+", alias.strip()) if p]
-    if not parts:
+    if alias in _ALIAS_REGEX_CACHE:
+        pat = _ALIAS_REGEX_CACHE[alias]
+    else:
+        parts = [re.escape(p) for p in _ALIAS_SPLIT_RE.split(alias.strip()) if p]
+        if not parts:
+            pat = None
+        else:
+            sep = r"[\s_-]+"
+            pat = re.compile(rf"(?<![A-Za-z0-9]){sep.join(parts)}(?![A-Za-z0-9])", re.IGNORECASE)
+        if len(_ALIAS_REGEX_CACHE) >= _ALIAS_REGEX_CACHE_MAX:
+            _ALIAS_REGEX_CACHE.clear()
+        _ALIAS_REGEX_CACHE[alias] = pat
+    if pat is None:
         return False
-    sep = r"[\s_-]+"
-    pat = re.compile(rf"(?<![A-Za-z0-9]){sep.join(parts)}(?![A-Za-z0-9])", re.IGNORECASE)
     return bool(pat.search(query_text) or (camel_norm_query != query_text and pat.search(camel_norm_query)))
 
 
@@ -1508,7 +1572,7 @@ def expand_query_with_glossary(
     if not glossary or not query_text.strip():
         return token_weights, token_sources, expansions
 
-    camel_norm_query = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", query_text)
+    camel_norm_query = _CAMEL_BOUNDARY_RE.sub(r"\1 \2", query_text)
     for group in glossary:
         matched_aliases = [al for al in group if _query_contains_alias(query_text, camel_norm_query, al)]
         if not matched_aliases:
@@ -1692,7 +1756,10 @@ def search_entries_bm25(
     """Rank FRAS entries with field-weighted Okapi BM25 + Importance centrality prior."""
     if not entries or (candidate_paths is not None and not candidate_paths):
         return []
-    sub = entries if candidate_paths is None else {p: entries[p] for p in candidate_paths if p in entries}
+    if candidate_paths is None or (len(candidate_paths) >= len(entries) and entries.keys() <= candidate_paths):
+        sub = entries
+    else:
+        sub = {p: entries[p] for p in candidate_paths if p in entries}
     if not sub:
         return []
     cls = index_cls or BM25Index
@@ -1712,7 +1779,10 @@ def search_entries_bm25_detailed(
     """Rank FRAS entries with BM25 + glossary expansion and return per-hit term attribution."""
     if not entries or (candidate_paths is not None and not candidate_paths):
         return [], []
-    sub = entries if candidate_paths is None else {p: entries[p] for p in candidate_paths if p in entries}
+    if candidate_paths is None or (len(candidate_paths) >= len(entries) and entries.keys() <= candidate_paths):
+        sub = entries
+    else:
+        sub = {p: entries[p] for p in candidate_paths if p in entries}
     if not sub:
         return [], []
     cls = index_cls or BM25Index

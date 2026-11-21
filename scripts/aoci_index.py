@@ -297,7 +297,26 @@ from aoci_core.test_impact import find_impacted_tests  # noqa: E402
 __version__ = AOCI_VERSION
 
 
-# Cross-process lock (`_pid_is_alive`, `IndexLock`) is imported from `aoci_core.lock`.
+def _populate_missing_sig_hashes(root: Path, fp_targets: Dict[str, Dict[str, Any]]) -> None:
+    """Compute missing `sig_hash` fields in parallel when bulk-restoring or migrating many files."""
+    todo = [
+        rel
+        for rel, fp_obj in fp_targets.items()
+        if "sig_hash" not in fp_obj and Path(rel).suffix.lower() in SIG_HASH_EXTS
+    ]
+    if not todo:
+        return
+    if len(todo) >= 32:
+        workers = min(8, os.cpu_count() or 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for rel, sig_h in zip(todo, ex.map(lambda r: compute_signature_hash(root / r, r), todo)):
+                if sig_h is not None:
+                    fp_targets[rel]["sig_hash"] = sig_h
+    else:
+        for rel in todo:
+            sig_h = compute_signature_hash(root / rel, rel)
+            if sig_h is not None:
+                fp_targets[rel]["sig_hash"] = sig_h
 
 
 # `IgnoreMatcher` & `.aociignore` helpers are imported from `aoci_core.ignore`.
@@ -1614,10 +1633,6 @@ def restore_from_semantic_pool(
                 f"A:{m.group('a').strip()} | S:{m.group('s').strip()}"
             )
             fp_restored = dict(fp)
-            if "sig_hash" not in fp_restored:
-                sig_h = compute_signature_hash(root / rel, rel)
-                if sig_h is not None:
-                    fp_restored["sig_hash"] = sig_h
             base_files[rel] = fp_restored
             restored.append(rel)
             if via_sha:
@@ -1625,6 +1640,9 @@ def restore_from_semantic_pool(
                 orig_rel = normalize_relpath(m.group("path"))
                 if orig_rel and orig_rel != rel and orig_rel not in fps:
                     sha_rename_map[orig_rel] = rel
+
+        if restored:
+            _populate_missing_sig_hashes(root, {r: base_files[r] for r in restored if r in base_files})
 
         if applied_shas and not dry_run:
             _lookup_pool_entries(root, git_info, [], applied_shas, touch_lru=True)
@@ -2362,18 +2380,17 @@ def compute_drift(
             pos = end
 
     declared_domains = parse_declared_domains(aoci_dir)
+    parsed_entries = parse_entries_map(code_entries)
     undeclared_domains: Dict[str, List[str]] = {}
     invalid_entries: List[Dict[str, str]] = []
     invalid_clean_paths: Set[str] = set()
-    for rel, line in sorted(code_entries.items()):
-        f = parse_entry_fields(line)
-        if not f:
-            continue
-        if declared_domains and f["domain"] not in declared_domains:
-            undeclared_domains.setdefault(f["domain"], []).append(rel)
+    for rel in sorted(parsed_entries.keys()):
+        pe = parsed_entries[rel]
+        if declared_domains and pe.domain not in declared_domains:
+            undeclared_domains.setdefault(pe.domain, []).append(rel)
         fp_cur = fingerprints.get(rel)
         actual_l = int(fp_cur["lines"]) if fp_cur is not None else None
-        tag_errs = validate_parsed_entry_tags(rel, f, line, actual_lines=actual_l)
+        tag_errs = _graph._validate_tag_fields(rel, pe.layer, pe.size, pe.f, pe.raw, actual_lines=actual_l)
         if tag_errs:
             for code, msg in tag_errs:
                 invalid_entries.append({"path": rel, "code": code, "message": msg})
@@ -2421,6 +2438,7 @@ def compute_drift(
         "top_dirs": dict(sorted(dir_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "elapsed_ms": elapsed_ms,
         "_code_entries": code_entries,
+        "_parsed_entries": parsed_entries,
         "_code_text": raw_code_texts[0] if raw_code_texts else "",
         "_fingerprints": fingerprints,
     }
@@ -2614,7 +2632,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     )
     if changed_paths and drift["_code_entries"]:
         code_map = drift["_code_entries"]
-        parsed_map = parse_entries_map(code_map)
+        parsed_map = drift.get("_parsed_entries") or parse_entries_map(code_map)
         _, dependents = build_fras_graph(code_map, parsed_entries=parsed_map)
         mentioned_by = build_explicit_mention_index(code_map, parsed_entries=parsed_map)
         changed_set = set(changed_paths)
@@ -3120,12 +3138,11 @@ def _migrate_renames_locked(
         entries[new_rel] = new_line
         base_files.pop(old_rel, None)
         fp_new = dict(r["fingerprint"])
-        if "sig_hash" not in fp_new:
-            sig_h = compute_signature_hash(root / new_rel, new_rel)
-            if sig_h is not None:
-                fp_new["sig_hash"] = sig_h
         base_files[new_rel] = fp_new
         migrated.append((old_rel, new_rel))
+
+    if migrated:
+        _populate_missing_sig_hashes(root, {new_r: base_files[new_r] for _, new_r in migrated if new_r in base_files})
 
     for sr in similar_full:
         old_rel = sr["from"]
@@ -3326,7 +3343,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
             f"{len(drift['duplicate_entries'])} duplicate path(s) in `aoci.code.txt` "
             f"(e.g. {drift['duplicate_entries'][0]}); the next upsert keeps the last occurrence"
         )
-    dangling = find_dangling_refs(root, drift["_code_entries"])
+    entries: Dict[str, str] = drift["_code_entries"]
+    parsed_map = drift.get("_parsed_entries") or parse_entries_map(entries)
+    fps_obj = drift.get("_fingerprints")
+    existing_fps = set(fps_obj.keys()) if isinstance(fps_obj, dict) else None
+    dangling = find_dangling_refs(
+        root,
+        entries,
+        parsed_entries=parsed_map,
+        existing_paths=existing_fps,
+    )
     if dangling:
         sample_rel, sample_refs = next(iter(sorted(dangling.items())))
         warnings.append(
@@ -3335,7 +3361,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
 
     code_text = drift.get("_code_text") or (aoci_dir / CODE_FILE).read_text(encoding="utf-8", errors="replace")
-    entries: Dict[str, str] = drift["_code_entries"]
 
     manifest_p = aoci_dir / MANIFEST_FILE
     if manifest_p.is_file():
@@ -3360,7 +3385,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     layer_dist: Dict[str, int] = {}
     domain_dist: Dict[str, int] = {}
     imp_high = 0
-    for pe in parse_entries_map(entries).values():
+    for pe in parsed_map.values():
         layer_dist[pe.layer] = layer_dist.get(pe.layer, 0) + 1
         domain_dist[pe.domain] = domain_dist.get(pe.domain, 0) + 1
         if pe.imp >= 8:
@@ -3511,31 +3536,46 @@ def cmd_query(args: argparse.Namespace) -> int:
         )
         impacted_test_paths = {item["path"] for item in impacted_tests}
 
-    filtered_paths: Set[str] = set()
+    has_filters = any(
+        (
+            layer_set is not None,
+            domain_set is not None,
+            args.min_importance,
+            args.path,
+            keyword,
+            impact_set is not None,
+            impacted_test_paths is not None,
+        )
+    )
+    filtered_paths: Optional[Set[str]] = None
     results: List[str] = []
-    for rel, line in sorted(entries.items()):
-        pe = parsed_map.get(rel)
-        if pe is None:
-            continue
-        if layer_set is not None and pe.layer not in layer_set:
-            continue
-        if domain_set is not None and pe.domain not in domain_set:
-            continue
-        if args.min_importance and pe.imp < args.min_importance:
-            continue
-        if args.path and not fnmatch.fnmatchcase(rel, args.path):
-            continue
-        if keyword and keyword not in line.lower():
-            continue
-        if impact_set is not None and rel not in impact_set:
-            continue
-        if impacted_test_paths is not None and rel not in impacted_test_paths:
-            continue
-        filtered_paths.add(rel)
-        results.append(line)
+    if has_filters or not search_q:
+        filtered_paths = set()
+        for rel, line in sorted(entries.items()):
+            pe = parsed_map.get(rel)
+            if pe is None:
+                continue
+            if layer_set is not None and pe.layer not in layer_set:
+                continue
+            if domain_set is not None and pe.domain not in domain_set:
+                continue
+            if args.min_importance and pe.imp < args.min_importance:
+                continue
+            if args.path and not fnmatch.fnmatchcase(rel, args.path):
+                continue
+            if keyword and keyword not in line.lower():
+                continue
+            if impact_set is not None and rel not in impact_set:
+                continue
+            if impacted_test_paths is not None and rel not in impacted_test_paths:
+                continue
+            filtered_paths.add(rel)
+            results.append(line)
 
     if impacted_tests is not None:
-        impacted_tests = [item for item in impacted_tests if item["path"] in filtered_paths]
+        impacted_tests = [
+            item for item in impacted_tests if filtered_paths is None or item["path"] in filtered_paths
+        ]
         if not search_q:
             results = [item["entry"] for item in impacted_tests]
 
@@ -4446,6 +4486,7 @@ def compute_diff_briefing(
     cached_hub_records: Optional[Sequence[Dict[str, Any]]] = None,
     preloaded_outline_files: Optional[Dict[str, Any]] = None,
     live_test_imports: bool = False,
+    test_index: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Build a focused architectural impact packet for Git working-tree or revision diffs:
@@ -4653,6 +4694,7 @@ def compute_diff_briefing(
             parsed_entries=parsed_map,
             preloaded_outline_files=preloaded_outline_files,
             live_imports=live_test_imports,
+            test_index=test_index,
         )
     return brief
 
@@ -4825,6 +4867,7 @@ def build_static_import_graph(
     discovered_files: Sequence[str],
     fps: Optional[Dict[str, Dict[str, Any]]] = None,
     aoci_dir: Optional[Path] = None,
+    resolution_extras: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     custom_fn = None if extract_file_outline is _parsers.extract_file_outline else extract_file_outline
     return _parsers.build_static_import_graph(
@@ -4833,6 +4876,7 @@ def build_static_import_graph(
         fps=fps,
         aoci_dir=aoci_dir,
         outline_fn=custom_fn,
+        resolution_extras=resolution_extras,
     )
 
 
@@ -5123,9 +5167,23 @@ def audit_architecture(
             root, ginfo, ignores, base_files=base_files, fast_mtime=True, max_bytes=max_bytes
         )
         discovered = sorted(fps.keys())
-        static_deps, _, outlines = build_static_import_graph(root, discovered, fps=fps, aoci_dir=aoci_dir)
-        go_imported_dirs_by_file, go_files_by_dir = resolve_go_package_imports(root, outlines, discovered)
-        jvm_cs_resolved = _parsers.resolve_jvm_cs_package_imports(outlines, discovered)
+        res_extras: Dict[str, Any] = {}
+        static_deps, _, outlines = build_static_import_graph(
+            root,
+            discovered,
+            fps=fps,
+            aoci_dir=aoci_dir,
+            resolution_extras=res_extras,
+        )
+        if "go_imported_dirs_by_file" in res_extras and "go_files_by_dir" in res_extras:
+            go_imported_dirs_by_file = res_extras["go_imported_dirs_by_file"]
+            go_files_by_dir = res_extras["go_files_by_dir"]
+        else:
+            go_imported_dirs_by_file, go_files_by_dir = resolve_go_package_imports(root, outlines, discovered)
+        if "jvm_cs_resolved" in res_extras:
+            jvm_cs_resolved = res_extras["jvm_cs_resolved"]
+        else:
+            jvm_cs_resolved = _parsers.resolve_jvm_cs_package_imports(outlines, discovered)
         known = set(entries.keys())
 
         static_sets: Dict[str, Set[str]] = {k: set(v) for k, v in static_deps.items()}
@@ -5399,6 +5457,7 @@ def cmd_apply_sync(args: argparse.Namespace) -> int:
         full_verify=bool(getattr(args, "full_verify", False)),
         max_bytes=getattr(args, "max_bytes", None),
         dry_run=bool(getattr(args, "dry_run", False)),
+        lock_cls=IndexLock,
     )
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2, ensure_ascii=False))

@@ -519,6 +519,238 @@ def _extract_live_test_imports(root: Path, test_rel: str) -> Tuple[List[str], Li
     return _extract_cached_imports(outline)
 
 
+def _candidate_norm_stems_for_test(test_rel: str) -> Tuple[str, Optional[str], Set[str]]:
+    """
+    Extract `(test_dir, go_test_dir_if_go, candidate_norm_target_stems)` for `O(1)` naming-convention bucketing.
+    Every test that `_matches_naming_convention` can accept maps to either `go_test_dir_if_go` or at least one
+    normalized stem in `candidate_norm_target_stems`.
+    """
+    test_dir = test_rel.rsplit("/", 1)[0] if "/" in test_rel else ""
+    test_bname = test_rel.rsplit("/", 1)[-1]
+    test_bname_l = test_bname.lower()
+    test_ext = Path(test_bname).suffix.lower()
+    test_stem = test_bname[: -len(test_ext)] if test_ext else test_bname
+    test_stem_l = test_stem.lower()
+    go_dir: Optional[str] = test_dir if test_bname_l.endswith("_test.go") else None
+
+    cands: Set[str] = set()
+    if test_stem_l.startswith("test_"):
+        ns = _norm_stem(test_stem_l[5:])
+        if ns:
+            cands.add(ns)
+    for sfx in ("_test", "_tests", "_unittest", "_spec"):
+        if test_stem_l.endswith(sfx):
+            ns = _norm_stem(test_stem_l[: -len(sfx)])
+            if ns:
+                cands.add(ns)
+    if test_ext == ".rs":
+        test_dir_parts = [seg.lower() for seg in test_dir.split("/") if seg]
+        if "tests" in test_dir_parts:
+            ns = _norm_stem(test_stem_l)
+            if ns:
+                cands.add(ns)
+    for marker in (".test.", ".spec."):
+        start = 0
+        while True:
+            idx = test_bname_l.find(marker, start)
+            if idx == -1:
+                break
+            if idx > 0:
+                ns = _norm_stem(test_bname_l[:idx])
+                if ns:
+                    cands.add(ns)
+            start = idx + 1
+    if len(test_stem) > 4 and test_stem.endswith(("Test", "Spec")):
+        ns = _norm_stem(test_stem[:-4])
+        if ns:
+            cands.add(ns)
+    if len(test_stem) > 5 and test_stem.endswith(("Tests", "Specs")):
+        ns = _norm_stem(test_stem[:-5])
+        if ns:
+            cands.add(ns)
+    return test_dir, go_dir, cands
+
+
+class TestImpactIndex:
+    """
+    Pre-indexed `T`-layer naming-convention buckets and static-import records for sub-millisecond
+    repeated `find_impacted_tests` queries (e.g. inside `aoci_mcp` or multi-target scans).
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        parsed_entries: Mapping[str, ParsedEntry],
+        *,
+        preloaded_outline_files: Optional[Dict[str, Dict[str, Any]]] = None,
+        live_imports: bool = False,
+    ) -> None:
+        self.root = root
+        self.live_imports = live_imports
+        self.test_entries: Dict[str, ParsedEntry] = {
+            rel: pe for rel, pe in parsed_entries.items() if pe.layer == "T"
+        }
+        self.sorted_tests: List[str] = sorted(self.test_entries.keys())
+        self.go_tests_by_dir: Dict[str, List[str]] = {}
+        self.tests_by_norm_stem: Dict[str, List[str]] = {}
+
+        for test_rel in self.sorted_tests:
+            _, go_dir, cands = _candidate_norm_stems_for_test(test_rel)
+            if go_dir is not None:
+                self.go_tests_by_dir.setdefault(go_dir, []).append(test_rel)
+            for ns in cands:
+                self.tests_by_norm_stem.setdefault(ns, []).append(test_rel)
+
+        self.static_records: List[
+            Tuple[str, str, str, Tuple[str, ...], Tuple[str, ...], str, str, Tuple[Tuple[str, List[str]], ...]]
+        ] = []
+        cache_files = preloaded_outline_files if preloaded_outline_files is not None else _load_outline_cache(root)
+        if cache_files or live_imports:
+            go_cache: Dict[str, Tuple[str, str]] = {}
+            ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
+            for test_rel in self.sorted_tests:
+                cached_rec = cache_files.get(test_rel) if cache_files else None
+                if cached_rec is not None and (
+                    not live_imports or is_outline_record_fresh(root, test_rel, cached_rec)
+                ):
+                    imports, py_members = _extract_cached_imports(cached_rec)
+                elif live_imports:
+                    imports, py_members = _extract_live_test_imports(root, test_rel)
+                else:
+                    imports, py_members = [], []
+                if not imports and not py_members:
+                    continue
+                eco = _static_ecosystem(test_rel)
+                test_dir = test_rel.rsplit("/", 1)[0] if "/" in test_rel else ""
+                go_mod_str = ""
+                ts_base = ""
+                ts_aliases: Tuple[Tuple[str, List[str]], ...] = ()
+                if eco == "go":
+                    _, go_mod_str = _resolve_gomod_for_dir(root, test_dir, go_cache)
+                elif eco == "js":
+                    ts_base, ts_aliases_list = _resolve_tsconfig_for_dir(root, test_dir, ts_cache)
+                    ts_aliases = tuple(ts_aliases_list)
+                self.static_records.append(
+                    (
+                        test_rel,
+                        eco,
+                        test_dir,
+                        tuple(imports),
+                        tuple(py_members),
+                        go_mod_str,
+                        ts_base,
+                        ts_aliases,
+                    )
+                )
+
+    def query(
+        self,
+        dependents_adj: Dict[str, Set[str]],
+        target_paths: Sequence[str],
+        max_depth: int = 3,
+    ) -> List[Dict[str, Any]]:
+        targets = list(dict.fromkeys(normalize_relpath(str(p)) for p in target_paths if str(p).strip()))
+        if not targets or not self.test_entries:
+            return []
+
+        best: Dict[str, Tuple[int, int, str, str]] = {}
+
+        def _record(test_path: str, reason: str, hop: int, via: str) -> None:
+            rank = REASON_RANK[reason]
+            cand = (rank, hop, via, reason)
+            prev = best.get(test_path)
+            if prev is None or (rank, hop, via) < (prev[0], prev[1], prev[2]):
+                best[test_path] = cand
+
+        # 1) FRAS Graph T-Layer BFS
+        depth_limit = max(0, int(max_depth))
+        if depth_limit >= 1:
+            visited: Set[str] = set(targets)
+            frontier: List[str] = []
+            for cur in targets:
+                for nb in sorted(dependents_adj.get(cur, ())):
+                    if nb == cur:
+                        continue
+                    if nb in self.test_entries:
+                        _record(nb, "direct-fras", 1, cur)
+                    if nb not in visited:
+                        visited.add(nb)
+                        frontier.append(nb)
+            for hop in range(2, depth_limit + 1):
+                if not frontier:
+                    break
+                nxt: List[str] = []
+                for cur in frontier:
+                    for nb in sorted(dependents_adj.get(cur, ())):
+                        if nb not in visited:
+                            visited.add(nb)
+                            nxt.append(nb)
+                            if nb in self.test_entries:
+                                _record(nb, "transitive-fras", hop, cur)
+                frontier = nxt
+
+        target_infos = [_build_target_info(t) for t in targets]
+
+        # 2) Pre-parsed Static Import Fallback
+        if self.static_records:
+            has_go_target = any(ti["ext"] == ".go" for ti in target_infos)
+            has_rs_target = any(ti["ext"] == ".rs" for ti in target_infos)
+            for test_rel, eco, _test_dir, imports, py_members, go_mod_str, ts_base, ts_aliases in self.static_records:
+                if eco == "go" and not has_go_target:
+                    continue
+                if eco == "rs" and not has_rs_target:
+                    continue
+                for t_info in target_infos:
+                    if _test_imports_match_target(
+                        test_rel,
+                        imports,
+                        py_members,
+                        t_info,
+                        go_mod_str,
+                        ts_base,
+                        ts_aliases,
+                    ):
+                        _record(test_rel, "static-import", 1, t_info["rel"])
+
+        # 3) Bucketed Multi-language Naming Conventions (`O(|targets|)` candidate lookup)
+        for t_info in target_infos:
+            if t_info["is_test_target"]:
+                continue
+            cand_tests: Dict[str, None] = {}
+            if t_info["ext"] == ".go":
+                for tr in self.go_tests_by_dir.get(t_info["dir"], ()):
+                    cand_tests[tr] = None
+            if t_info["stem"] and t_info["stem"].lower() not in _GENERIC_STEMS:
+                for tr in self.tests_by_norm_stem.get(t_info["norm_stem"], ()):
+                    cand_tests[tr] = None
+            elif t_info["pkg_stem"]:
+                for tr in self.tests_by_norm_stem.get(t_info["norm_pkg_stem"], ()):
+                    cand_tests[tr] = None
+                if t_info["norm_stem"]:
+                    for tr in self.tests_by_norm_stem.get(t_info["norm_stem"], ()):
+                        cand_tests[tr] = None
+            for test_rel in cand_tests:
+                if _matches_naming_convention(test_rel, t_info):
+                    _record(test_rel, "naming-convention", 1, t_info["rel"])
+
+        results: List[Dict[str, Any]] = []
+        for test_path, (_, hop, via, reason) in best.items():
+            pe = self.test_entries[test_path]
+            results.append(
+                {
+                    "path": test_path,
+                    "reason": reason,
+                    "hop": hop,
+                    "importance": pe.imp,
+                    "via": via,
+                    "entry": pe.raw,
+                }
+            )
+
+        results.sort(key=lambda item: (REASON_RANK[item["reason"]], item["hop"], -item["importance"], item["path"]))
+        return results
+
+
 def find_impacted_tests(
     root: Path,
     entries: Dict[str, str],
@@ -529,6 +761,7 @@ def find_impacted_tests(
     parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
     preloaded_outline_files: Optional[Dict[str, Dict[str, Any]]] = None,
     live_imports: bool = False,
+    test_index: Optional[TestImpactIndex] = None,
 ) -> List[Dict[str, Any]]:
     """
     Derive impacted `T`-layer tests for `target_paths` by combining:
@@ -540,105 +773,16 @@ def find_impacted_tests(
     if not targets or not entries:
         return []
 
+    if test_index is not None and not live_imports and preloaded_outline_files is None:
+        return test_index.query(dependents_adj, targets, max_depth=max_depth)
+
     parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
-    test_entries: Dict[str, ParsedEntry] = {rel: pe for rel, pe in parsed.items() if pe.layer == "T"}
-    if not test_entries:
+    if not any(pe.layer == "T" for pe in parsed.values()):
         return []
-
-    best: Dict[str, Tuple[int, int, str, str]] = {}
-
-    def _record(test_path: str, reason: str, hop: int, via: str) -> None:
-        rank = REASON_RANK[reason]
-        cand = (rank, hop, via, reason)
-        prev = best.get(test_path)
-        if prev is None or (rank, hop, via) < (prev[0], prev[1], prev[2]):
-            best[test_path] = cand
-
-    # 1) FRAS Graph T-Layer BFS
-    depth_limit = max(0, int(max_depth))
-    if depth_limit >= 1:
-        visited: Set[str] = set(targets)
-        frontier: List[str] = []
-        for cur in targets:
-            for nb in sorted(dependents_adj.get(cur, ())):
-                if nb == cur:
-                    continue
-                if nb in test_entries:
-                    _record(nb, "direct-fras", 1, cur)
-                if nb not in visited:
-                    visited.add(nb)
-                    frontier.append(nb)
-        for hop in range(2, depth_limit + 1):
-            if not frontier:
-                break
-            nxt: List[str] = []
-            for cur in frontier:
-                for nb in sorted(dependents_adj.get(cur, ())):
-                    if nb not in visited:
-                        visited.add(nb)
-                        nxt.append(nb)
-                        if nb in test_entries:
-                            _record(nb, "transitive-fras", hop, cur)
-            frontier = nxt
-
-    target_infos = [_build_target_info(t) for t in targets]
-
-    # 2) Warm Outline (or opt-in read-only live extraction) Static Import Fallback
-    cache_files = preloaded_outline_files if preloaded_outline_files is not None else _load_outline_cache(root)
-    if cache_files or live_imports:
-        go_cache: Dict[str, Tuple[str, str]] = {}
-        ts_cache: Dict[str, Tuple[str, List[Tuple[str, List[str]]]]] = {}
-        for test_rel in sorted(test_entries.keys()):
-            cached_rec = cache_files.get(test_rel) if cache_files else None
-            if cached_rec is not None and (not live_imports or is_outline_record_fresh(root, test_rel, cached_rec)):
-                imports, py_members = _extract_cached_imports(cached_rec)
-            elif live_imports:
-                imports, py_members = _extract_live_test_imports(root, test_rel)
-            else:
-                imports, py_members = [], []
-            if not imports and not py_members:
-                continue
-            eco = _static_ecosystem(test_rel)
-            test_dir = test_rel.rsplit("/", 1)[0] if "/" in test_rel else ""
-            go_mod_str = ""
-            ts_base, ts_aliases = "", ()
-            if eco == "go":
-                mod_root, go_mod_str = _resolve_gomod_for_dir(root, test_dir, go_cache)
-                _ = mod_root
-            elif eco == "js":
-                ts_base, ts_aliases_list = _resolve_tsconfig_for_dir(root, test_dir, ts_cache)
-                ts_aliases = ts_aliases_list
-            for t_info in target_infos:
-                if _test_imports_match_target(
-                    test_rel,
-                    imports,
-                    py_members,
-                    t_info,
-                    go_mod_str,
-                    ts_base,
-                    ts_aliases,
-                ):
-                    _record(test_rel, "static-import", 1, t_info["rel"])
-
-    # 3) Multi-language Naming Conventions
-    for test_rel in sorted(test_entries.keys()):
-        for t_info in target_infos:
-            if _matches_naming_convention(test_rel, t_info):
-                _record(test_rel, "naming-convention", 1, t_info["rel"])
-
-    results: List[Dict[str, Any]] = []
-    for test_path, (_, hop, via, reason) in best.items():
-        pe = test_entries[test_path]
-        results.append(
-            {
-                "path": test_path,
-                "reason": reason,
-                "hop": hop,
-                "importance": pe.imp,
-                "via": via,
-                "entry": pe.raw,
-            }
-        )
-
-    results.sort(key=lambda item: (REASON_RANK[item["reason"]], item["hop"], -item["importance"], item["path"]))
-    return results
+    idx = TestImpactIndex(
+        root,
+        parsed,
+        preloaded_outline_files=preloaded_outline_files,
+        live_imports=live_imports,
+    )
+    return idx.query(dependents_adj, targets, max_depth=max_depth)

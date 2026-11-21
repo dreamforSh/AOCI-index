@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from .constants import AOCI_DIR_NAME
 
 
 def _parse_step_json(raw: str) -> Any:
@@ -47,6 +50,7 @@ def run_apply_sync(
     full_verify: bool = False,
     max_bytes: Optional[int] = None,
     dry_run: bool = False,
+    lock_cls: Any = None,
 ) -> Dict[str, Any]:
     """
     Execute requested sync stages in canonical order (`restore -> migrate-renames -> ack -> upsert -> verify`).
@@ -154,23 +158,44 @@ def run_apply_sync(
     failed_step: Optional[str] = None
     verify_result: Any = None
 
-    for step_name, argv in plan:
-        rc, raw_out = run_subcommand_fn(argv)
-        parsed = _parse_step_json(raw_out)
-        step_ok = rc == 0
+    has_mutating_step = any(s != "verify" for s, _ in plan)
+    aoci_dir = root / AOCI_DIR_NAME
+    lock_ctx: Any = (
+        lock_cls(aoci_dir)
+        if (lock_cls is not None and not dry_run and has_mutating_step and aoci_dir.is_dir())
+        else contextlib.nullcontext()
+    )
+
+    try:
+        with lock_ctx:
+            for step_name, argv in plan:
+                rc, raw_out = run_subcommand_fn(argv)
+                parsed = _parse_step_json(raw_out)
+                step_ok = rc == 0
+                steps_out.append(
+                    {
+                        "step": step_name,
+                        "ok": step_ok,
+                        "rc": int(rc),
+                        "result": parsed,
+                    }
+                )
+                if step_name == "verify":
+                    verify_result = parsed
+                if not step_ok:
+                    failed_step = step_name
+                    break
+    except TimeoutError as exc:
+        first_mut = next((s for s, _ in plan if s != "verify"), plan[0][0] if plan else "lock")
         steps_out.append(
             {
-                "step": step_name,
-                "ok": step_ok,
-                "rc": int(rc),
-                "result": parsed,
+                "step": first_mut,
+                "ok": False,
+                "rc": 3,
+                "result": {"ok": False, "error": str(exc)},
             }
         )
-        if step_name == "verify":
-            verify_result = parsed
-        if not step_ok:
-            failed_step = step_name
-            break
+        failed_step = first_mut
 
     return {
         "ok": failed_step is None,

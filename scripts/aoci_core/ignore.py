@@ -88,6 +88,8 @@ class IgnoreMatcher:
         self._dir_cache: dict = {}
         self._fast_file_rx: Optional[Any] = None
         self._fast_dir_rx: Optional[Any] = None
+        self._fast_neg_file_rx: Optional[Any] = None
+        self._fast_neg_dir_rx: Optional[Any] = None
         self._fast_built: bool = False
         self._fast_can_use: bool = False
         for raw in patterns:
@@ -117,6 +119,8 @@ class IgnoreMatcher:
         self._dir_cache.clear()
         self._fast_file_rx = None
         self._fast_dir_rx = None
+        self._fast_neg_file_rx = None
+        self._fast_neg_dir_rx = None
         self._fast_built = False
         self._fast_can_use = False
 
@@ -130,25 +134,35 @@ class IgnoreMatcher:
         if self._fast_built:
             return
         self._fast_built = True
-        if not self._rules or any(neg for _, neg, _ in self._rules):
+        if not self._rules:
             self._fast_can_use = False
             return
-        file_pats = [rx.pattern for rx, _, dir_only in self._rules if not dir_only]
-        dir_pats = [rx.pattern for rx, _, _ in self._rules]
+        pos_file_pats = [rx.pattern for rx, neg, dir_only in self._rules if not neg and not dir_only]
+        pos_dir_pats = [rx.pattern for rx, neg, _ in self._rules if not neg]
+        neg_file_pats = [rx.pattern for rx, neg, dir_only in self._rules if neg and not dir_only]
+        neg_dir_pats = [rx.pattern for rx, neg, _ in self._rules if neg]
         try:
-            self._fast_file_rx = re.compile("(?:" + ")|(?:".join(file_pats) + ")") if file_pats else None
-            self._fast_dir_rx = re.compile("(?:" + ")|(?:".join(dir_pats) + ")") if dir_pats else None
+            self._fast_file_rx = re.compile("(?:" + ")|(?:".join(pos_file_pats) + ")") if pos_file_pats else None
+            self._fast_dir_rx = re.compile("(?:" + ")|(?:".join(pos_dir_pats) + ")") if pos_dir_pats else None
+            self._fast_neg_file_rx = re.compile("(?:" + ")|(?:".join(neg_file_pats) + ")") if neg_file_pats else None
+            self._fast_neg_dir_rx = re.compile("(?:" + ")|(?:".join(neg_dir_pats) + ")") if neg_dir_pats else None
             self._fast_can_use = True
         except re.error:
             self._fast_file_rx = None
             self._fast_dir_rx = None
+            self._fast_neg_file_rx = None
+            self._fast_neg_dir_rx = None
             self._fast_can_use = False
 
     def _decide(self, subject: str, is_dir: bool) -> bool:
         self._ensure_fast_regexes()
         if self._fast_can_use:
-            rx = self._fast_dir_rx if is_dir else self._fast_file_rx
-            return bool(rx is not None and rx.match(subject))
+            pos_rx = self._fast_dir_rx if is_dir else self._fast_file_rx
+            if pos_rx is None or not pos_rx.match(subject):
+                return False
+            neg_rx = self._fast_neg_dir_rx if is_dir else self._fast_neg_file_rx
+            if neg_rx is None or not neg_rx.match(subject):
+                return True
         result = False
         for rx, negate, dir_only in self._rules:
             if dir_only and not is_dir:

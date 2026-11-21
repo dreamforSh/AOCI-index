@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -43,12 +44,16 @@ SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
 class _MemoryIndexCache:
     """LRU-bounded, mtime-keyed in-memory cache of parsed FRAS volumes, outlines, hubs, and BM25."""
 
+    _DIFF_TTL_SECONDS = 1.5
+
     def __init__(self, max_slots: int = 16) -> None:
         self._max_slots = max(1, max_slots)
         self._lock = threading.RLock()
+        self._root_locks: "OrderedDict[str, threading.RLock]" = OrderedDict()
         self._slots: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._outline_slots: "OrderedDict[str, Tuple[Any, Dict[str, Any]]]" = OrderedDict()
         self._hub_slots: "OrderedDict[str, Tuple[Any, List[Dict[str, Any]]]]" = OrderedDict()
+        self._diff_slots: "OrderedDict[str, Tuple[Any, float, Dict[str, Any]]]" = OrderedDict()
 
     @staticmethod
     def _canonical_root(root: Path) -> Tuple[Path, str]:
@@ -58,6 +63,21 @@ class _MemoryIndexCache:
             resolved = root
         return resolved, str(resolved)
 
+    def _get_root_lock(self, root_key: str) -> threading.RLock:
+        with self._lock:
+            rlk = self._root_locks.get(root_key)
+            if rlk is None:
+                rlk = threading.RLock()
+                self._root_locks[root_key] = rlk
+            else:
+                self._root_locks.move_to_end(root_key)
+            while len(self._root_locks) > self._max_slots * 4:
+                oldest_k, _ = next(iter(self._root_locks.items()))
+                if oldest_k == root_key:
+                    break
+                self._root_locks.pop(oldest_k, None)
+            return rlk
+
     def invalidate(self, root: Path) -> None:
         _, root_key = self._canonical_root(root)
         raw_key = str(root)
@@ -66,12 +86,14 @@ class _MemoryIndexCache:
                 self._slots.pop(key, None)
                 self._outline_slots.pop(key, None)
                 self._hub_slots.pop(key, None)
+                self._diff_slots.pop(key, None)
 
     def get(self, root: Path) -> Optional[Dict[str, Any]]:
         resolved, root_key = self._canonical_root(root)
         aoci_dir = resolved / aoci_index.AOCI_DIR_NAME
         code_path = aoci_dir / aoci_index.CODE_FILE
-        with self._lock:
+        root_lock = self._get_root_lock(root_key)
+        with root_lock:
             if not code_path.is_file():
                 self.invalidate(root)
                 return None
@@ -81,10 +103,11 @@ class _MemoryIndexCache:
                 aoci_index._stat_key(aoci_dir / aoci_index.META_FILE),
                 aoci_index._stat_key(aoci_dir / aoci_index.GLOSSARY_FILE),
             )
-            cached = self._slots.get(root_key)
-            if cached is not None and cached.get("key") == key:
-                self._slots.move_to_end(root_key)
-                return cached
+            with self._lock:
+                cached = self._slots.get(root_key)
+                if cached is not None and cached.get("key") == key:
+                    self._slots.move_to_end(root_key)
+                    return cached
 
             duplicates: List[str] = []
             raw_code_texts: List[str] = []
@@ -101,6 +124,7 @@ class _MemoryIndexCache:
             )
             slot: Dict[str, Any] = {
                 "key": key,
+                "_lock": root_lock,
                 "entries": entries,
                 "parsed": parsed,
                 "malformed": malformed,
@@ -109,6 +133,7 @@ class _MemoryIndexCache:
                 "dependents": dependents,
                 "mention_index": mention_index,
                 "bm25": None,
+                "test_index_entry": None,
                 "glossary": aoci_index.parse_glossary(aoci_dir),
                 "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or resolved.name,
                 "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
@@ -116,14 +141,16 @@ class _MemoryIndexCache:
                 "domains": aoci_index.parse_declared_domains(aoci_dir),
                 "estimated_tokens": estimated_tokens,
             }
-            self._slots[root_key] = slot
-            self._slots.move_to_end(root_key)
-            while len(self._slots) > self._max_slots:
-                self._slots.popitem(last=False)
+            with self._lock:
+                self._slots[root_key] = slot
+                self._slots.move_to_end(root_key)
+                while len(self._slots) > self._max_slots:
+                    self._slots.popitem(last=False)
             return slot
 
     def get_bm25(self, slot: Dict[str, Any]) -> aoci_index.BM25Index:
-        with self._lock:
+        slot_lock = slot.get("_lock") or self._lock
+        with slot_lock:
             idx = slot.get("bm25")
             if idx is None:
                 if aoci_index.BM25Index is aoci_index._graph.BM25Index:
@@ -136,15 +163,18 @@ class _MemoryIndexCache:
     def get_outline_files(self, root: Path) -> Optional[Dict[str, Any]]:
         resolved, root_key = self._canonical_root(root)
         cache_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.CACHE_DIR / aoci_index.OUTLINE_CACHE
-        with self._lock:
+        root_lock = self._get_root_lock(root_key)
+        with root_lock:
             if not cache_path.is_file():
-                self._outline_slots.pop(root_key, None)
+                with self._lock:
+                    self._outline_slots.pop(root_key, None)
                 return None
             key = aoci_index._stat_key(cache_path)
-            cached = self._outline_slots.get(root_key)
-            if cached is not None and cached[0] == key:
-                self._outline_slots.move_to_end(root_key)
-                return cached[1]
+            with self._lock:
+                cached = self._outline_slots.get(root_key)
+                if cached is not None and cached[0] == key:
+                    self._outline_slots.move_to_end(root_key)
+                    return cached[1]
             try:
                 loaded = json.loads(cache_path.read_text(encoding="utf-8-sig"))
             except (OSError, ValueError, TypeError):
@@ -161,30 +191,95 @@ class _MemoryIndexCache:
             files_obj = loaded.get("files") if isinstance(loaded.get("files"), dict) else loaded
             if not isinstance(files_obj, dict):
                 return None
-            self._outline_slots[root_key] = (key, files_obj)
-            self._outline_slots.move_to_end(root_key)
-            while len(self._outline_slots) > self._max_slots:
-                self._outline_slots.popitem(last=False)
+            with self._lock:
+                self._outline_slots[root_key] = (key, files_obj)
+                self._outline_slots.move_to_end(root_key)
+                while len(self._outline_slots) > self._max_slots:
+                    self._outline_slots.popitem(last=False)
             return files_obj
 
     def get_hub_records(self, root: Path) -> Optional[List[Dict[str, Any]]]:
         resolved, root_key = self._canonical_root(root)
         hubs_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
-        with self._lock:
+        root_lock = self._get_root_lock(root_key)
+        with root_lock:
             if not hubs_path.is_file():
-                self._hub_slots.pop(root_key, None)
+                with self._lock:
+                    self._hub_slots.pop(root_key, None)
                 return None
             key = aoci_index._stat_key(hubs_path)
-            cached = self._hub_slots.get(root_key)
-            if cached is not None and cached[0] == key:
-                self._hub_slots.move_to_end(root_key)
-                return cached[1]
+            with self._lock:
+                cached = self._hub_slots.get(root_key)
+                if cached is not None and cached[0] == key:
+                    self._hub_slots.move_to_end(root_key)
+                    return cached[1]
             records, _ = aoci_index._hubs.parse_hubs_volume(hubs_path)
-            self._hub_slots[root_key] = (key, records)
-            self._hub_slots.move_to_end(root_key)
-            while len(self._hub_slots) > self._max_slots:
-                self._hub_slots.popitem(last=False)
+            with self._lock:
+                self._hub_slots[root_key] = (key, records)
+                self._hub_slots.move_to_end(root_key)
+                while len(self._hub_slots) > self._max_slots:
+                    self._hub_slots.popitem(last=False)
             return records
+
+    def get_test_index(self, root: Path, slot: Dict[str, Any]) -> Any:
+        resolved, _ = self._canonical_root(root)
+        cache_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.CACHE_DIR / aoci_index.OUTLINE_CACHE
+        outline_key = aoci_index._stat_key(cache_path) if cache_path.is_file() else None
+        slot_lock = slot.get("_lock") or self._lock
+        with slot_lock:
+            cached = slot.get("test_index_entry")
+            if cached is not None and cached[0] == outline_key:
+                return cached[1]
+            outline_files = self.get_outline_files(resolved) if outline_key is not None else {}
+            idx = aoci_index._test_impact.TestImpactIndex(
+                resolved,
+                slot["parsed"],
+                preloaded_outline_files=outline_files or {},
+                live_imports=False,
+            )
+            slot["test_index_entry"] = (outline_key, idx)
+            return idx
+
+    def get_working_diff_briefing(
+        self,
+        root: Path,
+        slot: Dict[str, Any],
+        hub_records: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        resolved, root_key = self._canonical_root(root)
+        git_marker = resolved / ".git"
+        git_idx_stat: Any = None
+        git_head_stat: Any = None
+        if git_marker.is_dir():
+            git_idx_stat = aoci_index._stat_key(git_marker / "index")
+            git_head_stat = aoci_index._stat_key(git_marker / "HEAD")
+        hubs_path = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.HUBS_FILE
+        hubs_stat = aoci_index._stat_key(hubs_path) if hubs_path.is_file() else None
+        diff_key = (slot.get("key"), hubs_stat, git_idx_stat, git_head_stat)
+        now = time.monotonic()
+        root_lock = self._get_root_lock(root_key)
+        with root_lock:
+            with self._lock:
+                cached = self._diff_slots.get(root_key)
+                if cached is not None and cached[0] == diff_key and (now - cached[1]) <= self._DIFF_TTL_SECONDS:
+                    self._diff_slots.move_to_end(root_key)
+                    return cached[2]
+            cand_diff = aoci_index.compute_diff_briefing(
+                root,
+                depth=1,
+                cached_entries=slot["entries"],
+                cached_deps=slot["deps"],
+                cached_dependents=slot["dependents"],
+                cached_invariants=slot["invariants"],
+                cached_parsed=slot["parsed"],
+                cached_hub_records=hub_records,
+            )
+            with self._lock:
+                self._diff_slots[root_key] = (diff_key, time.monotonic(), cand_diff)
+                self._diff_slots.move_to_end(root_key)
+                while len(self._diff_slots) > self._max_slots:
+                    self._diff_slots.popitem(last=False)
+            return cand_diff
 
 
 _CACHE = _MemoryIndexCache()
@@ -1100,6 +1195,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         if args.get("tests_for"):
             tests_target = aoci_index.normalize_relpath(str(args["tests_for"]))
             tests_depth = int(args["depth"]) if args.get("depth") is not None else 3
+            live_ti = bool(args.get("live_test_imports", False))
+            t_idx = None if live_ti else _CACHE.get_test_index(root, slot)
             impacted_tests = aoci_index.find_impacted_tests(
                 root,
                 slot["entries"],
@@ -1107,8 +1204,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 [tests_target],
                 max_depth=tests_depth,
                 parsed_entries=parsed_map,
-                preloaded_outline_files=_CACHE.get_outline_files(root),
-                live_imports=bool(args.get("live_test_imports", False)),
+                preloaded_outline_files=_CACHE.get_outline_files(root) if live_ti else None,
+                live_imports=live_ti,
+                test_index=t_idx,
             )
             tests_for_set = {item["path"] for item in impacted_tests}
 
@@ -1215,6 +1313,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         )
         raw_tests: Optional[List[Dict[str, Any]]] = None
         if with_tests:
+            live_ti = bool(args.get("live_test_imports", False))
+            t_idx = None if live_ti else _CACHE.get_test_index(root, slot)
             raw_tests = aoci_index.find_impacted_tests(
                 root,
                 slot["entries"],
@@ -1222,8 +1322,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
                 [str(p) for p in raw_paths],
                 max_depth=max(3, depth),
                 parsed_entries=slot["parsed"],
-                preloaded_outline_files=_CACHE.get_outline_files(root),
-                live_imports=bool(args.get("live_test_imports", False)),
+                preloaded_outline_files=_CACHE.get_outline_files(root) if live_ti else None,
+                live_imports=live_ti,
+                test_index=t_idx,
             )
         aoci_index._graph.attach_budgeted_context_extras(
             payload,
@@ -1238,6 +1339,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         slot = _CACHE.get(root)
         depth = int(args["depth"]) if args.get("depth") is not None else 1
         with_tests = bool(args.get("with_tests", False))
+        live_ti = bool(args.get("live_test_imports", False))
+        t_idx = _CACHE.get_test_index(root, slot) if (with_tests and slot is not None and not live_ti) else None
         brief = aoci_index.compute_diff_briefing(
             root,
             rev=args.get("rev"),
@@ -1250,8 +1353,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cached_invariants=slot["invariants"] if slot is not None else None,
             cached_parsed=slot["parsed"] if slot is not None else None,
             cached_hub_records=_CACHE.get_hub_records(root),
-            preloaded_outline_files=_CACHE.get_outline_files(root) if with_tests else None,
-            live_test_imports=bool(args.get("live_test_imports", False)),
+            preloaded_outline_files=_CACHE.get_outline_files(root) if (with_tests and t_idx is None) else None,
+            live_test_imports=live_ti,
+            test_index=t_idx,
         )
         return (not brief.get("ok")), json.dumps(brief, indent=2, ensure_ascii=False)
 
@@ -1511,22 +1615,16 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
         include_diff = bool(args.get("include_diff", True))
         diff_brief: Optional[Dict[str, Any]] = None
         if include_diff:
-            cand_diff = aoci_index.compute_diff_briefing(
-                root,
-                depth=1,
-                cached_entries=slot["entries"],
-                cached_deps=slot["deps"],
-                cached_dependents=slot["dependents"],
-                cached_invariants=slot["invariants"],
-                cached_parsed=slot["parsed"],
-                cached_hub_records=hub_records,
-            )
+            cand_diff = _CACHE.get_working_diff_briefing(root, slot, hub_records)
             if cand_diff.get("ok"):
                 diff_brief = cand_diff
         bm25 = _CACHE.get_bm25(slot)
         depth_val = int(args["depth"]) if args.get("depth") is not None else 1
         budget_val = int(args["budget"]) if args.get("budget") is not None else 2500
         top_seeds_val = int(args["top_seeds"]) if args.get("top_seeds") is not None else 8
+        with_tests_pack = bool(args.get("with_tests", False))
+        live_ti_pack = bool(args.get("live_test_imports", False))
+        t_idx_pack = _CACHE.get_test_index(root, slot) if (with_tests_pack and not live_ti_pack) else None
         payload = aoci_index.build_task_pack(
             root,
             slot["entries"],
@@ -1546,8 +1644,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             preloaded_outline_files=outline_files,
             hub_records=hub_records,
             live_anchors=bool(args.get("live_anchors", False)),
-            with_tests=bool(args.get("with_tests", False)),
-            live_test_imports=bool(args.get("live_test_imports", False)),
+            with_tests=with_tests_pack,
+            live_test_imports=live_ti_pack,
+            test_index=t_idx_pack,
         )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -1655,6 +1754,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             full_verify=bool(args.get("full_verify", False)),
             max_bytes=int(raw_mb) if raw_mb is not None else None,
             dry_run=dry_run,
+            lock_cls=aoci_index.IndexLock,
         )
         if not dry_run:
             _CACHE.invalidate(root)

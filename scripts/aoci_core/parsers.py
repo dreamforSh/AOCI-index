@@ -239,8 +239,14 @@ def _strip_c_comments(src: str, allow_backtick: bool = False, single_quote_char_
     return _get_c_comment_rx(allow_backtick, single_quote_char_only).sub(_strip_c_sub, src)
 
 
-def _extract_js_ts_outline(src: str, line_offset: int, imports: List[str], symbols: List[str]) -> None:
-    clean = _strip_js_comments(src)
+def _extract_js_ts_outline(
+    src: str,
+    line_offset: int,
+    imports: List[str],
+    symbols: List[str],
+    precleaned: Optional[str] = None,
+) -> None:
+    clean = precleaned if precleaned is not None else _strip_js_comments(src)
     imp_hits: List[Tuple[int, str]] = []
     reexport_syms: List[Tuple[int, str]] = []
 
@@ -787,9 +793,14 @@ def _extract_js_ts_class_members(body: str, cls_name: str, sigs_out: List[str]) 
         _emit_member(tail)
 
 
-def _extract_js_ts_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
+def _extract_js_ts_rich_signatures(
+    src: str,
+    imports_out: List[str],
+    sigs_out: List[str],
+    precleaned: Optional[str] = None,
+) -> None:
     """Extract imports + full JS/TS function/class/interface/type/enum/export signatures."""
-    clean = _strip_js_comments(src)
+    clean = precleaned if precleaned is not None else _strip_js_comments(src)
     for m in _JS_STATIC_IMPORT_RE.finditer(clean):
         spec = m.group(1) or m.group(2)
         if spec:
@@ -932,8 +943,13 @@ def _extract_js_ts_rich_signatures(src: str, imports_out: List[str], sigs_out: L
     _emit_stmt_no_brace(clean[stmt_start:])
 
 
-def _extract_go_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
-    clean = _strip_c_comments(src, allow_backtick=True)
+def _extract_go_rich_signatures(
+    src: str,
+    imports_out: List[str],
+    sigs_out: List[str],
+    precleaned: Optional[str] = None,
+) -> None:
+    clean = precleaned if precleaned is not None else _strip_c_comments(src, allow_backtick=True)
     go_lines = clean[:-1].split("\n") if clean.endswith("\n") else (clean.split("\n") if clean else [])
     in_imp = False
     for ln in go_lines:
@@ -1069,8 +1085,13 @@ def _extract_rust_impl_methods(body: str, impl_hdr: str, sigs_out: List[str]) ->
         i += 1
 
 
-def _extract_rust_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
-    clean = _strip_c_comments(src, single_quote_char_only=True)
+def _extract_rust_rich_signatures(
+    src: str,
+    imports_out: List[str],
+    sigs_out: List[str],
+    precleaned: Optional[str] = None,
+) -> None:
+    clean = precleaned if precleaned is not None else _strip_c_comments(src, single_quote_char_only=True)
     rs_lines = clean[:-1].split("\n") if clean.endswith("\n") else (clean.split("\n") if clean else [])
     use_buf: Optional[List[str]] = None
     for ln in rs_lines:
@@ -1216,8 +1237,13 @@ def _extract_jvm_cs_block(src: str, owner: str, sigs_out: List[str]) -> None:
         _emit_decl(tail, False)
 
 
-def _extract_jvm_cs_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
-    clean = _strip_c_comments(src)
+def _extract_jvm_cs_rich_signatures(
+    src: str,
+    imports_out: List[str],
+    sigs_out: List[str],
+    precleaned: Optional[str] = None,
+) -> None:
+    clean = precleaned if precleaned is not None else _strip_c_comments(src)
     for ln in clean.splitlines():
         s = ln.strip()
         if s.startswith(("import ", "using ")):
@@ -1321,8 +1347,13 @@ def _extract_cpp_block(src: str, owner: str, default_access: str, sigs_out: List
         i += 1
 
 
-def _extract_cpp_rich_signatures(src: str, imports_out: List[str], sigs_out: List[str]) -> None:
-    clean = _strip_c_comments(src)
+def _extract_cpp_rich_signatures(
+    src: str,
+    imports_out: List[str],
+    sigs_out: List[str],
+    precleaned: Optional[str] = None,
+) -> None:
+    clean = precleaned if precleaned is not None else _strip_c_comments(src)
     for ln in clean.splitlines():
         m_inc = _C_INCLUDE_RE.match(ln)
         if m_inc:
@@ -1330,25 +1361,47 @@ def _extract_cpp_rich_signatures(src: str, imports_out: List[str], sigs_out: Lis
     _extract_cpp_block(clean, "", "public", sigs_out)
 
 
-def _extract_rich_non_py_signatures(norm_bytes: bytes, ext_l: str) -> Optional[Dict[str, List[str]]]:
-    text = strip_utf8_bom_bytes(norm_bytes).decode("utf-8", errors="replace")
+def _preclean_non_py_source(text: str, ext_l: str) -> Optional[str]:
+    if ext_l in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}:
+        return _strip_js_comments(text)
+    if ext_l == ".go":
+        return _strip_c_comments(text, allow_backtick=True)
+    if ext_l == ".rs":
+        return _strip_c_comments(text, single_quote_char_only=True)
+    if ext_l in {".java", ".kt", ".kts", ".cs", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".proto", ".prisma"}:
+        return _strip_c_comments(text)
+    if ext_l in {".graphql", ".gql"}:
+        return _strip_hash_comments(text)
+    if ext_l == ".sql":
+        return _strip_sql_comments(text)
+    return None
+
+
+def _extract_rich_non_py_signatures(
+    norm_bytes: bytes,
+    ext_l: str,
+    *,
+    predecoded_text: Optional[str] = None,
+    precleaned_text: Optional[str] = None,
+) -> Optional[Dict[str, List[str]]]:
+    text = predecoded_text if predecoded_text is not None else strip_utf8_bom_bytes(norm_bytes).decode("utf-8", errors="replace")
     imports: List[str] = []
     sigs: List[str] = []
     if ext_l in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}:
-        _extract_js_ts_rich_signatures(text, imports, sigs)
+        _extract_js_ts_rich_signatures(text, imports, sigs, precleaned=precleaned_text)
     elif ext_l in {".vue", ".svelte"}:
         script_chunks = [m.group(1) for m in _SFC_SCRIPT_RE.finditer(text)]
         _extract_js_ts_rich_signatures("\n".join(script_chunks), imports, sigs)
     elif ext_l == ".go":
-        _extract_go_rich_signatures(text, imports, sigs)
+        _extract_go_rich_signatures(text, imports, sigs, precleaned=precleaned_text)
     elif ext_l == ".rs":
-        _extract_rust_rich_signatures(text, imports, sigs)
+        _extract_rust_rich_signatures(text, imports, sigs, precleaned=precleaned_text)
     elif ext_l in {".java", ".kt", ".kts", ".cs"}:
-        _extract_jvm_cs_rich_signatures(text, imports, sigs)
+        _extract_jvm_cs_rich_signatures(text, imports, sigs, precleaned=precleaned_text)
     elif ext_l in {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
-        _extract_cpp_rich_signatures(text, imports, sigs)
+        _extract_cpp_rich_signatures(text, imports, sigs, precleaned=precleaned_text)
     elif ext_l == ".proto":
-        clean_p = _strip_c_comments(text)
+        clean_p = precleaned_text if precleaned_text is not None else _strip_c_comments(text)
         for ln in clean_p.splitlines():
             m_imp = _PROTO_IMPORT_RE.match(ln)
             if m_imp:
@@ -1357,15 +1410,15 @@ def _extract_rich_non_py_signatures(norm_bytes: bytes, ext_l: str) -> Optional[D
         if body_norm:
             sigs.append(body_norm)
     elif ext_l in {".graphql", ".gql"}:
-        body_norm = _collapse_ws(_strip_hash_comments(text))
+        body_norm = _collapse_ws(precleaned_text if precleaned_text is not None else _strip_hash_comments(text))
         if body_norm:
             sigs.append(body_norm)
     elif ext_l == ".prisma":
-        body_norm = _collapse_ws(_strip_c_comments(text))
+        body_norm = _collapse_ws(precleaned_text if precleaned_text is not None else _strip_c_comments(text))
         if body_norm:
             sigs.append(body_norm)
     elif ext_l == ".sql":
-        body_norm = _collapse_ws(_strip_sql_comments(text))
+        body_norm = _collapse_ws(precleaned_text if precleaned_text is not None else _strip_sql_comments(text))
         if body_norm:
             sigs.append(body_norm)
     else:
@@ -1424,11 +1477,13 @@ def _extract_outline_from_bytes(
     max_items: int = 30,
     preparsed_py_tree: Optional[ast.Module] = None,
     max_imports: Optional[int] = None,
+    predecoded_text: Optional[str] = None,
+    precleaned_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Pure byte-buffer implementation of `extract_file_outline` (expects LF-normalized bytes)."""
     clean_bytes = strip_utf8_bom_bytes(norm_bytes)
     line_count = 0 if not clean_bytes else clean_bytes.count(b"\n") + (0 if clean_bytes.endswith(b"\n") else 1)
-    text = clean_bytes.decode("utf-8", errors="replace")
+    text = predecoded_text if predecoded_text is not None else clean_bytes.decode("utf-8", errors="replace")
     lines = text[:-1].split("\n") if text.endswith("\n") else (text.split("\n") if text else [])
     ext = ext.lower()
 
@@ -1443,13 +1498,13 @@ def _extract_outline_from_bytes(
         except SyntaxError:
             pass
     elif ext in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}:
-        _extract_js_ts_outline(text, 0, imports, symbols)
+        _extract_js_ts_outline(text, 0, imports, symbols, precleaned=precleaned_text)
     elif ext in {".vue", ".svelte"}:
         for m in _SFC_SCRIPT_RE.finditer(text):
             offset = text.count("\n", 0, m.start(1))
             _extract_js_ts_outline(m.group(1), offset, imports, symbols)
     elif ext == ".go":
-        clean_go = _strip_c_comments(text, allow_backtick=True)
+        clean_go = precleaned_text if precleaned_text is not None else _strip_c_comments(text, allow_backtick=True)
         go_lines = clean_go[:-1].split("\n") if clean_go.endswith("\n") else (clean_go.split("\n") if clean_go else [])
         in_imp = False
         for idx, ln in enumerate(go_lines, start=1):
@@ -1474,7 +1529,7 @@ def _extract_outline_from_bytes(
             if ms:
                 symbols.append(f"{ms.group(1).strip()} [L{idx}]")
     elif ext == ".rs":
-        clean_rs = _strip_c_comments(text, single_quote_char_only=True)
+        clean_rs = precleaned_text if precleaned_text is not None else _strip_c_comments(text, single_quote_char_only=True)
         rs_lines = clean_rs[:-1].split("\n") if clean_rs.endswith("\n") else (clean_rs.split("\n") if clean_rs else [])
         use_buf: Optional[List[str]] = None
         for idx, ln in enumerate(rs_lines, start=1):
@@ -1498,7 +1553,7 @@ def _extract_outline_from_bytes(
             if ms:
                 symbols.append(f"{ms.group(1)} {ms.group(2)} [L{idx}]")
     elif ext in {".java", ".kt", ".kts", ".cs"}:
-        clean_jvm = _strip_c_comments(text)
+        clean_jvm = precleaned_text if precleaned_text is not None else _strip_c_comments(text)
         jvm_lines = clean_jvm[:-1].split("\n") if clean_jvm.endswith("\n") else (clean_jvm.split("\n") if clean_jvm else [])
         for idx, ln in enumerate(jvm_lines, start=1):
             s = ln.strip()
@@ -1509,7 +1564,7 @@ def _extract_outline_from_bytes(
             if ms:
                 symbols.append(f"{ms.group(1)} {ms.group(2)} [L{idx}]")
     elif ext == ".proto":
-        clean_p = _strip_c_comments(text)
+        clean_p = precleaned_text if precleaned_text is not None else _strip_c_comments(text)
         p_lines = clean_p[:-1].split("\n") if clean_p.endswith("\n") else (clean_p.split("\n") if clean_p else [])
         for idx, ln in enumerate(p_lines, start=1):
             m_imp = _PROTO_IMPORT_RE.match(ln)
@@ -1524,28 +1579,28 @@ def _extract_outline_from_bytes(
             if m_rpc:
                 symbols.append(f"rpc {m_rpc.group(1)} [L{idx}]")
     elif ext in {".graphql", ".gql"}:
-        clean_g = _strip_hash_comments(text)
+        clean_g = precleaned_text if precleaned_text is not None else _strip_hash_comments(text)
         g_lines = clean_g[:-1].split("\n") if clean_g.endswith("\n") else (clean_g.split("\n") if clean_g else [])
         for idx, ln in enumerate(g_lines, start=1):
             m_g = _GRAPHQL_ITEM_RE.match(ln)
             if m_g:
                 symbols.append(f"{m_g.group(1)} {m_g.group(2)} [L{idx}]")
     elif ext == ".prisma":
-        clean_pr = _strip_c_comments(text)
+        clean_pr = precleaned_text if precleaned_text is not None else _strip_c_comments(text)
         pr_lines = clean_pr[:-1].split("\n") if clean_pr.endswith("\n") else (clean_pr.split("\n") if clean_pr else [])
         for idx, ln in enumerate(pr_lines, start=1):
             m_pr = _PRISMA_ITEM_RE.match(ln)
             if m_pr:
                 symbols.append(f"{m_pr.group(1)} {m_pr.group(2)} [L{idx}]")
     elif ext == ".sql":
-        clean_sql = _strip_sql_comments(text)
+        clean_sql = precleaned_text if precleaned_text is not None else _strip_sql_comments(text)
         sql_lines = clean_sql[:-1].split("\n") if clean_sql.endswith("\n") else (clean_sql.split("\n") if clean_sql else [])
         for idx, ln in enumerate(sql_lines, start=1):
             m_sql = _SQL_CREATE_RE.match(ln)
             if m_sql:
                 symbols.append(f"{m_sql.group(1).lower()} {m_sql.group(2)} [L{idx}]")
     elif ext in {".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"}:
-        clean_cpp = _strip_c_comments(text)
+        clean_cpp = precleaned_text if precleaned_text is not None else _strip_c_comments(text)
         cpp_lines = clean_cpp[:-1].split("\n") if clean_cpp.endswith("\n") else (clean_cpp.split("\n") if clean_cpp else [])
         brace_depth = 0
         for idx, ln in enumerate(cpp_lines, start=1):
@@ -1661,22 +1716,35 @@ def extract_outline_and_sig_hash_from_bytes(
     max_items: int = 30,
     max_imports: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Extract outline and `sig_hash` together (reusing one `ast.parse` for Python files)."""
+    """Extract outline and `sig_hash` together (reusing one decode and comment-strip/AST pass per file)."""
     ext_l = ext.lower()
     norm_bytes = strip_utf8_bom_bytes(norm_bytes)
     if b"\r\n" in norm_bytes:
         norm_bytes = norm_bytes.replace(b"\r\n", b"\n")
+    text = norm_bytes.decode("utf-8", errors="replace")
     tree: Optional[ast.Module] = None
     sig_hash: Optional[str] = None
+    precleaned: Optional[str] = None
     if ext_l == ".py":
         try:
-            tree = ast.parse(norm_bytes.decode("utf-8", errors="replace"))
+            tree = ast.parse(text)
             sig_hash = _compute_py_sig_hash_from_tree(tree)
         except SyntaxError:
             tree = None
             sig_hash = None
     elif ext_l in SIG_HASH_EXTS:
-        sig_hash = compute_signature_hash_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}")
+        precleaned = _preclean_non_py_source(text, ext_l)
+        rich_payload = _extract_rich_non_py_signatures(
+            norm_bytes,
+            ext_l,
+            predecoded_text=text,
+            precleaned_text=precleaned,
+        )
+        if rich_payload is not None:
+            encoded = json.dumps(rich_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            sig_hash = hashlib.sha256(encoded).hexdigest()[:16]
+        else:
+            sig_hash = compute_signature_hash_from_bytes(norm_bytes, ext_l, rel or f"file{ext_l}")
     out = _extract_outline_from_bytes(
         norm_bytes,
         ext_l,
@@ -1684,6 +1752,8 @@ def extract_outline_and_sig_hash_from_bytes(
         max_items=max_items,
         preparsed_py_tree=tree,
         max_imports=max_imports,
+        predecoded_text=text,
+        precleaned_text=precleaned,
     )
     return out, sig_hash
 
@@ -2244,19 +2314,43 @@ def resolve_jvm_cs_package_imports(
 
 
 def _python_candidate_prefixes(cur_dir: str, subpkg_roots: Sequence[str]) -> List[str]:
-    prefixes: List[str] = ["", "src/"]
+    seen: Dict[str, None] = {"": None, "src/": None}
     if cur_dir:
         parts = cur_dir.split("/")
         for cut in range(len(parts), 0, -1):
             sub = "/".join(parts[:cut])
-            for cand in (f"{sub}/", f"{sub}/src/"):
-                if cand not in prefixes:
-                    prefixes.append(cand)
+            seen.setdefault(f"{sub}/", None)
+            seen.setdefault(f"{sub}/src/", None)
     for sr in subpkg_roots:
-        for cand in (f"{sr}/", f"{sr}/src/"):
-            if cand not in prefixes:
-                prefixes.append(cand)
-    return prefixes
+        seen.setdefault(f"{sr}/", None)
+        seen.setdefault(f"{sr}/src/", None)
+    return list(seen.keys())
+
+
+def _build_python_suffix_index(discovered_files: Sequence[str]) -> Dict[str, List[Tuple[str, int, str]]]:
+    """
+    Pre-index `.py` files by slash-bounded module suffix `suf -> [(prefix, is_init, rel), ...]`
+    so external/stdlib imports skip prefix probing in `O(1)` across 50k-file Python monorepos.
+    """
+    by_suffix: Dict[str, List[Tuple[str, int, str]]] = {}
+    for py_rel in discovered_files:
+        if not py_rel.endswith(".py") or py_rel == "__init__.py":
+            continue
+        if py_rel.endswith("/__init__.py"):
+            mod_full = py_rel[:-12]
+            is_init = 1
+        else:
+            mod_full = py_rel[:-3]
+            is_init = 0
+        if not mod_full:
+            continue
+        segs = mod_full.split("/")
+        n_segs = len(segs)
+        for cut in range(n_segs):
+            suf = "/".join(segs[cut:])
+            pfx = ("/".join(segs[:cut]) + "/") if cut > 0 else ""
+            by_suffix.setdefault(suf, []).append((pfx, is_init, py_rel))
+    return by_suffix
 
 
 def invalidate_outline_cache(
@@ -2346,6 +2440,7 @@ def build_static_import_graph(
     fps: Optional[Dict[str, Dict[str, Any]]] = None,
     aoci_dir: Optional[Path] = None,
     outline_fn: Optional[Callable[[Path, str, int], Dict[str, Any]]] = None,
+    resolution_extras: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     """
     Scan discovered source files once (using mtime-keyed `outline_cache.json` and parallel extraction
@@ -2363,8 +2458,11 @@ def build_static_import_graph(
     py_subpkg_roots: List[str] = []
     seen_subpkgs: Set[str] = set()
     go_dir_files: Dict[str, List[str]] = {}
+    has_py = False
     has_jvm_or_cs = False
     for f_rel in discovered_files:
+        if not has_py and f_rel.endswith(".py"):
+            has_py = True
         if f_rel.endswith(".go") and not f_rel.endswith("_test.go"):
             parent = f_rel.rsplit("/", 1)[0] if "/" in f_rel else ""
             go_dir_files.setdefault(parent, []).append(f_rel)
@@ -2376,6 +2474,11 @@ def build_static_import_graph(
             if pkg_root not in seen_subpkgs:
                 seen_subpkgs.add(pkg_root)
                 py_subpkg_roots.append(pkg_root)
+
+    py_suffix_index: Dict[str, List[Tuple[str, int, str]]] = (
+        _build_python_suffix_index(discovered_files) if has_py else {}
+    )
+    py_prefix_rank_cache: Dict[str, Dict[str, int]] = {}
 
     jvm_cls_map: Dict[str, List[str]] = {}
     jvm_pkg_map: Dict[str, List[str]] = {}
@@ -2464,6 +2567,8 @@ def build_static_import_graph(
 
     deps: Dict[str, List[str]] = {rel: [] for rel in discovered_files}
     callers_set: Dict[str, Set[str]] = {rel: set() for rel in discovered_files}
+    go_imported_dirs_by_file: Dict[str, Set[str]] = {}
+    jvm_cs_resolved_map: Dict[str, Tuple[List[str], List[List[str]]]] = {}
 
     for rel in discovered_files:
         out = outlines.get(rel)
@@ -2475,7 +2580,7 @@ def build_static_import_graph(
 
         if ext == ".py":
             py_specs = list(dict.fromkeys([*out["imports"], *out.get("py_from_members", ())]))
-            py_prefixes = _python_candidate_prefixes(cur_dir, py_subpkg_roots)
+            pfx_ranks: Optional[Dict[str, int]] = None
             for imp in py_specs:
                 if imp.startswith("."):
                     lvl = len(imp) - len(imp.lstrip("."))
@@ -2491,14 +2596,33 @@ def build_static_import_graph(
                             break
                 else:
                     mod_path = imp.replace(".", "/")
-                    for prefix in py_prefixes:
-                        for cand in (f"{prefix}{mod_path}.py", f"{prefix}{mod_path}/__init__.py"):
-                            if cand in known_set and cand != rel:
-                                resolved.append(cand)
-                                break
-                        else:
+                    suf_hits = py_suffix_index.get(mod_path)
+                    if not suf_hits:
+                        continue
+                    if pfx_ranks is None:
+                        pfx_ranks = py_prefix_rank_cache.get(cur_dir)
+                        if pfx_ranks is None:
+                            pfx_ranks = {
+                                pfx: r_idx
+                                for r_idx, pfx in enumerate(_python_candidate_prefixes(cur_dir, py_subpkg_roots))
+                            }
+                            py_prefix_rank_cache[cur_dir] = pfx_ranks
+                    best_key: Optional[Tuple[int, int]] = None
+                    best_target: Optional[str] = None
+                    for pfx, is_init, target_rel in suf_hits:
+                        if target_rel == rel:
                             continue
-                        break
+                        r_idx = pfx_ranks.get(pfx)
+                        if r_idx is None:
+                            continue
+                        cand_key = (r_idx, is_init)
+                        if best_key is None or cand_key < best_key:
+                            best_key = cand_key
+                            best_target = target_rel
+                            if r_idx == 0 and is_init == 0:
+                                break
+                    if best_target is not None:
+                        resolved.append(best_target)
         elif ext in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte"}:
             ts_base, ts_aliases = _resolve_tsconfig_for_dir(root, cur_dir, ts_cache)
             for spec in out["imports"]:
@@ -2530,13 +2654,18 @@ def build_static_import_graph(
         elif ext == ".go":
             mod_root, go_mod = _resolve_gomod_for_dir(root, cur_dir, go_cache)
             if go_mod:
+                imp_dirs: Set[str] = set()
                 for spec in out["imports"]:
                     if spec == go_mod or spec.startswith(go_mod + "/"):
                         sub_dir = spec[len(go_mod) :].lstrip("/")
                         full_dir = f"{mod_root}/{sub_dir}".strip("/") if mod_root else sub_dir
+                        if full_dir in go_dir_files:
+                            imp_dirs.add(full_dir)
                         for gf in go_dir_files.get(full_dir, ())[:3]:
                             if gf != rel:
                                 resolved.append(gf)
+                if imp_dirs and resolution_extras is not None:
+                    go_imported_dirs_by_file[rel] = imp_dirs
         elif ext == ".rs":
             if rel.startswith("src/"):
                 crate_src = "src"
@@ -2580,6 +2709,8 @@ def build_static_import_graph(
             exact_hits, group_hits = _resolve_jvm_imports_for_file(
                 rel, out["imports"], jvm_cls_map, jvm_pkg_map
             )
+            if resolution_extras is not None:
+                jvm_cs_resolved_map[rel] = (exact_hits, group_hits)
             resolved.extend(exact_hits)
             for grp in group_hits:
                 resolved.extend(grp)
@@ -2587,6 +2718,8 @@ def build_static_import_graph(
             exact_hits, group_hits = _resolve_cs_imports_for_file(
                 rel, out["imports"], cs_cls_map, cs_ns_map
             )
+            if resolution_extras is not None:
+                jvm_cs_resolved_map[rel] = (exact_hits, group_hits)
             resolved.extend(exact_hits)
             for grp in group_hits:
                 resolved.extend(grp)
@@ -2610,6 +2743,11 @@ def build_static_import_graph(
         deps[rel] = dedup
         for target in dedup:
             callers_set[target].add(rel)
+
+    if resolution_extras is not None:
+        resolution_extras["go_imported_dirs_by_file"] = go_imported_dirs_by_file
+        resolution_extras["go_files_by_dir"] = go_dir_files
+        resolution_extras["jvm_cs_resolved"] = jvm_cs_resolved_map
 
     callers = {k: sorted(v) for k, v in callers_set.items()}
     return deps, callers, outlines

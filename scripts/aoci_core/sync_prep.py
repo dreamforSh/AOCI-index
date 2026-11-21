@@ -10,6 +10,20 @@ from .constants import DEFAULT_MAX_BYTES, _is_within_root, normalize_relpath
 from .graph import build_explicit_mention_index, build_fras_graph, parse_entries_map
 from .parsers import extract_file_outline
 from .pool import count_restorable_from_pool
+from .test_impact import _load_outline_cache, is_outline_record_fresh
+
+
+def _trim_cached_outline(raw_out: Mapping[str, Any], max_items: int = 25) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "path": raw_out.get("path", ""),
+        "lines": raw_out.get("lines", 0),
+        "size_tier": raw_out.get("size_tier", "S"),
+        "imports": list(raw_out.get("imports", ()))[:max_items],
+        "symbols": list(raw_out.get("symbols", ()))[:max_items],
+    }
+    if "py_from_members" in raw_out and isinstance(raw_out["py_from_members"], list):
+        out["py_from_members"] = list(raw_out["py_from_members"])[: max_items * 4]
+    return out
 
 
 def _safe_outline(
@@ -17,7 +31,14 @@ def _safe_outline(
     rel: str,
     max_bytes: int,
     max_items: int = 25,
+    outline_cache_files: Optional[Mapping[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    if outline_cache_files is not None:
+        rec = outline_cache_files.get(rel)
+        if isinstance(rec, Mapping) and is_outline_record_fresh(root, rel, rec):
+            raw_out = rec.get("outline")
+            if isinstance(raw_out, Mapping):
+                return _trim_cached_outline(raw_out, max_items=max_items)
     full = root / rel
     if not _is_within_root(root, full):
         return None
@@ -162,27 +183,6 @@ def prepare_sync_briefing(
     fps: Dict[str, Dict[str, Any]] = drift.get("_fingerprints") or {}
     restorable = count_restorable_from_pool(root, git_info, drift)
 
-    impl_only_modified: List[Dict[str, Any]] = []
-    contract_or_unknown_modified: List[Dict[str, Any]] = []
-    contract_rels: List[str] = []
-    for item in drift.get("modified", ()):
-        rel = normalize_relpath(str(item["path"]))
-        if item.get("change_kind") == "impl_only":
-            impl_only_modified.append(dict(item))
-        else:
-            enriched = dict(item)
-            enriched["path"] = rel
-            enriched["previous_entry"] = code_entries.get(rel)
-            enriched["current_outline"] = _safe_outline(root, rel, max_bytes)
-            contract_or_unknown_modified.append(enriched)
-            contract_rels.append(rel)
-
-    diff_previews = _batch_bounded_git_diff_previews(
-        root, contract_rels, git_info, run_git_fn, max_diff_lines
-    )
-    for enriched in contract_or_unknown_modified:
-        enriched["diff_preview"] = diff_previews.get(enriched["path"], "")
-
     renames = [dict(r) for r in drift.get("renamed", ())]
     similar_renames = [dict(sr) for sr in drift.get("similar_renames", ())]
     sim_to = {normalize_relpath(str(sr["to"])) for sr in similar_renames}
@@ -212,6 +212,34 @@ def prepare_sync_briefing(
             p_raw = ln.split("[", 1)[0].strip()
             scaffold_by_path[normalize_relpath(p_raw)] = ln
 
+    outline_cache_files = _load_outline_cache(root)
+
+    impl_only_modified: List[Dict[str, Any]] = []
+    contract_or_unknown_modified: List[Dict[str, Any]] = []
+    contract_rels: List[str] = []
+    for item in drift.get("modified", ()):
+        rel = normalize_relpath(str(item["path"]))
+        if item.get("change_kind") == "impl_only":
+            impl_only_modified.append(dict(item))
+        else:
+            enriched = dict(item)
+            enriched["path"] = rel
+            enriched["previous_entry"] = code_entries.get(rel)
+            enriched["current_outline"] = _safe_outline(
+                root,
+                rel,
+                max_bytes,
+                outline_cache_files=outline_cache_files,
+            )
+            contract_or_unknown_modified.append(enriched)
+            contract_rels.append(rel)
+
+    diff_previews = _batch_bounded_git_diff_previews(
+        root, contract_rels, git_info, run_git_fn, max_diff_lines
+    )
+    for enriched in contract_or_unknown_modified:
+        enriched["diff_preview"] = diff_previews.get(enriched["path"], "")
+
     added_scaffolds: List[Dict[str, Any]] = []
     for it in added_non_sim:
         rel = normalize_relpath(str(it["path"]))
@@ -222,7 +250,12 @@ def prepare_sync_briefing(
                 "size_tier": it["size_tier"],
                 "bytes": it["bytes"],
                 "scaffold": scaffold_by_path.get(rel, ""),
-                "current_outline": _safe_outline(root, rel, max_bytes),
+                "current_outline": _safe_outline(
+                    root,
+                    rel,
+                    max_bytes,
+                    outline_cache_files=outline_cache_files,
+                ),
             }
         )
 
@@ -245,7 +278,12 @@ def prepare_sync_briefing(
                 or (cached_entries is None and set(cached_parsed.keys()) == set(code_entries.keys()))
             )
         )
-        parsed = cached_parsed if cache_usable else parse_entries_map(code_entries)
+        drift_parsed = drift.get("_parsed_entries")
+        parsed = (
+            cached_parsed
+            if cache_usable
+            else (drift_parsed if isinstance(drift_parsed, Mapping) else parse_entries_map(code_entries))
+        )
         if cache_usable and cached_dependents is not None:
             dependents = cached_dependents
         else:
