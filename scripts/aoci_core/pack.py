@@ -22,6 +22,7 @@ from .graph import (
     parse_entries_map,
     parse_entry_fields,
 )
+from .freshness import check_freshness, stale_list
 from .hubs import lookup_hub_sections
 from .parsers import extract_file_outline
 from .test_impact import find_impacted_tests, is_outline_record_fresh
@@ -265,11 +266,15 @@ def build_task_pack(
     with_tests: bool = False,
     live_test_imports: bool = False,
     test_index: Optional[Any] = None,
+    check_stale: bool = True,
+    baseline_files: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble a task-driven, token-budgeted context packet from FRAS index entries,
     bilingual glossary expansion, explicit path mentions, optional Git diff signals,
     L1.5 hub sections, impacted tests, and cached or live outline symbol anchors.
+    With `check_stale`, packed entries whose source changed since indexing are flagged
+    (`seeds[].stale`, `stale_entries`) so agents re-read them instead of trusting old summaries.
     """
     _ = domains  # Kept in public signature for callers passing full index slot context
     parsed_map: Mapping[str, ParsedEntry] = (
@@ -552,6 +557,11 @@ def build_task_pack(
         )
 
     # f) Assemble result packet
+    stale_map: Dict[str, str] = (
+        check_freshness(root, [*packed_seeds, *packed_deps, *packed_callers], baseline_files)
+        if check_stale
+        else {}
+    )
     seeds_out: List[Dict[str, Any]] = []
     for rel in packed_seeds:
         imp, _ = _entry_stats(rel)
@@ -567,6 +577,8 @@ def build_task_pack(
             seed_obj["matched_terms"] = seed_terms[rel]
         if seed_glossary.get(rel):
             seed_obj["matched_glossary"] = seed_glossary[rel]
+        if rel in stale_map:
+            seed_obj["stale"] = stale_map[rel]
         seeds_out.append(seed_obj)
 
     hub_sections_omitted = 0
@@ -691,4 +703,9 @@ def build_task_pack(
         payload["impacted_tests"] = impacted_tests
     if impacted_tests_omitted > 0:
         payload["impacted_tests_omitted"] = impacted_tests_omitted
+    if stale_map:
+        payload["stale_entries"] = stale_list(stale_map)
+    describe = getattr(bm25_index, "describe", None)
+    if callable(describe):
+        payload["retrieval"] = describe()
     return payload

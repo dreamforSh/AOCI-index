@@ -8,7 +8,7 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .constants import (
     AOCI_DIR_NAME,
@@ -232,6 +232,150 @@ def build_fras_graph(
     """Build directed edges `X -> Y` (`X` depends on `Y`) and reverse callers in O(total refs)."""
     parsed = parsed_entries if parsed_entries is not None else parse_entries_map(entries)
     return _build_fras_graph_from_parsed(set(entries.keys()), parsed)
+
+
+_EdgeContrib = Tuple[Tuple[str, ...], Tuple[str, ...]]
+
+
+def _entry_edge_contrib(rel: str, pe: ParsedEntry, known: Set[str]) -> _EdgeContrib:
+    """Edges one entry contributes: `rel -> d` for each `R:` ref `d`, `c -> rel` for each `A:` caller `c`."""
+    deps_out = tuple(d for d in extract_path_refs(pe.r, known) if d != rel)
+    callers_in = tuple(c for c in extract_path_refs(pe.a, known) if c != rel)
+    return deps_out, callers_in
+
+
+def _contrib_edges(rel: str, contrib: _EdgeContrib) -> List[Tuple[str, str]]:
+    deps_out, callers_in = contrib
+    return [(rel, d) for d in deps_out] + [(c, rel) for c in callers_in]
+
+
+class FrasGraphState:
+    """
+    FRAS dependency graph plus per-entry edge contributions and edge reference counts, so a handful of
+    changed entries can be re-applied without re-parsing every `R:` / `A:` field (`update_fras_graph_state`).
+    An edge `X -> Y` may be contributed twice (X lists Y in `R:` and Y lists X as an `A:` caller), hence counts.
+    `deps` / `dependents` match `build_fras_graph` exactly.
+    """
+
+    __slots__ = ("known", "contrib", "edge_count", "deps", "dependents")
+
+    def __init__(
+        self,
+        known: Set[str],
+        contrib: Dict[str, _EdgeContrib],
+        edge_count: Dict[Tuple[str, str], int],
+        deps: Dict[str, Set[str]],
+        dependents: Dict[str, Set[str]],
+    ) -> None:
+        self.known = known
+        self.contrib = contrib
+        self.edge_count = edge_count
+        self.deps = deps
+        self.dependents = dependents
+
+
+def build_fras_graph_state(entries: Mapping[str, str], parsed: Mapping[str, ParsedEntry]) -> FrasGraphState:
+    known = set(entries.keys())
+    deps: Dict[str, Set[str]] = {rel: set() for rel in known}
+    dependents: Dict[str, Set[str]] = {rel: set() for rel in known}
+    contrib: Dict[str, _EdgeContrib] = {}
+    edge_count: Dict[Tuple[str, str], int] = {}
+    for rel, pe in parsed.items():
+        c = _entry_edge_contrib(rel, pe, known)
+        contrib[rel] = c
+        for src, dst in _contrib_edges(rel, c):
+            edge_count[(src, dst)] = edge_count.get((src, dst), 0) + 1
+            deps[src].add(dst)
+            dependents[dst].add(src)
+    return FrasGraphState(known, contrib, edge_count, deps, dependents)
+
+
+def update_fras_graph_state(
+    state: FrasGraphState,
+    entries: Mapping[str, str],
+    parsed: Mapping[str, ParsedEntry],
+    changed: Iterable[str],
+    removed: Iterable[str],
+    max_added_paths: int = 64,
+) -> Optional[FrasGraphState]:
+    """
+    Copy-on-write update of `state` for `changed` (new or edited lines) and `removed` paths; the old state is
+    never mutated, so concurrent readers stay consistent. Entries whose unchanged text newly resolves (a path
+    they mention was added) or loses a reference (a path they point at was removed) are re-derived too.
+    Returns `None` when the delta is too large to beat a full rebuild (`max_added_paths` new paths).
+    """
+    known = set(entries.keys())
+    added_paths = known - state.known
+    removed_paths = state.known - known
+    if len(added_paths) > max_added_paths:
+        return None
+    affected: Set[str] = {rel for rel in changed if rel in known}
+    if added_paths:
+        needles = [p for p in added_paths] + [p.replace("/", "\\") for p in added_paths if "/" in p]
+        for rel, pe in parsed.items():
+            if rel not in affected and any(n in pe.r or n in pe.a for n in needles):
+                affected.add(rel)
+    for gone in removed_paths:
+        affected.update(state.deps.get(gone, ()))
+        affected.update(state.dependents.get(gone, ()))
+    affected -= removed_paths
+
+    contrib = dict(state.contrib)
+    edge_count = dict(state.edge_count)
+    deps = dict(state.deps)
+    dependents = dict(state.dependents)
+    owned_deps: Set[str] = set()
+    owned_dependents: Set[str] = set()
+
+    def _deps_of(node: str) -> Set[str]:
+        if node not in owned_deps:
+            deps[node] = set(deps.get(node, ()))
+            owned_deps.add(node)
+        return deps[node]
+
+    def _dependents_of(node: str) -> Set[str]:
+        if node not in owned_dependents:
+            dependents[node] = set(dependents.get(node, ()))
+            owned_dependents.add(node)
+        return dependents[node]
+
+    for rel in affected | removed_paths | (set(changed) & state.known):
+        old = contrib.pop(rel, None)
+        if old is None:
+            continue
+        for edge in _contrib_edges(rel, old):
+            cnt = edge_count.get(edge, 0) - 1
+            if cnt > 0:
+                edge_count[edge] = cnt
+            else:
+                edge_count.pop(edge, None)
+                src, dst = edge
+                if src in deps:
+                    _deps_of(src).discard(dst)
+                if dst in dependents:
+                    _dependents_of(dst).discard(src)
+    for gone in removed_paths:
+        deps.pop(gone, None)
+        dependents.pop(gone, None)
+    for new_p in added_paths:
+        deps[new_p] = set()
+        dependents[new_p] = set()
+        owned_deps.add(new_p)
+        owned_dependents.add(new_p)
+    for rel in affected:
+        pe = parsed.get(rel)
+        if pe is None:
+            continue
+        c = _entry_edge_contrib(rel, pe, known)
+        contrib[rel] = c
+        for edge in _contrib_edges(rel, c):
+            cnt = edge_count.get(edge, 0)
+            if cnt == 0:
+                src, dst = edge
+                _deps_of(src).add(dst)
+                _dependents_of(dst).add(src)
+            edge_count[edge] = cnt + 1
+    return FrasGraphState(known, contrib, edge_count, deps, dependents)
 
 
 def _build_explicit_mention_index_from_parsed(
@@ -1685,7 +1829,11 @@ class BM25Index:
         self.parsed: Dict[str, ParsedEntry] = {}
         self.postings: Dict[str, List[Tuple[int, float]]] = {}
         self.df: Dict[str, int] = {}
-        self.doc_meta: List[Tuple[str, str, int, float]] = []
+        # `None` marks a document tombstoned by `updated()`; its postings are skipped at query time
+        self.doc_meta: List[Optional[Tuple[str, str, int, float]]] = []
+        self._doc_terms: List[Tuple[str, ...]] = []
+        self._rel_doc: Dict[str, int] = {}
+        self._dead = 0
 
         for rel, line in sorted(entries.items()):
             pe = parsed_entries.get(rel) if parsed_entries is not None else None
@@ -1693,36 +1841,104 @@ class BM25Index:
                 pe = parse_entry(rel, line)
             if pe is None:
                 continue
-            imp = pe.imp
             self.parsed[rel] = pe
-            a_chunks = re.split(r"[,;]", pe.a)
-            a_lhs_parts = [chunk.split("<-", 1)[0] for chunk in a_chunks]
-            a_rhs_parts = [chunk.split("<-", 1)[1] for chunk in a_chunks if "<-" in chunk]
-
-            tf: Dict[str, float] = {}
-            doc_len = 0.0
-            zones = (
-                (rel, 2.5),
-                (" ".join(a_lhs_parts), 2.2),
-                (pe.f, 2.0),
-                (pe.s, 1.5),
-                (pe.r + " " + " ".join(a_rhs_parts), 1.0),
-            )
-            for z_txt, weight in zones:
-                if not z_txt or z_txt.strip() == "-":
-                    continue
-                for tok in _tokenize_search(z_txt):
-                    tf[tok] = tf.get(tok, 0.0) + weight
-                    doc_len += weight
-
+            tf, doc_len = self._doc_tf(rel, pe)
             doc_idx = len(self.doc_meta)
-            self.doc_meta.append((rel, line, imp, max(1.0, doc_len)))
+            self.doc_meta.append((rel, line, pe.imp, max(1.0, doc_len)))
+            self._doc_terms.append(tuple(tf))
+            self._rel_doc[rel] = doc_idx
             for tok, freq in tf.items():
                 self.postings.setdefault(tok, []).append((doc_idx, freq))
                 self.df[tok] = self.df.get(tok, 0) + 1
+        self._finalize_stats()
 
-        self.n_docs = len(self.doc_meta)
-        self.avgdl = (sum(d[3] for d in self.doc_meta) / self.n_docs) if self.n_docs else 1.0
+    @staticmethod
+    def _doc_tf(rel: str, pe: ParsedEntry) -> Tuple[Dict[str, float], float]:
+        a_chunks = re.split(r"[,;]", pe.a)
+        a_lhs_parts = [chunk.split("<-", 1)[0] for chunk in a_chunks]
+        a_rhs_parts = [chunk.split("<-", 1)[1] for chunk in a_chunks if "<-" in chunk]
+        tf: Dict[str, float] = {}
+        doc_len = 0.0
+        zones = (
+            (rel, 2.5),
+            (" ".join(a_lhs_parts), 2.2),
+            (pe.f, 2.0),
+            (pe.s, 1.5),
+            (pe.r + " " + " ".join(a_rhs_parts), 1.0),
+        )
+        for z_txt, weight in zones:
+            if not z_txt or z_txt.strip() == "-":
+                continue
+            for tok in _tokenize_search(z_txt):
+                tf[tok] = tf.get(tok, 0.0) + weight
+                doc_len += weight
+        return tf, doc_len
+
+    def _finalize_stats(self) -> None:
+        alive = [meta[3] for meta in self.doc_meta if meta is not None]
+        self.n_docs = len(alive)
+        # `fsum` is order-independent, so incremental updates reproduce a fresh build's `avgdl` bit-for-bit
+        self.avgdl = (math.fsum(alive) / self.n_docs) if self.n_docs else 1.0
+
+    def updated(
+        self,
+        changed: Mapping[str, str],
+        removed: Iterable[str],
+        parsed_entries: Optional[Mapping[str, ParsedEntry]] = None,
+        compact_ratio: float = 0.5,
+    ) -> "BM25Index":
+        """
+        Return a NEW index reflecting `changed` (new or edited lines) and `removed` paths (copy-on-write:
+        only touched posting lists are copied; `self` stays valid for concurrent readers). Scores match a
+        fresh build exactly. Rebuilds from scratch once tombstones exceed `compact_ratio` of live docs.
+        """
+        new = BM25Index.__new__(BM25Index)
+        new.parsed = dict(self.parsed)
+        new.postings = dict(self.postings)
+        new.df = dict(self.df)
+        new.doc_meta = list(self.doc_meta)
+        new._doc_terms = list(self._doc_terms)
+        new._rel_doc = dict(self._rel_doc)
+        new._dead = self._dead
+        owned: Set[str] = set()
+        for rel in set(removed) | set(changed):
+            idx = new._rel_doc.pop(rel, None)
+            if idx is None:
+                continue
+            for tok in new._doc_terms[idx]:
+                cnt = new.df.get(tok, 0) - 1
+                if cnt > 0:
+                    new.df[tok] = cnt
+                else:
+                    new.df.pop(tok, None)
+            new.doc_meta[idx] = None
+            new._doc_terms[idx] = ()
+            new.parsed.pop(rel, None)
+            new._dead += 1
+        for rel in sorted(changed):
+            line = changed[rel]
+            pe = parsed_entries.get(rel) if parsed_entries is not None else None
+            if pe is None:
+                pe = parse_entry(rel, line)
+            if pe is None:
+                continue
+            new.parsed[rel] = pe
+            tf, doc_len = BM25Index._doc_tf(rel, pe)
+            doc_idx = len(new.doc_meta)
+            new.doc_meta.append((rel, line, pe.imp, max(1.0, doc_len)))
+            new._doc_terms.append(tuple(tf))
+            new._rel_doc[rel] = doc_idx
+            for tok, freq in tf.items():
+                if tok not in owned:
+                    new.postings[tok] = list(new.postings.get(tok, ()))
+                    owned.add(tok)
+                new.postings[tok].append((doc_idx, freq))
+                new.df[tok] = new.df.get(tok, 0) + 1
+        if new._dead > max(64, int(len(new._rel_doc) * compact_ratio)):
+            live = {meta[0]: meta[1] for meta in new.doc_meta if meta is not None}
+            return BM25Index(live, parsed_entries=new.parsed)
+        new._finalize_stats()
+        return new
 
     def _search_internal(
         self,
@@ -1746,11 +1962,16 @@ class BM25Index:
             plist = self.postings.get(qt)
             if not plist:
                 continue
-            doc_f = self.df[qt]
+            doc_f = self.df.get(qt, 0)
+            if doc_f <= 0:
+                continue
             idf = math.log(1.0 + (self.n_docs - doc_f + 0.5) / (doc_f + 0.5))
             g_sources = token_sources.get(qt) or ()
             for doc_idx, freq in plist:
-                rel, _, _, dl = self.doc_meta[doc_idx]
+                meta = self.doc_meta[doc_idx]
+                if meta is None:
+                    continue
+                rel, _, _, dl = meta
                 if candidate_paths is not None and rel not in candidate_paths:
                     continue
                 denom = freq + k1 * (1.0 - b + b * (dl / self.avgdl))
@@ -1767,7 +1988,7 @@ class BM25Index:
         for doc_idx, raw_score in scores.items():
             if raw_score <= 0.0:
                 continue
-            rel, line, imp, _ = self.doc_meta[doc_idx]
+            rel, line, imp, _ = self.doc_meta[doc_idx]  # type: ignore[misc]
             sc = raw_score * (1.0 + 0.06 * (imp - 5))
             ranked.append((sc, imp, rel, line, doc_idx))
 

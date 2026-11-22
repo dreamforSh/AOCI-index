@@ -60,6 +60,8 @@ Subcommands:
   batch-pack          Assemble a self-contained subagent work-pack for batch N.
   ci-check            CI-native architecture guard (SARIF 2.1.0, GitHub Actions,
                       PR Markdown, layer redlines, cycles, and PR diff impact).
+  eval                Score retrieval + `pack` against task cases (recall@k, MRR,
+                      seed/pack recall); compare `bm25` vs opt-in `hybrid` retrieval.
 
 All index writers serialize through `.aoci/.lock` so parallel agents cannot lose
 updates.
@@ -202,11 +204,14 @@ _LAZY_MODULES: Dict[str, str] = {
     "_diff_brief": "diff_brief",
     "_discovery": "discovery",
     "_doctor": "doctor",
+    "_evalbench": "evalbench",
+    "_freshness": "freshness",
     "_drift": "drift",
     "_git_ops": "git_ops",
     "_githooks": "githooks",
     "_graph": "graph",
     "_hubs": "hubs",
+    "_hybrid": "hybrid",
     "_ignore": "ignore",
     "_lock": "lock",
     "_pack": "pack",
@@ -256,6 +261,8 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, ...]] = {
         "attach_line_sketches", "discover_and_fingerprint", "discover_candidates", "fingerprint_file",
         "inspect_and_fingerprint_one",
     ),
+    "evalbench": ("load_eval_cases", "run_eval"),
+    "freshness": ("check_freshness", "load_baseline_files"),
     "doctor": (
         "run_index_doctor",
     ),
@@ -281,8 +288,9 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, ...]] = {
         "export_dependency_graph", "extract_path_refs", "find_dangling_refs", "find_dependency_cycles",
         "lint_entries", "parse_entries_map", "parse_entry", "parse_entry_fields", "parse_glossary",
         "parse_layer_rules", "path_ref_pattern", "rewrite_path_refs", "semantic_word_count",
-        "validate_parsed_entry_tags",
+        "validate_parsed_entry_tags", "FrasGraphState", "build_fras_graph_state", "update_fras_graph_state",
     ),
+    "hybrid": ("HybridIndex", "TrigramIndex"),
     "ignore": (
         "IgnoreMatcher", "_glob_to_regex", "_read_ignore_lines", "is_probably_binary_bytes", "load_aociignore",
         "install_manifest_dirs", "load_ignore_matcher", "matches_ignore", "path_skip_reason",

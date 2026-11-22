@@ -13,6 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 treesitter = ["tree-sitter-language-pack>=0.6.0"]
+embed = ["model2vec>=0.3"]
 
 [project.scripts]
 aoci-index = "aoci_index:main"

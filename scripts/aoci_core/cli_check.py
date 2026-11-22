@@ -739,3 +739,47 @@ def cmd_ci_check(args: argparse.Namespace) -> int:
 
     print(rendered, end="")
     return 1 if (getattr(args, "strict", False) and not report["ok"]) else 0
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Score retrieval + `pack` against task cases (`recall@k`, `precision@k`, `MRR`, seed/pack recall)."""
+    from . import evalbench as _evalbench
+    from . import hybrid as _hybrid
+
+    root = _git_ops.resolve_root(args.root)
+    as_json = bool(getattr(args, "json", False))
+    if not (root / AOCI_DIR_NAME / CODE_FILE).exists():
+        return _cli_read._emit_cli_error(as_json, f"`{root / AOCI_DIR_NAME / CODE_FILE}` not found. Run `init` first.", 2)
+    cases_path = _resolve_cli_file_path(root, args.cases, must_exist=True)
+    if not cases_path.is_file():
+        return _cli_read._emit_cli_error(as_json, f"Cases file `{cases_path}` not found.", 2)
+    modes = [m.strip().lower() for m in str(args.modes or "bm25").split(",") if m.strip()]
+    bad = [m for m in modes if m not in _evalbench.EVAL_MODES]
+    if bad or not modes:
+        return _cli_read._emit_cli_error(
+            as_json, f"Unknown --modes {bad or modes}; choose from {', '.join(_evalbench.EVAL_MODES)}.", 2
+        )
+    try:
+        cases = _evalbench.load_eval_cases(cases_path)
+    except (OSError, _evalbench.EvalCaseError) as exc:
+        return _cli_read._emit_cli_error(as_json, str(exc), 2)
+
+    result = _evalbench.run_eval(
+        root,
+        cases,
+        modes=modes,
+        k=args.k,
+        budget=args.budget,
+        depth=args.depth,
+        top_seeds=args.top_seeds,
+        hybrid_options=_hybrid.options_from(args),
+    )
+    failures = _evalbench.threshold_failures(result, args.min_recall, args.min_pack_recall)
+    result["gate_failures"] = failures
+    if as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(_evalbench.format_eval_text(result), end="")
+        for msg in failures:
+            print(f"[AOCI Eval] GATE FAILED: {msg}", file=sys.stderr)
+    return 1 if failures else 0

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import audit as _audit
 from . import diff_brief as _diff_brief
+from . import freshness as _freshness
 from . import git_ops as _git_ops
 from . import graph as _graph
 from . import hubs as _hubs
@@ -265,16 +266,26 @@ def cmd_query(args: argparse.Namespace) -> int:
 
     scores_out: Optional[List[Dict[str, Any]]] = None
     glossary_expansions: List[Dict[str, Any]] = []
+    retrieval_info: Optional[Dict[str, Any]] = None
     if search_q:
         glossary = parse_glossary(root / AOCI_DIR_NAME)
-        hits, glossary_expansions = search_entries_bm25_detailed(
-            entries,
-            search_q,
-            candidate_paths=filtered_paths,
-            top_k=top_k,
-            glossary=glossary,
-            parsed_entries=parsed_map,
-        )
+        if getattr(args, "hybrid", False):
+            from . import hybrid as _hybrid
+
+            h_idx = _hybrid.HybridIndex(entries, parsed_entries=parsed_map, root=root, **_hybrid.options_from(args))
+            hits, glossary_expansions = h_idx.search_detailed(
+                search_q, candidate_paths=filtered_paths, top_k=top_k, glossary=glossary
+            )
+            retrieval_info = h_idx.describe()
+        else:
+            hits, glossary_expansions = search_entries_bm25_detailed(
+                entries,
+                search_q,
+                candidate_paths=filtered_paths,
+                top_k=top_k,
+                glossary=glossary,
+                parsed_entries=parsed_map,
+            )
         results = [h["entry"] for h in hits]
         scores_out = hits
         if impacted_tests is not None:
@@ -285,6 +296,13 @@ def cmd_query(args: argparse.Namespace) -> int:
         if impacted_tests is not None:
             impacted_tests = impacted_tests[:top_k]
 
+    result_paths = (
+        [str(h["path"]) for h in scores_out]
+        if scores_out is not None
+        else [normalize_relpath(ln.split("[", 1)[0].strip()) for ln in results]
+    )
+    stale_map = _freshness.check_freshness(root, result_paths)
+
     if args.json:
         payload: Dict[str, Any] = {"count": len(results), "entries": results}
         if scores_out is not None:
@@ -293,9 +311,16 @@ def cmd_query(args: argparse.Namespace) -> int:
             payload["glossary_expansions"] = glossary_expansions
         if impacted_tests is not None:
             payload["impacted_tests"] = impacted_tests
+        if retrieval_info is not None:
+            payload["retrieval"] = retrieval_info
+        if stale_map:
+            payload["stale_entries"] = _freshness.stale_list(stale_map)
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"# Query matches: {len(results)} / {len(entries)}")
+        if retrieval_info is not None:
+            warn_txt = f" | {'; '.join(retrieval_info['warnings'])}" if retrieval_info.get("warnings") else ""
+            print(f"# Retrieval: hybrid ({', '.join(retrieval_info['channels'])}){warn_txt}")
         if glossary_expansions:
             exp_txt = "; ".join(f"{e['term']} -> {', '.join(e['aliases'])}" for e in glossary_expansions)
             print(f"# Glossary: {exp_txt}")
@@ -308,13 +333,19 @@ def cmd_query(args: argparse.Namespace) -> int:
                     else ""
                 )
                 print(f"#   match: score={item['score']}, terms=[{', '.join(item.get('matched_terms', []))}]{g_note}")
+                if item["path"] in stale_map:
+                    print(f"#   ! stale: {_freshness.stale_note(stale_map[item['path']])}")
         elif impacted_tests is not None:
             for item in impacted_tests:
                 print(item["entry"])
                 print(f"#   test-impact: reason={item['reason']}, hop={item['hop']}, via={item['via']}")
+                if item["path"] in stale_map:
+                    print(f"#   ! stale: {_freshness.stale_note(stale_map[item['path']])}")
         else:
-            for line in results:
+            for line, rel in zip(results, result_paths):
                 print(line)
+                if rel in stale_map:
+                    print(f"#   ! stale: {_freshness.stale_note(stale_map[rel])}")
     return 0
 
 
@@ -371,6 +402,7 @@ def cmd_context(args: argparse.Namespace) -> int:
         )
     _graph.attach_budgeted_context_extras(payload, raw_hub_secs, raw_tests, args.paths, budget)
     hub_secs = payload.get("hub_sections") or []
+    _freshness.annotate_payload_freshness(root, payload)
 
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -398,6 +430,8 @@ def cmd_context(args: argparse.Namespace) -> int:
         print(ln)
     if with_tests:
         _print_impacted_tests(payload.get("impacted_tests", []))
+    for stale_ln in _freshness.format_stale_lines(payload.get("stale_entries") or []):
+        print(stale_ln)
     if payload.get("truncated"):
         print(f"\n# Omitted under --budget ({payload['omitted_count']}): {', '.join(payload['omitted_paths'])}")
     return 0
@@ -542,10 +576,13 @@ def cmd_pack(args: argparse.Namespace) -> int:
         if cand_diff.get("ok"):
             diff_brief = cand_diff
 
-    if entries:
+    bm25: Any = None
+    if entries and getattr(args, "hybrid", False):
+        from . import hybrid as _hybrid
+
+        bm25 = _hybrid.HybridIndex(entries, parsed_entries=parsed_map, root=root, **_hybrid.options_from(args))
+    elif entries:
         bm25 = _graph.BM25Index(entries, parsed_entries=parsed_map)
-    else:
-        bm25 = None
     pack_obj = _pack.build_task_pack(
         root,
         entries,
@@ -579,6 +616,10 @@ def cmd_pack(args: argparse.Namespace) -> int:
     print(f"# AOCI Task Pack (depth={args.depth}, {budget_str})")
     print(f"# Task: {pack_obj['task']}")
     print(f"# Global-Invariants: {pack_obj['global_invariants']}")
+    if pack_obj.get("retrieval"):
+        r_info = pack_obj["retrieval"]
+        warn_txt = f" | {'; '.join(r_info['warnings'])}" if r_info.get("warnings") else ""
+        print(f"# Retrieval: hybrid ({', '.join(r_info['channels'])}){warn_txt}")
     if pack_obj.get("glossary_expansions"):
         exp_txt = "; ".join(f"{e['term']} -> {', '.join(e['aliases'])}" for e in pack_obj["glossary_expansions"])
         print(f"# Glossary: {exp_txt}")
@@ -589,7 +630,8 @@ def cmd_pack(args: argparse.Namespace) -> int:
     print(f"\n## Seeds ({len(pack_obj['seeds'])})")
     for seed in pack_obj["seeds"]:
         reasons_str = ",".join(seed["reasons"])
-        print(f"{seed['entry']}  # [{reasons_str}, score={seed['score']}]")
+        stale_txt = f", STALE:{seed['stale']}" if seed.get("stale") else ""
+        print(f"{seed['entry']}  # [{reasons_str}, score={seed['score']}{stale_txt}]")
     if pack_obj.get("hub_sections"):
         print(f"\n## Hub Sections ({len(pack_obj['hub_sections'])})")
         for sec in pack_obj["hub_sections"]:
@@ -611,6 +653,8 @@ def cmd_pack(args: argparse.Namespace) -> int:
             print(f"  - {item['path']} ({item['kind']}: {', '.join(item['reasons'])}){syms}")
     if pack_obj.get("impacted_tests"):
         _print_impacted_tests(pack_obj["impacted_tests"])
+    for stale_ln in _freshness.format_stale_lines(pack_obj.get("stale_entries") or []):
+        print(stale_ln)
     if pack_obj.get("truncated") and pack_obj.get("omitted_paths"):
         print(f"\n# Omitted under --budget ({pack_obj['omitted_count']}): {', '.join(pack_obj['omitted_paths'])}")
     return 0

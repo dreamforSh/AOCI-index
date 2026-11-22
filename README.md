@@ -96,6 +96,8 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
         <li><b>Task-Driven Context Packing</b> — <code>pack</code> / <code>aoci_pack</code> builds token-budgeted packets from BM25, bilingual glossary expansion, explicit path mentions (<code>PathMentionIndex</code>), L1.5 hub sections, and working-tree Git diffs.</li>
         <li><b>Impacted Test Derivation</b> — <code>--with-tests</code> on <code>context</code>, <code>diff</code>, and <code>pack</code> (plus <code>--tests-for</code> / <code>tests_for</code> on <code>query</code>) attaches impacted T-layer tests via FRAS graph hops, warm static imports, and multi-language naming conventions; <code>--live-test-imports</code> inspects uncached tests in memory.</li>
         <li><b>Cold-Cache Live Anchors</b> — <code>--live-anchors</code> extracts symbol anchors when the outline cache is cold without writing to disk.</li>
+        <li><b>Stale-Entry Flags</b> — <code>query</code>, <code>context</code>, and <code>pack</code> (CLI &amp; MCP) mark returned entries whose source changed since indexing (<code>stale_entries</code>, <code>seeds[].stale</code>), so agents re-read the file instead of trusting an old summary.</li>
+        <li><b>Opt-In Hybrid Retrieval &amp; Eval Harness</b> — <code>--hybrid</code> / <code>hybrid: true</code> fuses BM25 with a zero-dependency char-trigram channel (plus optional <code>model2vec</code> embeddings via <code>[embed]</code>) using Reciprocal Rank Fusion; <code>eval</code> scores recall@k, MRR, and seed/pack recall against task cases (<code>examples/eval/self-eval.jsonl</code>).</li>
       </ul>
     </td>
   </tr>
@@ -111,7 +113,7 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
     <td width="50%" valign="top">
       <p><img src="https://api.iconify.design/lucide/shield-check.svg?color=%236366F1" width="18" height="18" align="top" alt=""> <b>MCP, CI Guard &amp; 6-Host Setup</b></p>
       <ul>
-        <li><b>Modern MCP <code>2025-06-18</code> Server</b> — <code>aoci_mcp.py</code> serves <b>29 annotated tools</b> (with <code>outputSchema</code> &amp; <code>structuredContent</code>), <code>roots/list</code> multi-root discovery, <code>resources/subscribe</code> live update notifications, <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 prompts</b>.</li>
+        <li><b>Modern MCP <code>2025-06-18</code> Server</b> — <code>aoci_mcp.py</code> serves <b>29 annotated tools</b> (with <code>outputSchema</code> &amp; <code>structuredContent</code>), <code>roots/list</code> multi-root discovery, <code>resources/subscribe</code> live update notifications (including a background watcher for changes made outside the server), copy-on-write incremental cache refresh after edits, <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 prompts</b>.</li>
         <li><b>CI Guard &amp; Diff-Colored Graph Export</b> — <code>ci-check</code> / <code>aoci_ci_check</code> (plus root <code>action.yml</code>) checks layer rules, Tarjan cycles, and PR diff test impact even in zero-index CI runners, emitting SARIF 2.1.0, GitHub annotations, or PR Markdown; <code>export --format html --diff</code> highlights changed and affected nodes.</li>
         <li><b>6-Host Installer &amp; Guardrails</b> — One-command setup and surgical uninstall for <b>Claude Code</b>, <b>Antigravity</b>, <b>Codex</b>, <b>Cursor</b>, <b>Windsurf</b>, and <b>VS Code / Copilot</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
       </ul>
@@ -190,6 +192,7 @@ python scripts/install.py --host all --scope global --with-hooks --with-mcp
 ```bash
 pip install -e .                  # zero runtime dependencies
 pip install -e ".[treesitter]"    # optional tree-sitter AST accelerator
+pip install -e ".[embed]"         # optional model2vec dense channel for --hybrid --embed-backend model2vec
 aoci-index --version              # aoci-index 1.6.0
 aoci-mcp                          # launches the stdio MCP server
 aoci-hook --help                  # multi-host lifecycle hook runner
@@ -244,11 +247,11 @@ flowchart LR
 | Action | CLI (`python scripts/aoci_index.py ...`) | MCP Tool (`scripts/aoci_mcp.py`) |
 | :--- | :--- | :--- |
 | Digest & core hubs | `overview --root <repo>` | `aoci_overview` |
-| Search / impact / tests | `query --root <repo> --search "<terms>"` / `--tests-for <path>` | `aoci_query` (`tests_for`, `live_test_imports`) |
+| Search / impact / tests | `query --root <repo> --search "<terms>" [--hybrid]` / `--tests-for <path>` | `aoci_query` (`tests_for`, `live_test_imports`, `hybrid`) |
 | Cross-file symbol lookup | `symbol <name> --root <repo> [--exact] [--live]` | `aoci_symbol` |
 | Graph-pruned symbol refs | `refs <symbol> --root <repo> [--path <def>] [--include-defs]` | `aoci_refs` |
 | Dependency subgraph | `context <path> --root <repo> --depth 1 [--with-tests]` | `aoci_context` (`with_tests`) |
-| Task-driven context pack | `pack --task "<description>" --root <repo> [--budget 2500] [--with-tests] [--live-anchors]` | `aoci_pack` |
+| Task-driven context pack | `pack --task "<description>" --root <repo> [--budget 2500] [--with-tests] [--live-anchors] [--hybrid]` | `aoci_pack` (`hybrid`) |
 | Diff impact briefing | `diff [rev] --root <repo> [--with-tests]` | `aoci_diff` (`with_tests`) |
 | Static outline | `outline <paths...> --root <repo>` | `aoci_outline` |
 | Graph export (Mermaid/DOT/HTML) | `export --root <repo> --format mermaid\|dot\|html [--diff]` | `aoci_export` (`diff`, `diff_rev`, `output`) |
@@ -278,6 +281,7 @@ flowchart LR
 | Mechanical self-healer | `doctor --root <repo> [--sync-static-r] [--dry-run]` | `aoci_doctor` |
 | Architecture & cycle audit | `audit --root <repo> [--co-change [--exclude-tests]]` | `aoci_audit` (`exclude_tests`) |
 | CI guard (SARIF/GitHub/PR) | `ci-check --root <repo> [--base-rev <rev>] [--format sarif\|github\|markdown] [--markdown-output <file>]` | `aoci_ci_check` (`sarif_output`, `markdown_output`) |
+| Retrieval / pack quality eval | `eval --root <repo> --cases <cases.jsonl> [--modes bm25,hybrid] [--k 8] [--min-recall 0.8]` | — (CLI only) |
 | Per-directory shards | `shard --root <repo> [--depth 1 \| --clean]` | `aoci_shard` |
 | Semantic pool cache | `pool stats\|export\|import --root <repo>` | `aoci_pool` |
 | Repair Git exclusion | `ensure-git-exclude --root <repo>` | `aoci_ensure_git_exclude` |
@@ -293,6 +297,8 @@ Speaks MCP JSON-RPC 2.0 over stdio (`2024-11-05` · `2025-03-26` · `2025-06-18`
 | **URI Templates (2)** | `aoci://shards/{shard}` · `aoci://{volume}?root={root}` |
 | **Prompts (3)** | `aoci-bootstrap` · `aoci-review-diff` · `aoci-sync` |
 
+Subscribed resources are also polled in the background (`stat` only, every `AOCI_MCP_WATCH_INTERVAL` seconds, default `2`, `0` disables), so edits made by the CLI, Git hooks, or editors push `notifications/resources/updated` without waiting for the next tool call.
+
 ## <img src="https://api.iconify.design/lucide/book-open.svg?color=%236366F1" width="24" height="24" align="top" alt=""> Documentation & Testing
 
 | Topic | Link |
@@ -306,6 +312,9 @@ Speaks MCP JSON-RPC 2.0 over stdio (`2024-11-05` · `2025-03-26` · `2025-06-18`
 # Run with base Python on PATH (stdlib unittest only, requires git)
 python -B tests/test_aoci.py
 python -B -m unittest discover -s tests -p "test_*.py"
+
+# Measure retrieval quality on AOCI-index itself (after the zero-token self-pool bootstrap from Quick Start):
+python scripts/aoci_index.py eval --root . --cases examples/eval/self-eval.jsonl --modes bm25,hybrid --budget 1000
 
 # After modifying scripts/ (or other pooled files), refresh examples/self-pool.json.gz:
 python -B .github/scripts/refresh_self_pool.py

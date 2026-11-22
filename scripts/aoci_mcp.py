@@ -58,6 +58,11 @@ class _MemoryIndexCache:
         self._outline_slots: "OrderedDict[str, Tuple[Any, Dict[str, Any]]]" = OrderedDict()
         self._hub_slots: "OrderedDict[str, Tuple[Any, List[Dict[str, Any]]]]" = OrderedDict()
         self._diff_slots: "OrderedDict[str, Tuple[Any, float, Dict[str, Any]]]" = OrderedDict()
+        self._baseline_slots: "OrderedDict[str, Tuple[Any, Dict[str, Any]]]" = OrderedDict()
+        # Slots evicted by `invalidate()`: never served, only reused as the base for an incremental refresh
+        self._stale_bases: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # Last slot refresh per root: `{"mode": "hit"|"incremental"|"full", "ms", "changed", "removed"}`
+        self.last_refresh: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _canonical_root(root: Path) -> Tuple[Path, str]:
@@ -82,15 +87,30 @@ class _MemoryIndexCache:
                 self._root_locks.pop(oldest_k, None)
             return rlk
 
-    def invalidate(self, root: Path) -> None:
+    def invalidate(self, root: Path, drop: bool = False) -> None:
+        """
+        Evict the root's live slot so the next `get()` re-reads the volume. The evicted slot is parked in
+        `_stale_bases` (never served) so that refresh can re-apply only the changed entries; `drop=True`
+        discards it as well.
+        """
         _, root_key = self._canonical_root(root)
         raw_key = str(root)
         with self._lock:
             for key in (root_key, raw_key):
-                self._slots.pop(key, None)
+                old_slot = self._slots.pop(key, None)
+                if drop:
+                    self._stale_bases.pop(key, None)
+                elif old_slot is not None:
+                    self._stale_bases[key] = old_slot
+                    self._stale_bases.move_to_end(key)
+                    while len(self._stale_bases) > self._max_slots:
+                        self._stale_bases.popitem(last=False)
                 self._outline_slots.pop(key, None)
                 self._hub_slots.pop(key, None)
                 self._diff_slots.pop(key, None)
+
+    _INCREMENTAL_MAX_RATIO = 0.25
+    _INCREMENTAL_MIN_DELTA = 256
 
     def get(self, root: Path) -> Optional[Dict[str, Any]]:
         resolved, root_key = self._canonical_root(root)
@@ -99,7 +119,7 @@ class _MemoryIndexCache:
         root_lock = self._get_root_lock(root_key)
         with root_lock:
             if not code_path.is_file():
-                self.invalidate(root)
+                self.invalidate(root, drop=True)
                 return None
             key = (
                 aoci_index._stat_key(code_path),
@@ -112,38 +132,27 @@ class _MemoryIndexCache:
                 if cached is not None and cached.get("key") == key:
                     self._slots.move_to_end(root_key)
                     return cached
+                if cached is None:
+                    cached = self._stale_bases.pop(root_key, None)
 
-            duplicates: List[str] = []
-            raw_code_texts: List[str] = []
-            entries, malformed = aoci_index.parse_code_volume(
-                code_path, duplicates=duplicates, raw_text_out=raw_code_texts
-            )
-            parsed = aoci_index.parse_entries_map(entries)
-            deps, dependents = aoci_index.build_fras_graph(entries, parsed_entries=parsed)
-            mention_index = aoci_index.PathMentionIndex(sorted(entries.keys()))
-            estimated_tokens = (
-                aoci_index.estimate_tokens(raw_code_texts[0])
-                if raw_code_texts
-                else max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
-            )
-            slot: Dict[str, Any] = {
-                "key": key,
-                "_lock": root_lock,
-                "entries": entries,
-                "parsed": parsed,
-                "malformed": malformed,
-                "duplicates": duplicates,
-                "deps": deps,
-                "dependents": dependents,
-                "mention_index": mention_index,
-                "bm25": None,
-                "test_index_entry": None,
-                "glossary": aoci_index.parse_glossary(aoci_dir),
-                "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or resolved.name,
-                "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
-                "git_hdr": aoci_index.parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown",
-                "domains": aoci_index.parse_declared_domains(aoci_dir),
-                "estimated_tokens": estimated_tokens,
+            t0 = time.perf_counter()
+            slot: Optional[Dict[str, Any]] = None
+            if (
+                cached is not None
+                and cached.get("graph_state") is not None
+                and tuple(cached.get("key") or ())[1:] == key[1:]
+            ):
+                slot = self._refresh_incremental(cached, key, code_path)
+            mode = "incremental"
+            if slot is None:
+                slot = self._build_full(resolved, aoci_dir, code_path, key, root_lock)
+                mode = "full"
+            delta = slot.pop("_delta", (len(slot["entries"]), 0))
+            self.last_refresh[root_key] = {
+                "mode": mode,
+                "ms": round((time.perf_counter() - t0) * 1000.0, 2),
+                "changed": delta[0],
+                "removed": delta[1],
             }
             with self._lock:
                 self._slots[root_key] = slot
@@ -151,6 +160,147 @@ class _MemoryIndexCache:
                 while len(self._slots) > self._max_slots:
                     self._slots.popitem(last=False)
             return slot
+
+    @staticmethod
+    def _estimate_volume_tokens(entries: Dict[str, str], raw_code_texts: List[str]) -> int:
+        if raw_code_texts:
+            return aoci_index.estimate_tokens(raw_code_texts[0])
+        return max(1, sum(aoci_index.estimate_tokens(ln) for ln in entries.values()) + 20)
+
+    def _build_full(
+        self,
+        resolved: Path,
+        aoci_dir: Path,
+        code_path: Path,
+        key: Tuple[Any, ...],
+        root_lock: threading.RLock,
+    ) -> Dict[str, Any]:
+        duplicates: List[str] = []
+        raw_code_texts: List[str] = []
+        entries, malformed = aoci_index.parse_code_volume(
+            code_path, duplicates=duplicates, raw_text_out=raw_code_texts
+        )
+        parsed = aoci_index.parse_entries_map(entries)
+        graph_state = aoci_index._graph.build_fras_graph_state(entries, parsed)
+        return {
+            "key": key,
+            "_lock": root_lock,
+            "entries": entries,
+            "parsed": parsed,
+            "malformed": malformed,
+            "duplicates": duplicates,
+            "deps": graph_state.deps,
+            "dependents": graph_state.dependents,
+            "graph_state": graph_state,
+            "mention_index": aoci_index.PathMentionIndex(sorted(entries.keys())),
+            "bm25": None,
+            "hybrid": {},
+            "test_index_entry": None,
+            "glossary": aoci_index.parse_glossary(aoci_dir),
+            "project": aoci_index.parse_manifest_field(aoci_dir, "#Project:") or resolved.name,
+            "invariants": aoci_index.parse_manifest_field(aoci_dir, "#Global-Invariants:") or "-",
+            "git_hdr": aoci_index.parse_manifest_field(aoci_dir, "#Git-Excluded:") or "unknown",
+            "domains": aoci_index.parse_declared_domains(aoci_dir),
+            "estimated_tokens": self._estimate_volume_tokens(entries, raw_code_texts),
+        }
+
+    def _refresh_incremental(
+        self,
+        cached: Dict[str, Any],
+        key: Tuple[Any, ...],
+        code_path: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Re-read `aoci.code.txt` and re-apply only changed / removed entries to the parsed map, graph state,
+        mention index, and (if built) BM25, all copy-on-write. `None` means "do a full rebuild" (large delta).
+        """
+        duplicates: List[str] = []
+        raw_code_texts: List[str] = []
+        entries, malformed = aoci_index.parse_code_volume(
+            code_path, duplicates=duplicates, raw_text_out=raw_code_texts
+        )
+        old_entries: Dict[str, str] = cached["entries"]
+        changed = {rel: line for rel, line in entries.items() if old_entries.get(rel) != line}
+        removed = [rel for rel in old_entries if rel not in entries]
+        if len(changed) + len(removed) > max(self._INCREMENTAL_MIN_DELTA, int(len(entries) * self._INCREMENTAL_MAX_RATIO)):
+            return None
+        parsed = dict(cached["parsed"])
+        for rel in removed:
+            parsed.pop(rel, None)
+        for rel, line in changed.items():
+            pe = aoci_index.parse_entry(rel, line)
+            if pe is None:
+                parsed.pop(rel, None)
+            else:
+                parsed[rel] = pe
+        graph_state = aoci_index._graph.update_fras_graph_state(
+            cached["graph_state"], entries, parsed, changed, removed
+        )
+        if graph_state is None:
+            return None
+        same_paths = not removed and all(rel in old_entries for rel in changed)
+        bm25 = cached.get("bm25")
+        if bm25 is not None and (changed or removed):
+            bm25 = bm25.updated(changed, removed, parsed)
+        slot = dict(cached)
+        slot.update(
+            {
+                "key": key,
+                "entries": entries,
+                "parsed": parsed,
+                "malformed": malformed,
+                "duplicates": duplicates,
+                "deps": graph_state.deps,
+                "dependents": graph_state.dependents,
+                "graph_state": graph_state,
+                "mention_index": (
+                    cached["mention_index"] if same_paths else aoci_index.PathMentionIndex(sorted(entries.keys()))
+                ),
+                "bm25": bm25,
+                "hybrid": {} if (changed or removed) else cached.get("hybrid", {}),
+                "test_index_entry": None if (changed or removed) else cached.get("test_index_entry"),
+                "estimated_tokens": self._estimate_volume_tokens(entries, raw_code_texts),
+                "_delta": (len(changed), len(removed)),
+            }
+        )
+        return slot
+
+    def get_baseline_files(self, root: Path) -> Dict[str, Any]:
+        """`baseline.json` `files`, cached by file stat (freshness checks on read results)."""
+        resolved, root_key = self._canonical_root(root)
+        bp = resolved / aoci_index.AOCI_DIR_NAME / aoci_index.BASELINE_FILE
+        st_key = aoci_index._stat_key(bp) if bp.is_file() else None
+        with self._lock:
+            cached = self._baseline_slots.get(root_key)
+            if cached is not None and cached[0] == st_key:
+                self._baseline_slots.move_to_end(root_key)
+                return cached[1]
+        files = aoci_index._freshness.load_baseline_files(resolved) if st_key is not None else {}
+        with self._lock:
+            self._baseline_slots[root_key] = (st_key, files)
+            self._baseline_slots.move_to_end(root_key)
+            while len(self._baseline_slots) > self._max_slots:
+                self._baseline_slots.popitem(last=False)
+        return files
+
+    def get_hybrid(self, root: Path, slot: Dict[str, Any], opts: Mapping[str, Any]) -> Any:
+        """Lazily build (and cache per slot + options) a `HybridIndex` sharing the slot's BM25 index."""
+        opt_key = tuple(sorted((str(k), str(v)) for k, v in opts.items()))
+        slot_lock = slot.get("_lock") or self._lock
+        with slot_lock:
+            per_slot = slot.setdefault("hybrid", {})
+            idx = per_slot.get(opt_key)
+            if idx is None:
+                resolved, _ = self._canonical_root(root)
+                idx = aoci_index._hybrid.HybridIndex(
+                    slot["entries"],
+                    parsed_entries=slot["parsed"],
+                    root=resolved,
+                    bm25_index=self.get_bm25(slot),
+                    **dict(opts),
+                )
+                per_slot[opt_key] = idx
+            return idx
 
     def get_bm25(self, slot: Dict[str, Any]) -> aoci_index.BM25Index:
         slot_lock = slot.get("_lock") or self._lock
@@ -366,7 +516,11 @@ def update_client_roots(roots_items: Any) -> List[str]:
         if collected:
             _CLIENT_ROOT_HINTS[:] = collected
             _CLIENT_ROOT_HINT = _select_default_root_hint() or collected[0]
-        return list(_CLIENT_ROOT_HINTS)
+        hints_now = list(_CLIENT_ROOT_HINTS)
+    watcher = globals().get("_WATCHER")
+    if collected and watcher is not None:
+        watcher.reset_targets()
+    return hints_now
 
 
 def _notify_resource_updates(mutated_root: Path) -> None:
@@ -403,6 +557,9 @@ def _on_root_mutated(root: Path, ok: bool = True) -> None:
     _CACHE.invalidate(root)
     if ok:
         _notify_resource_updates(root)
+    watcher = globals().get("_WATCHER")
+    if watcher is not None:
+        watcher.resync_root(root)
 
 
 def _file_uri_to_path(uri: str, require_dir: bool = True) -> Optional[str]:
@@ -485,6 +642,21 @@ _STRUCTURED_OBJECT_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 
+_HYBRID_INPUT_PROPS: Dict[str, Any] = {
+    "hybrid": {
+        "type": "boolean",
+        "default": False,
+        "description": "Fuse BM25 with a char-trigram channel (+ optional dense embeddings) via RRF",
+    },
+    "embed_backend": {
+        "type": "string",
+        "enum": ["none", "model2vec"],
+        "description": "Optional dense channel for `hybrid` (default: $AOCI_EMBED_BACKEND or none)",
+    },
+    "embed_model": {"type": "string", "description": "Dense model name for `embed_backend`"},
+}
+
+
 TOOLS_SPEC: List[Dict[str, Any]] = [
     {
         "name": "aoci_init",
@@ -544,6 +716,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                 },
                 "depth": {"type": "integer", "default": 1, "description": "Transitive hops for `impact` (default 1) or `tests_for` (default 3)"},
                 "top": {"type": "integer", "default": 20, "description": "Maximum entries to return (0 = unlimited)"},
+                **_HYBRID_INPUT_PROPS,
             },
             "required": ["root"],
         },
@@ -876,6 +1049,7 @@ TOOLS_SPEC: List[Dict[str, Any]] = [
                     "description": "Token budget ceiling (0 = unlimited)",
                 },
                 "top_seeds": {"type": "integer", "default": 8, "description": "Maximum BM25 seed hits"},
+                **_HYBRID_INPUT_PROPS,
                 "with_tests": {
                     "type": "boolean",
                     "default": False,
@@ -1658,8 +1832,13 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             if not search_q:
                 matched_lines = [item["entry"] for item in impacted_tests]
 
+        retrieval_info: Optional[Dict[str, Any]] = None
         if search_q:
-            bm25 = _CACHE.get_bm25(slot)
+            if args.get("hybrid"):
+                bm25 = _CACHE.get_hybrid(root, slot, aoci_index._hybrid.options_from(args))
+                retrieval_info = bm25.describe()
+            else:
+                bm25 = _CACHE.get_bm25(slot)
             glossary = slot.get("glossary", ())
             if hasattr(bm25, "search_detailed"):
                 hits, expansions = bm25.search_detailed(
@@ -1690,6 +1869,15 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             res_obj = {"count": len(matched_lines), "entries": matched_lines}
         if impacted_tests is not None:
             res_obj["impacted_tests"] = impacted_tests
+        if retrieval_info is not None:
+            res_obj["retrieval"] = retrieval_info
+        if "scores" in res_obj:
+            q_paths = [str(h["path"]) for h in res_obj["scores"]]
+        else:
+            q_paths = [aoci_index.normalize_relpath(ln.split("[", 1)[0].strip()) for ln in res_obj["entries"]]
+        q_stale = aoci_index._freshness.check_freshness(root, q_paths, _CACHE.get_baseline_files(root))
+        if q_stale:
+            res_obj["stale_entries"] = aoci_index._freshness.stale_list(q_stale)
         return False, json.dumps(res_obj, indent=2, ensure_ascii=False)
 
     if name == "aoci_context":
@@ -1742,6 +1930,9 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             raw_tests,
             [str(p) for p in raw_paths],
             budget,
+        )
+        aoci_index._freshness.annotate_payload_freshness(
+            root, payload, baseline_files=_CACHE.get_baseline_files(root)
         )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -2053,7 +2244,10 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             cand_diff = _CACHE.get_working_diff_briefing(root, slot, hub_records)
             if cand_diff.get("ok"):
                 diff_brief = cand_diff
-        bm25 = _CACHE.get_bm25(slot)
+        if args.get("hybrid"):
+            bm25 = _CACHE.get_hybrid(root, slot, aoci_index._hybrid.options_from(args))
+        else:
+            bm25 = _CACHE.get_bm25(slot)
         depth_val = int(args["depth"]) if args.get("depth") is not None else 1
         budget_val = int(args["budget"]) if args.get("budget") is not None else 2500
         top_seeds_val = int(args["top_seeds"]) if args.get("top_seeds") is not None else 8
@@ -2082,6 +2276,7 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
             with_tests=with_tests_pack,
             live_test_imports=live_ti_pack,
             test_index=t_idx_pack,
+            baseline_files=_CACHE.get_baseline_files(root),
         )
         return False, json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -2358,7 +2553,8 @@ def call_tool(name: str, args: Dict[str, Any]) -> Tuple[bool, str]:
     return True, f"Unknown tool: `{name}`"
 
 
-def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str]]]:
+def _resource_target_path(uri: str) -> Tuple[Optional[Path], Optional[Tuple[int, str]]]:
+    """Resolve an `aoci://` resource URI to its backing file (which may not exist yet)."""
     parsed = urllib.parse.urlparse(uri)
     if parsed.scheme != "aoci":
         return None, (-32602, f"Unsupported resource URI scheme: `{uri}`")
@@ -2387,10 +2583,144 @@ def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str
         target_path = aoci_dir / aoci_index.SHARDS_DIR / fname
     else:
         return None, (-32602, f"Unknown AOCI resource URI: `{uri}`")
+    return target_path, None
 
+
+def _read_resource_uri(uri: str) -> Tuple[Optional[str], Optional[Tuple[int, str]]]:
+    target_path, err = _resource_target_path(uri)
+    if target_path is None:
+        return None, err
     if not target_path.is_file():
         return None, (-32002, f"Resource file does not exist: `{target_path}`")
     return target_path.read_text(encoding="utf-8-sig", errors="replace"), None
+
+
+_WATCH_MISSING = object()
+
+
+class _ResourceWatcher:
+    """
+    Background poller for subscribed `aoci://` resources. Pushes `notifications/resources/updated` when a
+    backing file changes outside this server (CLI `upsert`, Git hooks after a checkout, editors), so clients
+    re-read without waiting for their next tool call. Polls only `stat` of subscribed files, does nothing
+    without subscriptions, and is re-synced after this server's own mutations to avoid duplicate pushes.
+    Interval: `AOCI_MCP_WATCH_INTERVAL` seconds (default 2.0; `0` disables).
+    """
+
+    def __init__(self, interval: float) -> None:
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._seen: Dict[str, Any] = {}
+        self._targets: Dict[str, Optional[Path]] = {}  # URI -> backing file, resolved once per subscription
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def reset_targets(self) -> None:
+        """Drop cached URI resolutions (client roots changed, so root-less URIs may point elsewhere)."""
+        with self._lock:
+            self._targets.clear()
+
+    def _stat_of(self, uri: str) -> Tuple[Optional[Path], Any]:
+        with self._lock:
+            cached = self._targets.get(uri, _WATCH_MISSING)
+        if cached is _WATCH_MISSING:
+            cached, _ = _resource_target_path(uri)
+            with self._lock:
+                self._targets[uri] = cached
+        target = cached
+        if target is None:
+            return None, _WATCH_MISSING
+        return target, (aoci_index._stat_key(target) if target.is_file() else None)
+
+    def observe(self, uri: str) -> None:
+        """Record the current state of `uri` as the baseline (called on `resources/subscribe`)."""
+        with self._lock:
+            self._targets.pop(uri, None)
+        _, st_key = self._stat_of(uri)
+        if st_key is not _WATCH_MISSING:
+            with self._lock:
+                self._seen[uri] = st_key
+
+    def forget(self, uri: str) -> None:
+        with self._lock:
+            self._seen.pop(uri, None)
+            self._targets.pop(uri, None)
+
+    def resync_root(self, root: Path) -> None:
+        """Re-baseline subscribed URIs under `root/.aoci` after a mutation this server already notified."""
+        try:
+            aoci_dir = (root / aoci_index.AOCI_DIR_NAME).resolve()
+        except OSError:
+            aoci_dir = root / aoci_index.AOCI_DIR_NAME
+        with _STATE_LOCK:
+            subscribed = sorted(_SUBSCRIBED_URIS)
+        for uri in subscribed:
+            target, st_key = self._stat_of(uri)
+            if target is None or st_key is _WATCH_MISSING:
+                continue
+            try:
+                under = os.path.commonpath([str(aoci_dir), str(target.resolve())]) == str(aoci_dir)
+            except (OSError, ValueError):
+                under = False
+            if under:
+                with self._lock:
+                    self._seen[uri] = st_key
+
+    def poll_once(self) -> List[Dict[str, Any]]:
+        """Return `notifications/resources/updated` messages for subscribed URIs whose file changed."""
+        with _STATE_LOCK:
+            subscribed = sorted(_SUBSCRIBED_URIS)
+        out: List[Dict[str, Any]] = []
+        with self._lock:
+            for gone in [u for u in self._seen if u not in subscribed]:
+                self._seen.pop(gone, None)
+                self._targets.pop(gone, None)
+        for uri in subscribed:
+            _, st_key = self._stat_of(uri)
+            if st_key is _WATCH_MISSING:
+                continue
+            with self._lock:
+                prev = self._seen.get(uri, _WATCH_MISSING)
+                self._seen[uri] = st_key
+            if prev is not _WATCH_MISSING and prev != st_key:
+                out.append({"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}})
+        return out
+
+    def start(self, emit: Any) -> None:
+        if self.interval <= 0 or self._thread is not None:
+            return
+
+        def _run() -> None:
+            while not self._stop.wait(self.interval):
+                try:
+                    msgs = self.poll_once()
+                    if msgs:
+                        emit(msgs)
+                except Exception:  # a watcher hiccup must never take the stdio server down
+                    continue
+
+        self._thread = threading.Thread(target=_run, name="aoci-mcp-watcher", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=max(1.0, self.interval * 2))
+        self._thread = None
+
+
+def _watch_interval_from_env() -> float:
+    raw = os.environ.get("AOCI_MCP_WATCH_INTERVAL", "").strip()
+    if not raw:
+        return 2.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 2.0
+
+
+_WATCHER = _ResourceWatcher(_watch_interval_from_env())
 
 
 def _render_prompt(name: str, arguments: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -2533,12 +2863,14 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return _err(-32602, f"Invalid or unsupported resource URI for subscribe: `{uri}`")
         with _STATE_LOCK:
             _SUBSCRIBED_URIS.add(uri)
+        _WATCHER.observe(uri)
         return _ok({})
 
     if method == "resources/unsubscribe":
         uri = str(params.get("uri", "")).strip()
         with _STATE_LOCK:
             _SUBSCRIBED_URIS.discard(uri)
+        _WATCHER.forget(uri)
         return _ok({})
 
     if method == "resources/read":
@@ -2581,13 +2913,19 @@ def handle_rpc_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return _err(-32601, f"Method not found: {method}")
 
 
+_WRITE_LOCK = threading.Lock()
+# Framing of the most recent client message, reused for watcher pushes (which have no request to mirror)
+_LAST_FRAMING: Dict[str, bool] = {"use_headers": False}
+
+
 def _write_rpc_payload(raw_out: Any, payload: Any, use_headers: bool) -> None:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if use_headers:
-        raw_out.write(f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii") + encoded)
-    else:
-        raw_out.write(encoded + b"\n")
-    raw_out.flush()
+    framed = (
+        f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii") + encoded if use_headers else encoded + b"\n"
+    )
+    with _WRITE_LOCK:  # the resource watcher writes from its own thread
+        raw_out.write(framed)
+        raw_out.flush()
 
 
 def _flush_outbound_queue(raw_out: Any, use_headers: bool) -> None:
@@ -2610,6 +2948,11 @@ def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
             prev_stdout_fb = sys.stdout.set_fallback(err_fb)
             redirected_stdout_fb = True
 
+    def _emit_watch(msgs: List[Dict[str, Any]]) -> None:
+        for msg in msgs:
+            _write_rpc_payload(raw_out, msg, _LAST_FRAMING["use_headers"])
+
+    _WATCHER.start(_emit_watch)
     try:
         while True:
             first_line = raw_in.readline()
@@ -2681,6 +3024,7 @@ def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
             else:
                 body = stripped
 
+            _LAST_FRAMING["use_headers"] = use_headers
             try:
                 req = json.loads(body.decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
@@ -2727,6 +3071,7 @@ def serve_stdio(in_stream: Any = None, out_stream: Any = None) -> int:
                 _write_rpc_payload(raw_out, resp, use_headers)
             _flush_outbound_queue(raw_out, use_headers)
     finally:
+        _WATCHER.stop()
         if redirected_stdout_fb and isinstance(sys.stdout, _StreamRouter):
             sys.stdout.set_fallback(prev_stdout_fb)
     return 0

@@ -35,6 +35,7 @@ cmd_lint = _lazy_cmd("cli_check", "cmd_lint")
 cmd_prepare_sync = _lazy_cmd("cli_check", "cmd_prepare_sync")
 cmd_scan = _lazy_cmd("cli_check", "cmd_scan")
 cmd_verify = _lazy_cmd("cli_check", "cmd_verify")
+cmd_eval = _lazy_cmd("cli_check", "cmd_eval")
 
 cmd_context = _lazy_cmd("cli_read", "cmd_context")
 cmd_export = _lazy_cmd("cli_read", "cmd_export")
@@ -91,6 +92,26 @@ class _SelectiveSubparsers:
             return self._action.add_parser(name, **kwargs)
         self._action.add_parser(name, help=kwargs.get("help"), add_help=False)
         return _NULL_PARSER
+
+
+def _add_retrieval_args(p: Any) -> None:
+    """Shared opt-in hybrid retrieval flags (`query`, `pack`, `eval`); env defaults resolve at run time."""
+    p.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="Fuse BM25 with a zero-dependency char-trigram channel (+ optional dense embeddings) via RRF",
+    )
+    p.add_argument(
+        "--embed-backend",
+        choices=["none", "model2vec"],
+        default=None,
+        help="Optional dense channel for --hybrid (default: $AOCI_EMBED_BACKEND or none; model2vec needs `[embed]`)",
+    )
+    p.add_argument(
+        "--embed-model",
+        default=None,
+        help="Dense model name for --embed-backend (default: $AOCI_EMBED_MODEL or minishlab/potion-base-8M)",
+    )
 
 
 def requested_subcommand(argv: Optional[Sequence[str]]) -> Optional[str]:
@@ -272,6 +293,7 @@ def build_parser(only: Optional[str] = None) -> argparse.ArgumentParser:
         help="Read uncached T-layer test imports in memory when outline_cache.json is missing/stale",
     )
     p_q.add_argument("--depth", type=int, default=None, help="Transitive hops (default: 1 for --impact, 3 for --tests-for)")
+    _add_retrieval_args(p_q)
     p_q.add_argument("--json", action="store_true", help="Output JSON")
     p_q.set_defaults(func=cmd_query)
 
@@ -467,6 +489,7 @@ def build_parser(only: Optional[str] = None) -> argparse.ArgumentParser:
     )
     p_pack.add_argument("--live-anchors", action="store_true", help="Extract live symbol anchors in memory when outline cache misses")
     p_pack.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    _add_retrieval_args(p_pack)
     p_pack.add_argument("--json", action="store_true", help="Output JSON")
     p_pack.set_defaults(func=cmd_pack)
 
@@ -608,6 +631,29 @@ def build_parser(only: Optional[str] = None) -> argparse.ArgumentParser:
     p_doc.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     p_doc.add_argument("--json", action="store_true", help="Output JSON")
     p_doc.set_defaults(func=cmd_doctor)
+
+    p_eval = sub.add_parser(
+        "eval",
+        help="Score retrieval + `pack` against task cases (recall@k, precision@k, MRR, seed/pack recall)",
+    )
+    p_eval.add_argument("--cases", required=True, help="Task cases file (`.jsonl` or `.json`: {task, expected[], id?, tags?})")
+    p_eval.add_argument("--root", help="Target codebase root")
+    p_eval.add_argument("--modes", default="bm25", help="Comma-separated retrieval modes to compare: `bm25`, `hybrid` (default: bm25)")
+    p_eval.add_argument("--k", type=int, default=8, help="Ranking cutoff for recall@k / precision@k (default: 8)")
+    p_eval.add_argument("--budget", type=int, default=2500, help="Token budget for the evaluated packs (default: 2500)")
+    p_eval.add_argument("--depth", type=int, default=1, help="Graph expansion hops for the evaluated packs (default: 1)")
+    p_eval.add_argument("--top-seeds", type=int, default=8, help="Seed hits per pack (default: 8)")
+    p_eval.add_argument("--min-recall", type=float, default=None, help="Exit 1 when mean recall@k falls below this value")
+    p_eval.add_argument("--min-pack-recall", type=float, default=None, help="Exit 1 when mean pack recall falls below this value")
+    p_eval.add_argument(
+        "--embed-backend",
+        choices=["none", "model2vec"],
+        default=None,
+        help="Optional dense channel for `hybrid` mode (default: $AOCI_EMBED_BACKEND or none)",
+    )
+    p_eval.add_argument("--embed-model", default=None, help="Dense model name for --embed-backend")
+    p_eval.add_argument("--json", action="store_true", help="Output JSON")
+    p_eval.set_defaults(func=cmd_eval)
 
     if selective is not None and not selective.matched:
         return build_parser()

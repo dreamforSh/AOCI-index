@@ -1,0 +1,36 @@
+# AOCI-index self-evaluation cases for `aoci_index.py eval` (bootstrap the index from examples/self-pool.json.gz first).
+# Tasks are phrased the way a developer would report them, NOT copied from FRAS entries, so the scores stay honest.
+{"id": "mcp-framing", "task": "MCP server drops requests when the client uses Content-Length header framing", "expected": ["scripts/aoci_mcp.py"], "tags": ["mcp"]}
+{"id": "mcp-notify", "task": "resources/subscribe never pushes an updated notification after an upsert", "expected": ["scripts/aoci_mcp.py"], "tags": ["mcp"]}
+{"id": "lock-stale", "task": "a crashed writer leaves the index lock behind and every later upsert times out", "expected": ["scripts/aoci_core/lock.py"], "tags": ["sync"]}
+{"id": "rename-moved-edited", "task": "files that were moved and slightly edited are reported as add plus delete instead of a rename", "expected": ["scripts/aoci_core/drift.py", "scripts/aoci_core/discovery.py"], "tags": ["drift"]}
+{"id": "ignore-negation", "task": "negated gitignore patterns like !keep.py are ignored during file discovery", "expected": ["scripts/aoci_core/ignore.py"], "tags": ["discovery"]}
+{"id": "ci-sarif", "task": "add a new forbidden layer edge rule and report it in the SARIF output of the CI guard", "expected": ["scripts/aoci_core/ci_check.py"], "tags": ["ci"]}
+{"id": "bm25-glossary", "task": "ranked search should expand bilingual glossary aliases before scoring", "expected": ["scripts/aoci_core/graph.py"], "tags": ["search"]}
+{"id": "install-cursor", "task": "project scoped install for Cursor writes the MCP server config to the wrong file", "expected": ["scripts/aoci_core/installer.py"], "tags": ["install"]}
+{"id": "stop-hook-blame", "task": "the Stop hook blames drift that already existed before the session started", "expected": ["scripts/aoci_hook.py"], "tags": ["hooks"]}
+{"id": "pool-hubs-restore", "task": "after switching branches the zero-token restore brings back file entries but loses symbol hub sections", "expected": ["scripts/aoci_core/pool.py", "scripts/aoci_core/hubs.py"], "tags": ["pool"]}
+{"id": "zoom-spans", "task": "symbol zoom on a large hub file returns line spans that are off after edits", "expected": ["scripts/aoci_core/hubs.py"], "tags": ["hubs"]}
+{"id": "tests-go", "task": "impacted tests are not found for Go packages when deriving test impact", "expected": ["scripts/aoci_core/test_impact.py"], "tags": ["tests"]}
+{"id": "pack-budget", "task": "the task context packet goes over its token budget when hub sections are included", "expected": ["scripts/aoci_core/pack.py"], "tags": ["pack"]}
+{"id": "ts-alias", "task": "TypeScript tsconfig path aliases are not resolved in the static import graph", "expected": ["scripts/aoci_core/parsers.py"], "tags": ["parsers"]}
+{"id": "concurrent-upsert", "task": "two agents running upsert at the same time lose one of the updates", "expected": ["scripts/aoci_core/write_ops.py", "scripts/aoci_core/lock.py"], "tags": ["sync"]}
+{"id": "shards", "task": "split the code volume into per directory shard files for a huge monorepo", "expected": ["scripts/aoci_core/shards.py"], "tags": ["scale"]}
+{"id": "cochange", "task": "find files that always change together in git history but are not linked in the index", "expected": ["scripts/aoci_core/cochange.py"], "tags": ["audit"]}
+{"id": "html-export", "task": "interactive HTML dependency graph export should highlight files touched by the current diff", "expected": ["scripts/aoci_core/graph.py"], "tags": ["export"]}
+{"id": "batch-renumber", "task": "finishing batch 1 renumbers the remaining indexing batches", "expected": ["scripts/aoci_core/batches.py"], "tags": ["bootstrap"]}
+{"id": "contract-delta", "task": "diff briefing does not say which function signatures changed", "expected": ["scripts/aoci_core/diff_brief.py", "scripts/aoci_core/parsers.py"], "tags": ["diff"]}
+{"id": "doctor-dangling", "task": "automatically remove read-along references that point at deleted files", "expected": ["scripts/aoci_core/doctor.py"], "tags": ["repair"]}
+{"id": "refs-callsites", "task": "list every call site of a function across the repository", "expected": ["scripts/aoci_core/refs.py"], "tags": ["symbols"]}
+{"id": "release-repro", "task": "release tarball and zip are not byte for byte reproducible between builds", "expected": [".github/scripts/build_release.py"], "tags": ["release"]}
+{"id": "treesitter-threads", "task": "the optional tree-sitter accelerator crashes when the import graph runs on worker threads", "expected": ["scripts/aoci_core/ts_accel.py"], "tags": ["parsers"]}
+{"id": "prepare-sync-outline", "task": "the single pass sync briefing should include outlines for files whose contract changed", "expected": ["scripts/aoci_core/sync_prep.py"], "tags": ["sync"]}
+{"id": "apply-sync-order", "task": "one-shot sync must run restore, rename migration, ack, upsert and verify in that order", "expected": ["scripts/aoci_core/apply_sync.py"], "tags": ["sync"]}
+{"id": "git-post-checkout", "task": "install a local post-checkout git hook that restores the index after branch switches", "expected": ["scripts/aoci_core/githooks.py", "scripts/aoci_core/git_ops.py"], "tags": ["hooks"]}
+{"id": "symbol-lookup", "task": "look up where a symbol is defined using hubs and cached outlines", "expected": ["scripts/aoci_core/symbols.py"], "tags": ["symbols"]}
+{"id": "subagent-workpack", "task": "give each parallel subagent a self contained work pack with source excerpts for its batch", "expected": ["scripts/aoci_core/batch_pack.py"], "tags": ["bootstrap"]}
+{"id": "help-snapshot", "task": "the CLI help snapshot test fails after adding a new command line flag", "expected": ["tests/test_facade_and_cli_snapshot.py", "scripts/aoci_core/cli_parser.py"], "tags": ["tests"]}
+{"id": "zh-mcp-subscribe", "task": "修复 aoci_mcp 资源订阅后没有推送更新通知的问题", "expected": ["scripts/aoci_mcp.py"], "tags": ["mcp", "zh"]}
+{"id": "zh-lock", "task": "写入锁 .aoci/.lock 在进程崩溃后无法回收", "expected": ["scripts/aoci_core/lock.py"], "tags": ["sync", "zh"]}
+{"id": "github-action", "task": "composite GitHub Action should upload SARIF and write a step summary", "expected": ["action.yml"], "tags": ["ci"]}
+{"id": "self-pool-refresh", "task": "examples self pool bundle hashes are out of date after editing scripts", "expected": [".github/scripts/refresh_self_pool.py"], "tags": ["release"]}
