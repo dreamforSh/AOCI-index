@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import hashlib
 import heapq
 import json
@@ -240,7 +239,11 @@ def _sketch_similarity(sk_a: Optional[Sequence[int]], sk_b: Optional[Sequence[in
     return len(shared) / len(union_top)
 
 
-def _fingerprint_bytes_norm(normalized: bytes, st: os.stat_result) -> Dict[str, Any]:
+def _fingerprint_bytes_norm(normalized: bytes, st: os.stat_result, with_sketch: bool = True) -> Dict[str, Any]:
+    """
+    Fingerprint normalized-LF bytes. `with_sketch=False` skips the MinHash line sketch (roughly 40% of
+    per-file cost); `compute_drift` attaches sketches later only for real rename candidates.
+    """
     lines = 0 if not normalized else normalized.count(b"\n") + (0 if normalized.endswith(b"\n") else 1)
     fp: Dict[str, Any] = {
         "sha256": hashlib.sha256(normalized).hexdigest(),
@@ -249,7 +252,7 @@ def _fingerprint_bytes_norm(normalized: bytes, st: os.stat_result) -> Dict[str, 
         "size_tier": compute_size_tier(lines),
         "mtime_ns": st.st_mtime_ns,
     }
-    if lines >= MIN_RENAME_LINES:
+    if with_sketch and lines >= MIN_RENAME_LINES:
         sketch = _line_sketch(normalized)
         if sketch is not None:
             fp["sketch"] = sketch
@@ -265,6 +268,31 @@ def _fingerprint_bytes(raw: bytes, st: os.stat_result) -> Dict[str, Any]:
     return _fingerprint_bytes_norm(normalized, st)
 
 
+def attach_line_sketches(root: Path, fingerprints: Dict[str, Dict[str, Any]], rels: Sequence[str]) -> int:
+    """
+    Compute deferred MinHash sketches in place for `rels` (fingerprints produced with `with_sketch=False`).
+    Re-reads each candidate once and only attaches a sketch when the content still matches the recorded
+    SHA-256, so a file edited mid-scan can never pair with a stale sketch. Returns the number attached.
+    """
+    attached = 0
+    for rel in rels:
+        fp = fingerprints.get(rel)
+        if fp is None or "sketch" in fp or int(fp.get("lines", 0) or 0) < MIN_RENAME_LINES:
+            continue
+        try:
+            raw = (root / rel).read_bytes()
+        except OSError:
+            continue
+        normalized = raw.replace(b"\r\n", b"\n") if b"\r\n" in raw else raw
+        if hashlib.sha256(normalized).hexdigest() != fp.get("sha256"):
+            continue
+        sketch = _line_sketch(normalized)
+        if sketch is not None:
+            fp["sketch"] = sketch
+            attached += 1
+    return attached
+
+
 def inspect_and_fingerprint_one(
     root: Path,
     rel: str,
@@ -272,6 +300,7 @@ def inspect_and_fingerprint_one(
     cached: Optional[Dict[str, Any]],
     fast_mtime: bool,
     max_bytes: int,
+    with_sketch: bool = True,
 ) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
     """
     Single-stat, single-read file classifier + fingerprinter.
@@ -316,7 +345,7 @@ def inspect_and_fingerprint_one(
         return rel, None, "binary-content"
 
     normalized = raw.replace(b"\r\n", b"\n") if b"\r\n" in raw else raw
-    fp = _fingerprint_bytes_norm(normalized, st)
+    fp = _fingerprint_bytes_norm(normalized, st, with_sketch=with_sketch)
     if (
         cached is not None
         and fp["sha256"] != cached.get("sha256")
@@ -332,6 +361,7 @@ def _try_git_incremental_scan(
     extra_ignores: Any,
     base_files: Dict[str, Any],
     max_bytes: int,
+    with_sketch: bool = True,
 ) -> Optional[Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]]:
     """
     10k-file Git fast path: when `.git/index` and ignore files match cached stats, run a single
@@ -397,6 +427,8 @@ def _try_git_incremental_scan(
     probe_results: List[Tuple[str, Optional[Dict[str, Any]], Optional[str]]]
     if len(sorted_probe) >= PARALLEL_HASH_THRESHOLD:
         workers = min(8, max(2, (os.cpu_count() or 4) * 2))
+        import concurrent.futures  # deferred: pulls in `logging` (~20ms cold start)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
                 pool.submit(
@@ -407,13 +439,14 @@ def _try_git_incremental_scan(
                     base_files.get(rel),
                     True,
                     max_bytes,
+                    with_sketch=with_sketch,
                 )
                 for rel in sorted_probe
             ]
             probe_results = [fut.result() for fut in futures]
     else:
         probe_results = [
-            inspect_and_fingerprint_one(root, rel, None, base_files.get(rel), True, max_bytes)
+            inspect_and_fingerprint_one(root, rel, None, base_files.get(rel), True, max_bytes, with_sketch=with_sketch)
             for rel in sorted_probe
         ]
 
@@ -560,15 +593,17 @@ def discover_and_fingerprint(
     git_incremental: bool = False,
     read_scan_cache: bool = True,
     save_scan_cache: bool = False,
+    with_sketch: bool = True,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, int]]:
     """
     Discover eligible source files and compute fingerprints in one pass (multi-threaded on large cold scans).
     When `fast_mtime=True` and `read_scan_cache=True`, unindexed files also reuse `.aoci/.cache/scan_fps.json`
     on matching non-racy `(mtime_ns, bytes)`, keeping `baseline.json` strictly human-verified.
+    `with_sketch=False` defers MinHash sketches (see `attach_line_sketches`) for read-only drift scans.
     """
     use_git_inc = skip_paths is None and (git_incremental or (fast_mtime and len(base_files) >= GIT_FAST_AUTO_THRESHOLD))
     if use_git_inc:
-        inc = _try_git_incremental_scan(root, git_info, extra_ignores, base_files, max_bytes)
+        inc = _try_git_incremental_scan(root, git_info, extra_ignores, base_files, max_bytes, with_sketch=with_sketch)
         if inc is not None:
             return inc
 
@@ -614,6 +649,8 @@ def discover_and_fingerprint(
 
     if need_io >= PARALLEL_HASH_THRESHOLD:
         workers = min(8, max(2, (os.cpu_count() or 4) * 2))
+        import concurrent.futures  # deferred: pulls in `logging` (~20ms cold start)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
                 pool.submit(
@@ -624,6 +661,7 @@ def discover_and_fingerprint(
                     _cached_fp_for(rel),
                     fast_mtime,
                     max_bytes,
+                    with_sketch=with_sketch,
                 )
                 for rel, st in candidates
             ]
@@ -631,7 +669,11 @@ def discover_and_fingerprint(
                 _collect(*fut.result())
     else:
         for rel, st in candidates:
-            _collect(*inspect_and_fingerprint_one(root, rel, st, _cached_fp_for(rel), fast_mtime, max_bytes))
+            _collect(
+                *inspect_and_fingerprint_one(
+                    root, rel, st, _cached_fp_for(rel), fast_mtime, max_bytes, with_sketch=with_sketch
+                )
+            )
 
     if save_scan_cache and skip_paths is None and aoci_dir.is_dir():
         _save_scan_fp_cache(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import contextlib
 import json
 import os
@@ -66,6 +65,8 @@ def _populate_missing_sig_hashes(root: Path, fp_targets: Dict[str, Dict[str, Any
         return
     if len(todo) >= 32:
         workers = min(8, os.cpu_count() or 4)
+        import concurrent.futures  # deferred: pulls in `logging` (~20ms cold start)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             for rel, sig_h in zip(todo, ex.map(lambda r: _parsers.compute_signature_hash(root / r, r), todo)):
                 if sig_h is not None:

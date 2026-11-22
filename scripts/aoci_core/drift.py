@@ -165,6 +165,7 @@ def compute_drift(
         max_bytes=max_bytes,
         git_incremental=git_incremental,
         save_scan_cache=save_scan_cache,
+        with_sketch=False,  # MinHash sketches are attached below only for real rename candidates
     )
 
     current_set = set(fingerprints.keys())
@@ -275,6 +276,11 @@ def compute_drift(
     deleted = [p for p in raw_deleted if p not in matched_deleted]
     orphan_in_code = sorted(code_set - current_set)
 
+    # Exact renames carry their fingerprint into `baseline.json` via `migrate-renames`, so give them the
+    # sketch that discovery deferred (keeps future moved+edited detection working for these files).
+    if renamed:
+        _discovery.attach_line_sketches(root, fingerprints, [r["to"] for r in renamed])
+
     # Detect moved+edited files ("similar renames") via an inverted MinHash posting list + O(S) bucket
     # tie resolution (scales linearly to bulk directory moves of hundreds/thousands of files).
     similar_renames: List[Dict[str, Any]] = []
@@ -283,6 +289,9 @@ def compute_drift(
         for old_rel in deleted
         if old_rel in base_files and base_files[old_rel].get("sketch")
     ]
+    if del_sketches and added:
+        # Sketch new files lazily: only now (a deleted baseline entry could have moved) is the cost justified.
+        _discovery.attach_line_sketches(root, fingerprints, [it["path"] for it in added])
     add_sketches = [
         (it, fingerprints[it["path"]])
         for it in added

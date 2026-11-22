@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import concurrent.futures
 import hashlib
 import json
 import os
@@ -2719,6 +2718,8 @@ def build_static_import_graph(
         cache_dirty = True
         if len(to_extract) >= PARALLEL_HASH_THRESHOLD:
             workers = min(8, max(2, (os.cpu_count() or 4) * 2))
+            import concurrent.futures  # deferred: pulls in `logging` (~20ms cold start)
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                 futs = [
                     (rel, m_ns, sz, pool.submit(extractor, root / rel, rel, 40))

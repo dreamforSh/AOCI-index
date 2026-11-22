@@ -55,7 +55,7 @@ def _set_cli_runner(runner: Callable[[Sequence[str]], int]) -> None:
 def _invoke_cli_runner(argv: Sequence[str]) -> int:
     if _CLI_RUNNER is not None:
         return _CLI_RUNNER(argv)
-    from .cli_parser import run_cli  # pragma: no cover
+    from .cli_parser import run_cli  # imported lazily: `cli_parser` dispatches back into this module
 
     return run_cli(argv)
 

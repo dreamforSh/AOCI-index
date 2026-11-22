@@ -80,6 +80,7 @@ python scripts/install.py --host both --scope global --uninstall
 - Each install writes `.aoci-install.json` (file hashes). Re-installing over a copy you edited locally — or over an existing non-empty directory without `.aoci-install.json` whose ownership cannot be verified (e.g., manual install) — aborts unless you pass `--force`.
 - Global hooks default to the absolute base interpreter that ran the installer (never a virtualenv's interpreter, and never the Windows Store `python` stub). Project-scoped hooks keep portable `python`/`python3`. Override either default with `--python-cmd`.
 - Regression suite (stdlib `unittest`, needs `git`): `python tests/test_aoci.py`.
+- Bytecode cache: when `aoci_index.py`, `aoci_hook.py`, or `aoci_mcp.py` run as scripts, they cache `.pyc` files under a per-user `sys.pycache_prefix` (`%LOCALAPPDATA%\aoci-index\pycache`, `~/Library/Caches/aoci-index/pycache`, or `${XDG_CACHE_HOME:-~/.cache}/aoci-index/pycache`). Nothing is ever written into the installed skill directory, so `.aoci-install.json` hash checks stay clean. Disable it with `AOCI_NO_PYCACHE=1`, `python -B`, or `PYTHONDONTWRITEBYTECODE=1`. On Windows without long-path support, very deep install paths fall back to no cache.
 
 ---
 

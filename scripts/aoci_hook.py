@@ -42,13 +42,16 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-# Import sibling module cleanly regardless of process CWD without cluttering __pycache__
+# Import sibling module cleanly regardless of process CWD, never writing `.pyc` beside the skill sources.
 sys.dont_write_bytecode = True
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import aoci_index  # noqa: E402
+
+if __name__ == "__main__":
+    aoci_index._configure_bytecode_cache()  # per-user `sys.pycache_prefix` for the lazily imported core
 
 SESSION_TTL_S = 7 * 24 * 3600
 

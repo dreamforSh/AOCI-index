@@ -83,11 +83,11 @@ class P0P1FixesTests(RepoTestCase):
         build_rel = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build_rel)
 
-        self.assertEqual(build_rel.verify_version_consistency(SKILL_DIR, "v1.5.0-rc.1"), "1.5.0")
+        self.assertEqual(build_rel.verify_version_consistency(SKILL_DIR, "v1.6.0-rc.1"), "1.6.0")
         with tempfile.TemporaryDirectory() as out1, tempfile.TemporaryDirectory() as out2:
-            t1, z1 = build_rel.build_skill_archives(SKILL_DIR, Path(out1), "v1.5.0")
+            t1, z1 = build_rel.build_skill_archives(SKILL_DIR, Path(out1), "v1.6.0")
             time.sleep(0.05)
-            t2, z2 = build_rel.build_skill_archives(SKILL_DIR, Path(out2), "v1.5.0")
+            t2, z2 = build_rel.build_skill_archives(SKILL_DIR, Path(out2), "v1.6.0")
             self.assertEqual(t1.read_bytes(), t2.read_bytes(), ".tar.gz must be byte-for-byte reproducible")
             self.assertEqual(z1.read_bytes(), z2.read_bytes(), ".zip must be byte-for-byte reproducible")
 

@@ -28,12 +28,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
+# Never write `.pyc` beside the skill sources (bytecode caching is re-enabled below for script runs).
 sys.dont_write_bytecode = True
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import aoci_index  # noqa: E402
+
+if __name__ == "__main__":
+    aoci_index._configure_bytecode_cache()  # per-user `sys.pycache_prefix` for the lazily imported core
 
 SERVER_NAME = "aoci-index"
 SERVER_VERSION = aoci_index.AOCI_VERSION

@@ -3,51 +3,119 @@
 from __future__ import annotations
 
 import argparse
-from typing import Optional, Sequence
+import importlib
+import sys
+from typing import Any, Callable, Optional, Sequence
 
-from . import cli_write as _cli_write
-from .cli_check import (
-    cmd_audit,
-    cmd_batch_pack,
-    cmd_ci_check,
-    cmd_diff,
-    cmd_lint,
-    cmd_prepare_sync,
-    cmd_scan,
-    cmd_verify,
-)
-from .cli_read import (
-    cmd_context,
-    cmd_export,
-    cmd_outline,
-    cmd_overview,
-    cmd_pack,
-    cmd_query,
-    cmd_refs,
-    cmd_symbol,
-)
-from .cli_write import (
-    cmd_ack,
-    cmd_apply_sync,
-    cmd_doctor,
-    cmd_ensure_git_exclude,
-    cmd_init,
-    cmd_install_git_hooks,
-    cmd_migrate_renames,
-    cmd_pool,
-    cmd_restore,
-    cmd_scaffold,
-    cmd_shard,
-    cmd_upsert,
-    cmd_zoom,
-)
 from .constants import AOCI_VERSION, DEFAULT_MAX_BATCH_LINES, DEFAULT_MAX_BYTES, configure_utf8_streams
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _lazy_cmd(module: str, name: str) -> Callable[[argparse.Namespace], int]:
+    """
+    Bind a subcommand handler without importing its module until the subcommand actually runs,
+    so `--help`/`--version` and narrow commands skip the heavy `cli_*` import graph. The handler
+    keeps the real `cmd_*` name (CLI snapshot `func_name`) and resolves the target at call time.
+    """
+    target = f"{__package__}.{module}"
+
+    def _handler(args: argparse.Namespace) -> int:
+        return getattr(importlib.import_module(target), name)(args)
+
+    _handler.__name__ = name
+    _handler.__qualname__ = name
+    _handler.__doc__ = f"Lazy dispatcher for `{target}.{name}`."
+    return _handler
+
+
+cmd_audit = _lazy_cmd("cli_check", "cmd_audit")
+cmd_batch_pack = _lazy_cmd("cli_check", "cmd_batch_pack")
+cmd_ci_check = _lazy_cmd("cli_check", "cmd_ci_check")
+cmd_diff = _lazy_cmd("cli_check", "cmd_diff")
+cmd_lint = _lazy_cmd("cli_check", "cmd_lint")
+cmd_prepare_sync = _lazy_cmd("cli_check", "cmd_prepare_sync")
+cmd_scan = _lazy_cmd("cli_check", "cmd_scan")
+cmd_verify = _lazy_cmd("cli_check", "cmd_verify")
+
+cmd_context = _lazy_cmd("cli_read", "cmd_context")
+cmd_export = _lazy_cmd("cli_read", "cmd_export")
+cmd_outline = _lazy_cmd("cli_read", "cmd_outline")
+cmd_overview = _lazy_cmd("cli_read", "cmd_overview")
+cmd_pack = _lazy_cmd("cli_read", "cmd_pack")
+cmd_query = _lazy_cmd("cli_read", "cmd_query")
+cmd_refs = _lazy_cmd("cli_read", "cmd_refs")
+cmd_symbol = _lazy_cmd("cli_read", "cmd_symbol")
+
+cmd_ack = _lazy_cmd("cli_write", "cmd_ack")
+cmd_apply_sync = _lazy_cmd("cli_write", "cmd_apply_sync")
+cmd_doctor = _lazy_cmd("cli_write", "cmd_doctor")
+cmd_ensure_git_exclude = _lazy_cmd("cli_write", "cmd_ensure_git_exclude")
+cmd_init = _lazy_cmd("cli_write", "cmd_init")
+cmd_install_git_hooks = _lazy_cmd("cli_write", "cmd_install_git_hooks")
+cmd_migrate_renames = _lazy_cmd("cli_write", "cmd_migrate_renames")
+cmd_pool = _lazy_cmd("cli_write", "cmd_pool")
+cmd_restore = _lazy_cmd("cli_write", "cmd_restore")
+cmd_scaffold = _lazy_cmd("cli_write", "cmd_scaffold")
+cmd_shard = _lazy_cmd("cli_write", "cmd_shard")
+cmd_upsert = _lazy_cmd("cli_write", "cmd_upsert")
+cmd_zoom = _lazy_cmd("cli_write", "cmd_zoom")
+
+
+class _NullParser:
+    """Absorbs `add_argument` / `set_defaults` / nested `add_subparsers` calls for skipped subcommands."""
+
+    def __getattr__(self, name: str) -> Any:
+        return self._absorb
+
+    def _absorb(self, *args: Any, **kwargs: Any) -> "_NullParser":
+        return self
+
+
+_NULL_PARSER = _NullParser()
+
+
+class _SelectiveSubparsers:
+    """
+    `_SubParsersAction` proxy that fully builds only the requested subcommand. Every other name is still
+    registered as a bare placeholder (same `choices`, same top-level usage/error text) but skips its
+    `add_argument` calls, which dominate argparse construction cost (~90ms for the full tree on 3.14).
+    """
+
+    def __init__(self, action: Any, only: str) -> None:
+        self._action = action
+        self._only = only
+        self.matched = False
+
+    def add_parser(self, name: str, **kwargs: Any) -> Any:
+        if name == self._only:
+            self.matched = True
+            return self._action.add_parser(name, **kwargs)
+        self._action.add_parser(name, help=kwargs.get("help"), add_help=False)
+        return _NULL_PARSER
+
+
+def requested_subcommand(argv: Optional[Sequence[str]]) -> Optional[str]:
+    """Return the subcommand token argparse will dispatch on, or `None` when the full tree is needed."""
+    tokens = sys.argv[1:] if argv is None else argv
+    for tok in tokens:
+        tok = str(tok)
+        if tok in ("-h", "--help", "--"):
+            return None
+        if tok.startswith("-"):
+            continue  # top-level `-V/--version` (and unknown flags) take no value
+        return tok
+    return None
+
+
+def build_parser(only: Optional[str] = None) -> argparse.ArgumentParser:
+    """
+    Build the CLI parser. With `only=<subcommand>`, just that subcommand gets its arguments (falls back
+    to the full tree when `only` is not a known subcommand, so error messages stay identical).
+    """
     p = argparse.ArgumentParser(description="AOCI Fast Codebase Index Manager")
     p.add_argument("-V", "--version", action="version", version=f"%(prog)s {AOCI_VERSION}")
-    sub = p.add_subparsers(dest="command", required=True)
+    sub_action = p.add_subparsers(dest="command", required=True)
+    selective = _SelectiveSubparsers(sub_action, only) if only else None
+    sub: Any = selective if selective is not None else sub_action
 
     p_init = sub.add_parser("init", help="Initialize `.aoci/` index repository and enforce `.git/info/exclude`")
     p_init.add_argument("--root", help="Target codebase root (defaults to Git toplevel or CWD)")
@@ -541,14 +609,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("--json", action="store_true", help="Output JSON")
     p_doc.set_defaults(func=cmd_doctor)
 
+    if selective is not None and not selective.matched:
+        return build_parser()
     return p
 
 
 def run_cli(argv: Optional[Sequence[str]] = None) -> int:
     configure_utf8_streams(include_stdin=(argv is None))
-    parser = build_parser()
+    parser = build_parser(only=requested_subcommand(argv))
     args = parser.parse_args(argv)
     return int(args.func(args))
 
-
-_cli_write._set_cli_runner(run_cli)

@@ -345,7 +345,7 @@
         "choices": null,
         "required": false,
         "help": "show program's version number and exit",
-        "version": "%(prog)s 1.5.0"
+        "version": "%(prog)s 1.6.0"
       },
       {
         "kind": "subparsers",

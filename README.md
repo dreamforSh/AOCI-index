@@ -12,7 +12,7 @@
 </p>
 
 <p>
-  <a href="./pyproject.toml"><img src="https://img.shields.io/badge/version-1.5.0-0EA5E9?style=flat" alt="Version 1.5.0"></a>
+  <a href="./pyproject.toml"><img src="https://img.shields.io/badge/version-1.6.0-0EA5E9?style=flat" alt="Version 1.6.0"></a>
   <a href="https://github.com/dreamforSh/AOCI-index/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dreamforSh/AOCI-index/ci.yml?branch=main&style=flat&label=CI&logo=githubactions&logoColor=white" alt="CI status"></a>
   <img src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.8+">
   <img src="https://img.shields.io/badge/dependencies-zero-10B981?style=flat" alt="Zero dependencies">
@@ -47,7 +47,7 @@ A single read pass gives coding agents repository-wide architectural orientation
     <td width="25%" align="center"><b>Zero Dependencies</b><br><sub>Python 3.8+ stdlib only</sub></td>
     <td width="25%" align="center"><b>Local-Only <code>.aoci/</code></b><br><sub>Excluded via <code>.git/info/exclude</code></sub></td>
     <td width="25%" align="center"><b>Sub-Second Sync</b><br><sub>LF SHA-256, <code>sig_hash</code> &amp; Hub WAL pool</sub></td>
-    <td width="25%" align="center"><b>27 MCP Tools</b><br><sub>Warm in-memory stdio server</sub></td>
+    <td width="25%" align="center"><b>29 MCP Tools</b><br><sub>Warm in-memory stdio server</sub></td>
   </tr>
 </table>
 
@@ -111,7 +111,7 @@ src/order/service.py#create_order[L42-L118]: F:Validates cents payload, reserves
     <td width="50%" valign="top">
       <p><img src="https://api.iconify.design/lucide/shield-check.svg?color=%236366F1" width="18" height="18" align="top" alt=""> <b>MCP, CI Guard &amp; 6-Host Setup</b></p>
       <ul>
-        <li><b>Modern MCP <code>2025-06-18</code> Server</b> — <code>aoci_mcp.py</code> serves <b>27 annotated tools</b> (with <code>outputSchema</code> &amp; <code>structuredContent</code>), <code>roots/list</code> multi-root discovery, <code>resources/subscribe</code> live update notifications, <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 prompts</b>.</li>
+        <li><b>Modern MCP <code>2025-06-18</code> Server</b> — <code>aoci_mcp.py</code> serves <b>29 annotated tools</b> (with <code>outputSchema</code> &amp; <code>structuredContent</code>), <code>roots/list</code> multi-root discovery, <code>resources/subscribe</code> live update notifications, <b>5 static resources</b>, <b>2 URI templates</b>, and <b>3 prompts</b>.</li>
         <li><b>CI Guard &amp; Diff-Colored Graph Export</b> — <code>ci-check</code> / <code>aoci_ci_check</code> (plus root <code>action.yml</code>) checks layer rules, Tarjan cycles, and PR diff test impact even in zero-index CI runners, emitting SARIF 2.1.0, GitHub annotations, or PR Markdown; <code>export --format html --diff</code> highlights changed and affected nodes.</li>
         <li><b>6-Host Installer &amp; Guardrails</b> — One-command setup and surgical uninstall for <b>Claude Code</b>, <b>Antigravity</b>, <b>Codex</b>, <b>Cursor</b>, <b>Windsurf</b>, and <b>VS Code / Copilot</b>, keeping <code>.aoci/</code> excluded via <code>.git/info/exclude</code>.</li>
       </ul>
@@ -168,6 +168,7 @@ python scripts/install.py --host codex --scope global --with-hooks --with-mcp
 
 # Project-scoped install (.agents/skills/ + .codex/hooks.json + AGENTS.md + .codex/config.toml)
 python scripts/install.py --host codex --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
+```
 
 ### Cursor, Windsurf & VS Code Copilot
 
@@ -189,7 +190,7 @@ python scripts/install.py --host all --scope global --with-hooks --with-mcp
 ```bash
 pip install -e .                  # zero runtime dependencies
 pip install -e ".[treesitter]"    # optional tree-sitter AST accelerator
-aoci-index --version              # aoci-index 1.5.0
+aoci-index --version              # aoci-index 1.6.0
 aoci-mcp                          # launches the stdio MCP server
 aoci-hook --help                  # multi-host lifecycle hook runner
 aoci-install --help               # cross-host skill/hook/MCP installer
@@ -197,6 +198,9 @@ aoci-install --help               # cross-host skill/hook/MCP installer
 
 > [!TIP]
 > See [references/hooks-and-install.md](./references/hooks-and-install.md) for manual setup, `--keep-config`, and hook contract verification.
+
+> [!NOTE]
+> Script entry points cache bytecode in a per-user directory (`%LOCALAPPDATA%\aoci-index\pycache`, `~/Library/Caches/aoci-index/pycache`, or `~/.cache/aoci-index/pycache`), never beside the installed skill files. Set `AOCI_NO_PYCACHE=1` (or `PYTHONDONTWRITEBYTECODE=1`) to disable it.
 
 ## <img src="https://api.iconify.design/lucide/folder-tree.svg?color=%236366F1" width="24" height="24" align="top" alt=""> Workspace Layout
 

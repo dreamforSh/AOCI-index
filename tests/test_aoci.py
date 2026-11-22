@@ -3365,9 +3365,9 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         orig_fp_norm = discovery._fingerprint_bytes_norm
         fp_headers: list = []
 
-        def _track_fp(norm, st_arg):
+        def _track_fp(norm, st_arg, *rest, **kw):
             fp_headers.append(norm.decode("utf-8", errors="replace").splitlines()[0])
-            return orig_fp_norm(norm, st_arg)
+            return orig_fp_norm(norm, st_arg, *rest, **kw)
 
         with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=_track_fp):
             with mock.patch.object(parsers, "extract_file_outline", side_effect=AssertionError("must hit outline_cache")):
@@ -3409,8 +3409,8 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         # Modify `d.py` to 60 lines: ONLY `d.py` is re-hashed (call_count == 1) and shows updated size tier `S`
         self.write("d.py", "def fn_d():\n" + "".join(f"    x{i} = {i}\n" for i in range(60)), aged=True)
 
-        def _counting_fp(norm, st):
-            return orig_fp_norm(norm, st)
+        def _counting_fp(norm, st, *rest, **kw):
+            return orig_fp_norm(norm, st, *rest, **kw)
 
         with mock.patch.object(discovery, "_fingerprint_bytes_norm", side_effect=_counting_fp) as fp_spy:
             sc2_mod = _run_inproc("scaffold", "--root", str(self.root), "--batch", "2", "--batch-size", "2")
@@ -3908,7 +3908,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
         import aoci_mcp
 
         ver = aoci_index.AOCI_VERSION
-        self.assertEqual(ver, "1.5.0")
+        self.assertEqual(ver, "1.6.0")
         self.assertEqual(aoci_index.__version__, ver)
         self.assertEqual(aoci_core.__version__, ver)
         self.assertEqual(aoci_mcp.SERVER_VERSION, ver)
@@ -3923,6 +3923,7 @@ class EmpiricalReviewRegressionTests(RepoTestCase):
 
         readme_text = (SKILL_DIR / "README.md").read_text(encoding="utf-8")
         self.assertIn(f"version-{ver}-", readme_text)
+        self.assertNotIn("1.5.0", readme_text)
         self.assertNotIn("1.4.0", readme_text)
         self.assertNotIn("1.3.0", readme_text)
         self.assertNotIn("1.2.0", readme_text)
