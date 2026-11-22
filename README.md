@@ -153,6 +153,9 @@ python scripts/install.py --host claude-code --scope global --with-hooks --with-
 
 # Project-scoped install
 python scripts/install.py --host claude-code --scope project --project-root <repo> --with-hooks --with-rules --with-mcp
+
+# Lean MCP surface: advertise only the 8 read-only tools (~3.3k instead of ~10k tool-definition tokens)
+python scripts/install.py --host claude-code --scope global --with-mcp --mcp-profile core
 ```
 
 ### Antigravity
@@ -194,7 +197,7 @@ pip install -e .                  # zero runtime dependencies
 pip install -e ".[treesitter]"    # optional tree-sitter AST accelerator
 pip install -e ".[embed]"         # optional model2vec dense channel for --hybrid --embed-backend model2vec
 aoci-index --version              # aoci-index 1.6.0
-aoci-mcp                          # launches the stdio MCP server
+aoci-mcp                          # launches the stdio MCP server (--profile core|sync|full)
 aoci-hook --help                  # multi-host lifecycle hook runner
 aoci-install --help               # cross-host skill/hook/MCP installer
 ```
@@ -297,6 +300,8 @@ Speaks MCP JSON-RPC 2.0 over stdio (`2024-11-05` · `2025-03-26` · `2025-06-18`
 | **URI Templates (2)** | `aoci://shards/{shard}` · `aoci://{volume}?root={root}` |
 | **Prompts (3)** | `aoci-bootstrap` · `aoci-review-diff` · `aoci-sync` |
 
+Tool profiles trim the advertised surface: `--profile core` (8 read-only tools), `sync` (core + 14 sync/maintenance tools), or `full` (default, all 29); also `AOCI_MCP_PROFILE` or installer `--mcp-profile`. Tools that write files (`output`, `sarif_output`, `markdown_output`, pool `file`, `pending_dir` with `clean_pending`) only accept paths inside the repository root and never under `.git/` (`AOCI_MCP_ALLOW_OUTSIDE_ROOT=1` lifts the root rule).
+
 Subscribed resources are also polled in the background (`stat` only, every `AOCI_MCP_WATCH_INTERVAL` seconds, default `2`, `0` disables), so edits made by the CLI, Git hooks, or editors push `notifications/resources/updated` without waiting for the next tool call.
 
 ## <img src="https://api.iconify.design/lucide/book-open.svg?color=%236366F1" width="24" height="24" align="top" alt=""> Documentation & Testing
@@ -309,9 +314,12 @@ Subscribed resources are also polled in the background (`stat` only, every `AOCI
 | Worked index examples | [examples/](./examples/) |
 
 ```bash
-# Run with base Python on PATH (stdlib unittest only, requires git)
-python -B tests/test_aoci.py
+# Run with base Python on PATH (stdlib unittest only, requires git; shared helpers live in tests/aoci_testkit.py)
 python -B -m unittest discover -s tests -p "test_*.py"
+
+# Lint, type-check, and coverage like CI (pip install -e ".[dev]")
+python -m ruff check . && python -m mypy
+python -m coverage run -m unittest discover -s tests -p "test_*.py" && python -m coverage report
 
 # Measure retrieval quality on AOCI-index itself (after the zero-token self-pool bootstrap from Quick Start):
 python scripts/aoci_index.py eval --root . --cases examples/eval/self-eval.jsonl --modes bm25,hybrid --budget 1000

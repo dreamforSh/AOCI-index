@@ -202,7 +202,8 @@ Use the bundled zero-dependency installer [scripts/install.py](./scripts/install
 
 - Full installation, hook configuration, and manual test guide: [references/hooks-and-install.md](./references/hooks-and-install.md)
 - The `Stop` hook only blames drift introduced **during the current session**. Drift that existed at `SessionStart` and is still byte-identical is reported once at startup but never blocks a turn. Set `AOCI_HOOK_AUTO_HEAL=safe` (or pass `--auto-heal`) to silently apply safe zero-token mechanical sync (exact renames, pool restores, and clean prunes) on `Stop`.
-- Regression suite (stdlib only): `python tests/test_aoci.py`
+- Regression suite (stdlib only): `python -B -m unittest discover -s tests -p "test_*.py"`
+- MCP tool profiles: `aoci_mcp.py --profile core|sync|full` (or `AOCI_MCP_PROFILE`, installer `--mcp-profile`); when only a subset of `aoci_*` tools is registered, fall back to the CLI for the rest
 - Claude Code templates: [resources/claude.settings.global.json](./resources/claude.settings.global.json), [resources/claude.settings.project.json](./resources/claude.settings.project.json), [resources/CLAUDE.snippet.md](./resources/CLAUDE.snippet.md)
 - Antigravity templates: [resources/hooks.global.json](./resources/hooks.global.json), [resources/hooks.project.json](./resources/hooks.project.json), [resources/AGENTS.snippet.md](./resources/AGENTS.snippet.md)
 - Codex templates: [resources/codex.hooks.global.json](./resources/codex.hooks.global.json), [resources/codex.hooks.project.json](./resources/codex.hooks.project.json), [resources/AGENTS.snippet.md](./resources/AGENTS.snippet.md)
