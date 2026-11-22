@@ -1,4 +1,7 @@
-"""Multi-language static outline extraction, `sig_hash`, and import graph resolution."""
+"""
+Multi-language static outline extraction, `sig_hash` and `compute_contract_delta`, the extractor-tagged outline
+cache, and static import graph resolution.
+"""
 
 from __future__ import annotations
 

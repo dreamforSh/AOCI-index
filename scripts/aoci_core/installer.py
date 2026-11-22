@@ -16,11 +16,16 @@ Supports installing and uninstalling `aoci-index` for:
   - Cursor       (`~/.cursor/skills/aoci-index` or `<repo>/.cursor/skills/aoci-index`)
                  + optional hooks in `hooks.json` + optional `.cursor/rules/aoci-index.mdc`
                  + optional MCP in `mcp.json`
-  - Windsurf     (`~/.codeium/windsurf/skills/aoci-index` or `<repo>/.windsurf/skills/aoci-index`)
-                 + optional rules + optional MCP in `mcp_config.json`
+  - Windsurf    (`~/.codeium/windsurf/skills/aoci-index` or `<repo>/.windsurf/skills/aoci-index`)
+                 + optional rules (`memories/global_rules.md` / `.windsurf/rules/aoci-index.md`)
+                 + optional MCP in `mcp_config.json` (no lifecycle hooks)
   - VS Code      (`~/.copilot/skills/aoci-index` or `<repo>/.github/skills/aoci-index`)
-                 + optional `.github/copilot-instructions.md`
-                 + optional MCP in VS Code user `Code/User/mcp.json` or `<repo>/.vscode/mcp.json`
+                 + optional `copilot-instructions.md` (`~/.copilot/` / `<repo>/.github/`)
+                 + optional MCP in VS Code user `Code/User/mcp.json` or `<repo>/.vscode/mcp.json` (no lifecycle hooks)
+
+`--mcp-profile core|sync` appends `--profile <name>` to every registered MCP server's args. Each install writes
+`.aoci-install.json` (file hashes) so re-installs refuse to overwrite local edits without `--force`, and so
+discovery never indexes the installed copy.
 """
 
 from __future__ import annotations
@@ -1655,7 +1660,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--with-hooks",
         action="store_true",
-        help="Merge lifecycle hooks (SessionStart + Stop, plus UserPromptSubmit on Claude Code and Codex)",
+        help=(
+            "Merge lifecycle hooks (SessionStart + Stop, plus UserPromptSubmit on Claude Code and Codex and "
+            "beforeSubmitPrompt on Cursor; ignored for Windsurf and VS Code)"
+        ),
     )
     p.add_argument(
         "--with-turn-hook",
@@ -1665,9 +1673,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-turn-hook",
         action="store_true",
-        help="Skip installing turn-start (`UserPromptSubmit` / `PreInvocation`) hooks",
+        help="Skip installing turn-start (`UserPromptSubmit` / `beforeSubmitPrompt` / `PreInvocation`) hooks",
     )
-    p.add_argument("--with-rules", action="store_true", help="Append fenced protocol snippet in CLAUDE.md / GEMINI.md / AGENTS.md")
+    p.add_argument(
+        "--with-rules",
+        action="store_true",
+        help=(
+            "Install the protocol snippet (CLAUDE.md / GEMINI.md / AGENTS.md, Cursor `.mdc` rule, Windsurf rules, "
+            "or copilot-instructions.md)"
+        ),
+    )
     p.add_argument("--with-mcp", action="store_true", help="Register the zero-dependency `aoci_mcp.py` stdio MCP server")
     p.add_argument(
         "--mcp-profile",

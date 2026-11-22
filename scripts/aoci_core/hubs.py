@@ -1,4 +1,8 @@
-"""H-tier symbol-level sub-volume (`aoci.hubs.txt`) extraction, validation, and span maintenance."""
+"""
+H-tier symbol-level sub-volume (`aoci.hubs.txt`, `symbol-hubs-v1`): span extraction, validation, span
+maintenance on upsert/rename, `#Volume: id=hubs` manifest registration, and line-shift-resilient pool rows
+keyed by `(path, symbol, span_sha256)` for zero-token restore.
+"""
 
 from __future__ import annotations
 

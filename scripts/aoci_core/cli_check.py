@@ -1,4 +1,4 @@
-"""Verification, drift, lint, audit, diff, sync-prep, batch-pack, and CI CLI subcommands."""
+"""Drift and health-check CLI subcommands (`scan`, `verify`, `lint`, `diff`, `audit`, `prepare-sync`, `batch-pack`, `ci-check`, `eval`)."""
 
 from __future__ import annotations
 

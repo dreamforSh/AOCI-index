@@ -3,26 +3,38 @@
 Multi-Host Lifecycle Hook Runner for AOCI Codebase Index (aoci_hook.py).
 
 Supports **Claude Code** (`settings.json` hooks), **Antigravity** (`hooks.json`),
-**Codex** (`hooks.json`), and **Cursor** (`hooks.json`) via
-`--host auto | claude-code | antigravity | codex | cursor`:
+**Codex** (`hooks.json`), and **Cursor** (`.cursor/hooks.json`) via
+`--host auto | claude-code | antigravity | codex | cursor` and
+`--event auto | session-start | turn-start | stop`. Windsurf and VS Code have no
+lifecycle hooks and are covered by rules + MCP only.
 
-  - SessionStart: When a workspace contains `.aoci/aoci.code.txt`, ensures
-    `.git/info/exclude` covers `.aoci/`, runs a zero-read fast drift check,
-    surfaces `#Global-Invariants:` from `aoci.txt`, injects startup context
-    enforcing Read-Whole-First (including post-compaction refreshes in Claude
-    Code and Codex), and snapshots the drift that ALREADY exists into
-    `.aoci/.sessions/<session-id>.json`.
-  - UserPromptSubmit / PreInvocation / beforeSubmitPrompt: Injects deduplicated
-    prompt-time working-tree `aoci_diff` architectural risk briefings when
-    modified files carry non-obvious `S:` constraints or affected callers.
-  - Stop: On normal turn completion, detects unsynced AOCI index drift
-    (added/modified/renamed/deleted/malformed) or Git exclusion violations and
-    asks the agent to synchronize `.aoci/` before stopping. Drift that was
-    present at session start and is still byte-identical is NOT blamed on the
-    agent (no wasted continuation turns for the user's own pending edits).
-    Loop protection: `stop_hook_active` (Claude Code / Codex) / `continuationActive`
-    (Antigravity) / `loop_limit` (Cursor); Antigravity stops with background
-    work (`fullyIdle=false`) are never gated.
+  - SessionStart / sessionStart: When a workspace contains `.aoci/aoci.code.txt`,
+    ensures `.git/info/exclude` covers `.aoci/`, runs a zero-read fast drift
+    check (plus the zero-token restorable count from the semantic pool), surfaces
+    `#Global-Invariants:` from `aoci.txt`, injects startup context enforcing
+    Read-Whole-First (including post-compaction refreshes in Claude Code and
+    Codex), and snapshots the drift that ALREADY exists into
+    `.aoci/.sessions/<session-id>.json` (first start only; pruned after 7 days).
+  - UserPromptSubmit / beforeSubmitPrompt / PreInvocation (turn-start): Injects
+    nothing (`{}`). Refreshes the session snapshot so edits the user made between
+    turns are exempt at `Stop`, while paths blocked at the previous `Stop` stay
+    blocked. Antigravity refreshes only when `invocationNum <= 1`.
+  - Stop / stop: On normal turn completion, detects unsynced AOCI index drift
+    (added/modified/renamed/moved+edited/deleted/malformed/invalid entries and
+    `aoci.hubs.txt` issues) or Git exclusion violations and asks the agent to
+    synchronize `.aoci/` before stopping. Drift that was present at session or
+    turn start and is still byte-identical is NOT blamed on the agent (no wasted
+    continuation turns for the user's own pending edits).
+    Safe auto-heal (`--auto-heal` or `AOCI_HOOK_AUTO_HEAL=safe`): when every
+    session-new item is deterministic (exact renames, exact pool hits, clean
+    prunes), applies `restore -> migrate-renames --exact-only -> upsert --prune-only`
+    silently instead of blocking.
+    Loop protection: a continuation (`stop_hook_active` in Claude Code / Codex,
+    `continuationActive` in Antigravity) re-blocks at most once more, and only
+    while the unsynced count keeps shrinking. Cursor sends no continuation flag,
+    so its follow-up loop is bounded by Cursor's own stop-hook loop limit.
+    Antigravity stops other than `NO_TOOL_CALL`, or with background work
+    (`fullyIdle=false`), are never gated.
 
 Conforms strictly to each host's stdin/stdout JSON contract and always exits
 with code 0 + valid JSON so hook failures never break an interactive session.
@@ -333,9 +345,11 @@ def handle_turn_start(payload: Dict[str, Any], host: str) -> Dict[str, Any]:
     """
     Refresh the external-drift baseline at the start of a new user turn so manual user IDE edits
     between turns are never blamed on the agent at `Stop`:
-      * Claude Code (`UserPromptSubmit`): fires once per user prompt -> refresh unconditionally.
+      * Claude Code / Codex (`UserPromptSubmit`) and Cursor (`beforeSubmitPrompt`): fire once per
+        user prompt -> refresh unconditionally.
       * Antigravity (`PreInvocation`): fires before each model step -> refresh only when
         `invocationNum <= 1` (never relying on a persisted flag that could linger after Ctrl+C).
+    Paths blocked by the previous `Stop` keep their blocked marker while unchanged. Always returns `{}`.
     """
     if payload.get("continuationActive") is True or payload.get("stop_hook_active") is True:
         return {}
@@ -439,7 +453,8 @@ def handle_stop(payload: Dict[str, Any], host: str, *, auto_heal: bool = False) 
     if payload.get("fullyIdle") is False:
         return {}
 
-    # Loop guards for both hosts: inspect snapshot first so continuation only proceeds on retry #1
+    # Loop guards (Claude Code / Codex `stop_hook_active`, Antigravity `continuationActive`): inspect the
+    # snapshot first so a continuation only proceeds on retry #1
     is_continuation = payload.get("continuationActive") is True or payload.get("stop_hook_active") is True
     roots = discover_indexed_roots(payload)
     if not roots:

@@ -1,4 +1,7 @@
-"""Write-path operations: `LiveFileSet`, entry validation, locked `upsert` / `ack` / `migrate-renames`, and semantic pool sync."""
+"""
+Write-path operations: `LiveFileSet`, entry validation, locked `upsert` (incl. `--pending-dir` batch merges) /
+`ack` / `migrate-renames`, and semantic pool sync and restore.
+"""
 
 from __future__ import annotations
 

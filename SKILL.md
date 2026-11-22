@@ -41,10 +41,11 @@ Build and maintain a local **AOCI (AI-Oriented Code Indexing)** symbolic-semanti
 ├── aoci.hubs.txt   # Optional H-tier symbol sub-volume (`<relpath>#<sym>[Lstart-Lend]: F:... | S:...`, managed by `zoom`)
 ├── baseline.json   # Compact normalized-LF SHA-256, line count, and mtime baseline for fast drift detection
 ├── .aociignore     # Optional extra ignore globs (full gitignore syntax: `!`, `/`-anchoring, `**`)
+├── shards/         # Optional per-directory `<dir>.code.txt` slices + `INDEX.txt` (managed by `shard`)
 ├── pending/        # Scratch area for batch entry files (never indexed, never committed)
 ├── .sessions/      # Hook-managed per-session drift snapshots (auto-cleaned after 7 days)
-├── .cache/         # Cached Git exclusion, unindexed scan_fps snapshot, and stable batch_plan
-└── .lock           # Transient writer lock (exists only while upsert/ack/migrate-renames run)
+├── .cache/         # Git exclusion/discovery, outline, scan_fps, batch_plan, and optional `embed/` caches
+└── .lock           # Transient writer lock (exists only while an index writer runs)
 ```
 
 > Full tag taxonomy, token budgets, FRAS authoring rubric, and large-repo strategy: [references/aoci-format-spec.md](./references/aoci-format-spec.md). Worked examples: [examples/](./examples/).

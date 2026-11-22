@@ -1,4 +1,8 @@
-"""Cross-process exclusive index lock (`.aoci/.lock`) with atomic stale-lock reaping and owner tokens."""
+"""
+Cross-process exclusive index lock (`.aoci/.lock`): owner tokens plus hostname, same-thread re-entrancy,
+a heartbeat that keeps long holders fresh, and atomic stale-lock reaping (dead PIDs at once, live same-host
+PIDs only past `hard_stale`).
+"""
 
 from __future__ import annotations
 

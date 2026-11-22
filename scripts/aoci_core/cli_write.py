@@ -1,4 +1,7 @@
-"""Mutating CLI subcommands (`init`, `upsert`, `ack`, `migrate-renames`, `restore`, `zoom`, `shard`, `pool`, `scaffold`, `apply-sync`)."""
+"""
+Mutating CLI subcommands (`init`, `ensure-git-exclude`, `upsert`, `ack`, `migrate-renames`, `restore`, `zoom`,
+`shard`, `pool`, `scaffold`, `apply-sync`, `install-git-hooks`, `doctor`).
+"""
 
 from __future__ import annotations
 

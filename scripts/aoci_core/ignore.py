@@ -1,4 +1,8 @@
-"""Gitignore-style ignore matching and path/binary classification for `aoci_index`."""
+"""
+Gitignore-style ignore matching and path/binary classification for `aoci_index`, including the skip rules
+that keep installed `aoci-index` skill copies (host config dirs, `<.host>/skills/aoci-index/`, and dirs
+holding `.aoci-install.json`) out of the index.
+"""
 
 from __future__ import annotations
 

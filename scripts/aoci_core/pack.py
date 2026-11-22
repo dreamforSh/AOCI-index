@@ -1,4 +1,10 @@
-"""Task-driven, token-budgeted context packer (`aoci pack` / MCP `aoci_pack`)."""
+"""
+Task-driven, token-budgeted context packer (`aoci pack` / MCP `aoci_pack`).
+
+Seeds come from BM25 (or `HybridIndex`) hits, glossary expansion, explicit path mentions, the working-tree diff,
+and L1.5 hub sections. Weak ranked seeds (< `SEED_MIN_REL_SCORE` of the best) are dropped, and T-layer hits are
+demoted by `TEST_LAYER_DEMOTE` unless the task mentions tests.
+"""
 
 from __future__ import annotations
 

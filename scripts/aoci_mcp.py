@@ -2,13 +2,34 @@
 """
 Zero-Dependency Stdio MCP Server for AOCI Codebase Index (`aoci_mcp.py`).
 
-Speaks MCP JSON-RPC 2.0 over stdio (auto-detecting newline-delimited JSON or
-`Content-Length:` framing) using only the Python 3.8+ standard library.
+Speaks MCP JSON-RPC 2.0 over stdio (protocol `2024-11-05`, `2025-03-26`, and
+`2025-06-18`; auto-detecting newline-delimited JSON or `Content-Length:` framing)
+using only the Python 3.8+ standard library.
 
-Keeps parsed `.aoci/aoci.code.txt` entries and the directed FRAS dependency
-graph warm in memory (keyed on file `(mtime_ns, size)`), delivering sub-millisecond
-`aoci_overview`, `aoci_query` (BM25 + graph), and `aoci_context` lookups without
-spawning shell commands or triggering terminal permission prompts.
+Surface:
+  - 29 annotated tools (one `_tool_<name>` handler per `TOOLS_SPEC` entry, wired
+    through `TOOL_HANDLERS`) with `readOnlyHint`, `outputSchema`, and
+    `structuredContent`. `--profile core|sync|full` (or `AOCI_MCP_PROFILE`) trims
+    `tools/list` to 8 read-only tools, core + 14 sync/maintenance tools, or all;
+    calls outside the profile return `isError` with a hint.
+  - Resources `aoci://manifest|meta|code|hubs|shards/INDEX`, templates
+    `aoci://shards/{shard}` and `aoci://{volume}?root={root}`, prompts
+    `aoci-bootstrap` / `aoci-review-diff` / `aoci-sync`, and `roots/list`
+    multi-root discovery (the default root follows newly announced roots).
+  - `resources/subscribe`: subscribed files are re-announced after this server's
+    own mutations and by a background `stat` poller for outside changes
+    (`AOCI_MCP_WATCH_INTERVAL`, default 2 s, `0` disables).
+
+Keeps parsed `.aoci/aoci.code.txt` entries, the directed FRAS graph, BM25,
+outlines, hubs, and glossary warm in memory per workspace (keyed on file
+`(mtime_ns, size)`). After small edits the cache re-applies only changed entries
+(copy-on-write `FrasGraphState` + `BM25Index.updated()`, identical to a full
+rebuild), so read tools answer without spawning shell commands or triggering
+terminal permission prompts. CLI-backed tools run in-process with per-call
+`contextvars` stream capture; stdout carries only JSON-RPC frames.
+
+Tools that write files accept targets only inside the repository root and never
+under `.git/` (`AOCI_MCP_ALLOW_OUTSIDE_ROOT=1` lifts the root rule only).
 """
 
 from __future__ import annotations

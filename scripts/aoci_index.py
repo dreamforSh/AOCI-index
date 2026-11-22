@@ -2,27 +2,39 @@
 """
 AOCI Fast Codebase Index Manager (aoci_index.py)
 
-Zero-dependency Python 3 CLI for initializing, scanning, incrementally
+Zero-dependency Python 3.8+ CLI for initializing, scanning, incrementally
 updating, querying, expanding context, migrating renames, outlining symbols,
 summarizing, and verifying a local `.aoci/` AI-Oriented Code Indexing
 repository, with strict Git local exclusion (`.git/info/exclude`).
 
-Compatible with both Claude Code and Antigravity workflows.
+Host-neutral: the same CLI backs the Claude Code, Antigravity, Codex, Cursor,
+Windsurf, and VS Code installs (`aoci_core.installer`), the lifecycle hooks
+(`aoci_hook.py`), and the stdio MCP server (`aoci_mcp.py`).
+
+This file is also the stable public facade: `constants` names are bound eagerly
+and every other `aoci_core` symbol is re-exported lazily (PEP 562 `__getattr__`),
+so `--version`, hooks, and narrow subcommands skip the full import graph. Run as
+a script, it caches bytecode under a per-user `sys.pycache_prefix`.
 
 Subcommands:
   init                Initialize `.aoci/` and enforce `.git/info/exclude`.
-  scan | status       Detect drift (added/modified/renamed/deleted/missing/malformed)
-                      and generate line-balanced indexing batches.
+  scan | status       Detect drift (added/modified/renamed/moved+edited/deleted/
+                      missing/malformed, `impl_only` vs `contract_changed`) and
+                      generate line-balanced indexing batches.
   upsert              Validate and atomically merge object-fras-v2 entries into
-                      `aoci.code.txt` and `baseline.json` (auto-pruning deletions).
-  migrate-renames     Migrate exact-content renamed files in `aoci.code.txt`, update
-                      R:/A: cross-references, and sync `baseline.json`.
+                      `aoci.code.txt` and `baseline.json` (auto-pruning deletions;
+                      `--pending-dir` merges subagent batch files).
+  migrate-renames     Migrate exact-content and moved+edited renames in
+                      `aoci.code.txt` and `aoci.hubs.txt`, update R:/A:
+                      cross-references, and sync `baseline.json`.
   verify              Full health gate: Git exclusion, format & domain dictionary
-                      checks, and zero SHA-256 drift.
-  query               Filter `aoci.code.txt` by layer/domain/importance/path/keyword
-                      or trace `--impact` neighbors.
+                      checks, `aoci.hubs.txt` consistency, and zero SHA-256 drift.
+  query               Filter `aoci.code.txt` by layer/domain/importance/path/keyword,
+                      BM25-rank with `--search` (opt-in `--hybrid`), trace `--impact`
+                      neighbors, or derive `--tests-for`; flags `stale_entries`.
   context             Expand architectural subgraph for target file(s): global
-                      invariants + target + R: dependencies + A:/reverse callers.
+                      invariants + target + hub sections + R: dependencies +
+                      A:/reverse callers (optional `--budget`, `--with-tests`).
   overview            Print a compact global digest (manifest, meta dictionary,
                       directory rollup, and high-importance core entries).
   outline             Fast static extractor (imports + top-level symbols/signatures)
@@ -30,20 +42,26 @@ Subcommands:
   ack                 Re-baseline modified files whose existing FRAS entries remain
                       accurate (auto-refreshes Size tier) without rewriting entries.
   lint                Quality gate for FRAS entries: vague F:, token budget vs.
-                      Importance, empty S: on hubs, dangling R:/A: refs, duplicates.
+                      Importance, empty S: on hubs, dangling R:/A: refs, duplicates,
+                      `aoci.hubs.txt` spans/symbols (`--fix` runs `doctor`).
   shard               Split `aoci.code.txt` into per-directory `.aoci/shards/` slices.
-  restore             Zero-token restore of FRAS entries from the Git-common-dir cache
-                      pool after branch switches, rebases, or new worktrees.
+  restore             Zero-token restore of FRAS entries and `aoci.hubs.txt` sections
+                      from the Git-common-dir cache pool after branch switches,
+                      rebases, or new worktrees.
   diff                Generate an architectural impact briefing (FRAS + S: traps +
-                      upstream neighbors) for working-tree or Git revision diffs.
-  pack                Build a task-driven, token-budgeted context packet (BM25 +
-                      glossary + path mentions + diff + R:/A: + S: + open_next).
+                      `contract_deltas` + touched hub sections + downstream deps +
+                      callers, optional `--with-tests`) for working-tree or Git
+                      revision diffs.
+  pack                Build a task-driven, token-budgeted context packet (BM25 or
+                      `--hybrid` + glossary + path mentions + hub sections + diff +
+                      R:/A: + S: + open_next; flags `stale_entries`).
   scaffold            Pre-fill [LDIS], resolved internal R: imports, and repo-wide A:
                       callers from static analysis (<TODO> F:/S: requires reading code).
   ensure-git-exclude  Idempotently enforce `.aoci/` exclusion in `.git/info/exclude`
                       and synchronize `#Git-Excluded` in `aoci.txt`.
   audit               Cross-check FRAS graph vs static imports, Tarjan SCC
-                      cycles, and forbidden `#Layer-Rules:` edges.
+                      cycles (code edges only; R/O-layer co-reads ignored),
+                      forbidden `#Layer-Rules:` edges, and optional `--co-change`.
   export              Export FRAS dependency graph in Mermaid, Graphviz DOT, or HTML.
   pool                Inspect, export, or import `.pool.sqlite3` semantic cache
                       entries and portable `aoci-semantic-pool-v1` bundles.
@@ -63,8 +81,8 @@ Subcommands:
   eval                Score retrieval + `pack` against task cases (recall@k, MRR,
                       seed/pack recall); compare `bm25` vs opt-in `hybrid` retrieval.
 
-All index writers serialize through `.aoci/.lock` so parallel agents cannot lose
-updates.
+All index writers serialize through `.aoci/.lock` (re-entrant per thread, with a
+heartbeat) so parallel agents cannot lose updates.
 """
 
 from __future__ import annotations

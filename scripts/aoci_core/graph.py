@@ -1,4 +1,8 @@
-"""FRAS graph builder, context budgeting, linting, BM25 search, architecture audit & export."""
+"""
+FRAS entry parsing, dependency graph (full build and incremental `FrasGraphState` updates), context budgeting,
+dangling-ref checks & linting, layer rules and code-only cycle detection (`code_dependency_view`), glossary
+expansion, BM25 search (`BM25Index`, with copy-on-write `updated()`), and Mermaid/DOT/HTML graph export.
+"""
 
 from __future__ import annotations
 

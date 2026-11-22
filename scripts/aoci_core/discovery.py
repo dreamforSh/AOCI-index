@@ -1,4 +1,7 @@
-"""File discovery (`git ls-files` / `os.scandir`), LF SHA-256 + MinHash fingerprinting, and scan caches."""
+"""
+File discovery (`git ls-files` / `os.scandir`, `--git-fast` incremental status), LF SHA-256 fingerprinting with
+deferred MinHash line sketches (`attach_line_sketches`), and scan caches.
+"""
 
 from __future__ import annotations
 

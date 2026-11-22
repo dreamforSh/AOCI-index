@@ -1,4 +1,4 @@
-"""Read-only CLI subcommands (`query`, `context`, `pack`, `overview`, `symbol`, `export`, `outline`) and shared helpers."""
+"""Read-only CLI subcommands (`query`, `context`, `pack`, `overview`, `symbol`, `refs`, `export`, `outline`) and shared helpers."""
 
 from __future__ import annotations
 

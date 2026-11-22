@@ -1,4 +1,7 @@
-"""Manifest, meta-dictionary, and `.aoci/` template rendering & parsing helpers."""
+"""
+Manifest, meta-dictionary, and `.aoci/` template rendering & parsing helpers (manifest fields with continuation
+lines, declared Domain codes from `# D (Domain ...)` sections and `#Domains:` directives).
+"""
 
 from __future__ import annotations
 

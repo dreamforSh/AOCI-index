@@ -1,4 +1,8 @@
-"""SQLite WAL semantic cache pool (legacy JSON migration, LRU, export/import, read-only restore count)."""
+"""
+SQLite WAL semantic cache pool: file entries by `(path, sha256)` / `sha256` and hub sections by
+`(path, symbol, span_sha256)`, legacy JSON migration, LRU eviction, read-only restore counts, and
+`aoci-semantic-pool-v1` bundle export/import (including the gap-filling index `meta` block).
+"""
 
 from __future__ import annotations
 
