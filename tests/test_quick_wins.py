@@ -19,7 +19,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from test_aoci import HAS_GIT, RepoTestCase, SKILL_DIR, aoci_index, cli, cli_json  # noqa: E402
+from aoci_testkit import HAS_GIT, RepoTestCase, SKILL_DIR, cli, cli_json  # noqa: E402
 import aoci_mcp  # noqa: E402
 from aoci_core import audit, hubs, parsers, ts_accel  # noqa: E402
 

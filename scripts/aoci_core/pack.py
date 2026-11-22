@@ -7,9 +7,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+import math
+
 from .constants import (
     AOCI_DIR_NAME,
     CACHE_DIR,
+    HUBS_FILE,
     OUTLINE_CACHE,
     _is_within_root,
     normalize_relpath,
@@ -17,13 +20,15 @@ from .constants import (
 from .graph import (
     BM25Index,
     ParsedEntry,
+    _tokenize_search,
     bfs_neighbors_with_distance,
     estimate_tokens,
+    expand_query_with_glossary,
     parse_entries_map,
     parse_entry_fields,
 )
 from .freshness import check_freshness, stale_list
-from .hubs import lookup_hub_sections
+from .hubs import lookup_hub_sections, parse_hubs_volume
 from .parsers import extract_file_outline
 from .test_impact import find_impacted_tests, is_outline_record_fresh
 
@@ -39,7 +44,60 @@ _SPECIAL_ROOT_FILES: Set[str] = {
     "Gemfile",
     "Rakefile",
 }
-_REASON_ORDER: Dict[str, int] = {"path-mention": 0, "diff": 1, "bm25": 2}
+_REASON_ORDER: Dict[str, int] = {"path-mention": 0, "diff": 1, "bm25": 2, "hub": 3}
+
+# Seed relevance knobs (calibrated with `eval` on examples/eval/self-eval.jsonl; see CHANGELOG)
+SEED_MIN_REL_SCORE = 0.2  # drop ranked seeds scoring below this fraction of the best seed
+TEST_LAYER_DEMOTE = 0.35  # T-layer score multiplier when the task never mentions tests
+HUB_MIN_MATCHED_TERMS = 2  # distinct informative task terms a hub section must share to seed its file
+_TEST_TASK_RE = re.compile(
+    r"(?i)\b(?:tests?|testing|spec|specs|pytest|unittest|fixtures?|regressions?|snapshots?|assert\w*)\b"
+    r"|测试|单测|用例"
+)
+
+
+def task_mentions_tests(task: str) -> bool:
+    return bool(_TEST_TASK_RE.search(task or ""))
+
+
+def _hub_section_matches(
+    task: str,
+    hub_records: Sequence[Mapping[str, Any]],
+    glossary: Sequence[Sequence[str]],
+    idx: Any,
+) -> Dict[str, Tuple[float, str]]:
+    """
+    Score L1.5 hub sections (`symbol` + `F:` + `S:`) against the task with the corpus-wide BM25 IDF, so
+    symbol-level wording rescues files whose file-level entry misses the task's vocabulary.
+    Returns `{relpath: (score, best_symbol)}` for sections sharing >= `HUB_MIN_MATCHED_TERMS` terms.
+    """
+    bm = getattr(idx, "bm25", idx)
+    df = getattr(bm, "df", None)
+    n_docs = int(getattr(bm, "n_docs", 0) or 0)
+    if not hub_records or not isinstance(df, Mapping) or n_docs <= 0:
+        return {}
+    token_weights, _, _ = expand_query_with_glossary(task, glossary or ())
+    out: Dict[str, Tuple[float, str]] = {}
+    for rec in hub_records:
+        rel = normalize_relpath(str(rec.get("relpath") or rec.get("path") or ""))
+        sym = str(rec.get("symbol", "")).strip()
+        if not rel or not sym:
+            continue
+        doc_toks = set(_tokenize_search(f"{sym} {rec.get('f', '')} {rec.get('s', '')}"))
+        score = 0.0
+        matched = 0
+        for tok, q_w in token_weights.items():
+            if tok not in doc_toks:
+                continue
+            doc_f = int(df.get(tok, 0) or 0)
+            idf = math.log(1.0 + (n_docs - doc_f + 0.5) / (doc_f + 0.5))
+            if idf < 0.5:  # near-ubiquitous terms ("the", "and", "file") carry no signal
+                continue
+            matched += 1
+            score += q_w * idf
+        if matched >= HUB_MIN_MATCHED_TERMS and score > out.get(rel, (0.0, ""))[0]:
+            out[rel] = (round(score, 3), sym)
+    return out
 
 
 class PathMentionIndex:
@@ -268,6 +326,9 @@ def build_task_pack(
     test_index: Optional[Any] = None,
     check_stale: bool = True,
     baseline_files: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    min_rel_score: float = SEED_MIN_REL_SCORE,
+    test_demote: float = TEST_LAYER_DEMOTE,
+    hub_fallback: bool = True,
 ) -> Dict[str, Any]:
     """
     Assemble a task-driven, token-budgeted context packet from FRAS index entries,
@@ -303,27 +364,54 @@ def build_task_pack(
     if entries and task.strip():
         idx = bm25_index if bm25_index is not None else BM25Index(entries, parsed_entries=parsed_map)
         k_seeds = max(1, int(top_seeds))
+        demote_tests = test_demote < 1.0 and not task_mentions_tests(task)
+        fetch_k = k_seeds * 2 if demote_tests else k_seeds  # backfill slots freed by demoted tests
+        bm25_hits: List[Dict[str, Any]]
         if hasattr(idx, "search_detailed"):
             bm25_hits, glossary_expansions = idx.search_detailed(
-                task, top_k=k_seeds, glossary=glossary or ()
+                task, top_k=fetch_k, glossary=glossary or ()
             )
         else:
-            ranked = idx.search(task, top_k=k_seeds)
+            ranked = idx.search(task, top_k=fetch_k)
             bm25_hits = [
                 {"path": r, "score": round(sc, 3), "matched_terms": [], "entry": ln}
                 for sc, r, ln in ranked
             ]
             glossary_expansions = []
+        adjusted: List[Tuple[float, str, Mapping[str, Any]]] = []
         for hit in bm25_hits:
             rel = normalize_relpath(str(hit.get("path", "")))
             if rel not in entries:
                 continue
+            sc = float(hit.get("score", 0.0))
+            pe_hit = parsed_map.get(rel)
+            if demote_tests and pe_hit is not None and pe_hit.layer == "T":
+                sc *= test_demote
+            adjusted.append((sc, rel, hit))
+        adjusted.sort(key=lambda item: -item[0])  # stable: equal scores keep the retriever's tie order
+        best = adjusted[0][0] if adjusted else 0.0
+        kept = [a for a in adjusted if best <= 0.0 or a[0] >= min_rel_score * best][:k_seeds]
+        for sc, rel, hit in kept:
             _touch_seed(rel, "bm25")
-            seed_scores[rel] = max(seed_scores.get(rel, 0.0), float(hit.get("score", 0.0)))
+            seed_scores[rel] = max(seed_scores.get(rel, 0.0), round(sc, 3))
             if hit.get("matched_terms"):
                 seed_terms[rel] = list(hit["matched_terms"])
             if hit.get("matched_glossary"):
                 seed_glossary[rel] = list(hit["matched_glossary"])
+
+        if hub_fallback:
+            recs = hub_records
+            if recs is None:
+                recs, _ = parse_hubs_volume(root / AOCI_DIR_NAME / HUBS_FILE)
+            for rel, (h_score, _sym) in sorted(_hub_section_matches(task, recs, glossary, idx).items()):
+                if rel not in entries:
+                    continue
+                if rel in seed_reasons:
+                    seed_reasons[rel].add("hub")
+                    seed_scores[rel] = max(seed_scores.get(rel, 0.0), h_score)
+                elif best <= 0.0 or h_score >= min_rel_score * best:
+                    _touch_seed(rel, "hub")
+                    seed_scores[rel] = h_score
 
     known_sorted = mention_index.known_sorted if mention_index is not None else sorted(entries.keys())
     for rel in _extract_task_path_mentions(task, known_sorted, mention_index=mention_index):

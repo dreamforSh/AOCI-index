@@ -99,6 +99,7 @@ def run_refresh(
     move_hubs: Sequence[str] = (),
     drop_missing: bool = False,
     check_only: bool = False,
+    meta_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     (
         hubs,
@@ -242,14 +243,21 @@ def run_refresh(
             }
         )
 
-    out_obj = {
+    out_obj: Dict[str, Any] = {
         "schema_version": int(data.get("schema_version", 1)),
         "format": str(data.get("format", "aoci-semantic-pool-v1")),
         "exported_at": DETERMINISTIC_EXPORTED_AT,
-        "by_path_sha": sorted(new_ps_list, key=lambda x: (x["path"], x["sha256"])),
-        "by_sha": new_s_list,
-        "hubs_by_symbol_sha": new_hub_list,
     }
+    bundle_meta = meta_override if meta_override is not None else data.get("meta")
+    if isinstance(bundle_meta, dict) and bundle_meta:
+        out_obj["meta"] = bundle_meta
+    out_obj.update(
+        {
+            "by_path_sha": sorted(new_ps_list, key=lambda x: (x["path"], x["sha256"])),
+            "by_sha": new_s_list,
+            "hubs_by_symbol_sha": new_hub_list,
+        }
+    )
     out_txt = json.dumps(out_obj, indent=2, ensure_ascii=False) + "\n"
     if not stale and not errors and out_txt != raw_txt:
         stale.append("bundle-formatting (non-canonical JSON or exported_at)")
@@ -326,6 +334,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read-only check: exit 1 and list stale files/hubs without modifying the bundle",
     )
+    p.add_argument(
+        "--meta-file",
+        help="JSON file whose object replaces the bundle `meta` (global_invariants, project, domains, glossary, layer_rules)",
+    )
     p.add_argument("--json", action="store_true", help="Emit JSON result")
     return p
 
@@ -338,6 +350,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         bundle_path = repo_root / bundle_path
 
     try:
+        meta_override = None
+        if args.meta_file:
+            meta_path = Path(args.meta_file)
+            if not meta_path.is_absolute():
+                meta_path = repo_root / meta_path
+            meta_override = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+            if not isinstance(meta_override, dict):
+                raise ValueError(f"`{meta_path}` must contain a JSON object")
         res = run_refresh(
             repo_root,
             bundle_path,
@@ -345,6 +365,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             move_hubs=args.move_hub,
             drop_missing=bool(args.drop_missing),
             check_only=bool(args.check),
+            meta_override=meta_override,
         )
     except Exception as exc:
         if args.json:

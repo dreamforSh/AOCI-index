@@ -16,10 +16,9 @@ for _p in (str(TESTS_DIR), str(SCRIPTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import aoci_index  # noqa: E402
 from aoci_core import hubs, lock  # noqa: E402
 from aoci_core.constants import AOCI_DIR_NAME, HUBS_FILE  # noqa: E402
-from test_aoci import RepoTestCase, cli, cli_json  # noqa: E402
+from aoci_testkit import RepoTestCase, cli, cli_json  # noqa: E402
 
 
 class HubZoomTests(RepoTestCase):

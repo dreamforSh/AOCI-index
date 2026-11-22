@@ -735,6 +735,14 @@ def _portable_env_mcp_args(env_var: str, rel_script: str, fallback_base: str = "
     return ["-c", expr]
 
 
+# Extra server args from `--mcp-profile` (e.g. `["--profile", "core"]`); reset by every `main()` call
+_MCP_PROFILE_ARGS: List[str] = []
+
+
+def _profiled(mcp_args: List[str]) -> List[str]:
+    return [*mcp_args, *_MCP_PROFILE_ARGS]
+
+
 def _upsert_mcp_server(mcp_json: Path, py_cmd: str, mcp_args: List[str], dry_run: bool) -> None:
     data = load_json_dict(mcp_json)
     servers = data.setdefault("mcpServers", {})
@@ -743,7 +751,7 @@ def _upsert_mcp_server(mcp_json: Path, py_cmd: str, mcp_args: List[str], dry_run
     cmd_exe, prefix_args = _split_python_cmd(py_cmd)
     servers[SKILL_NAME] = {
         "command": cmd_exe,
-        "args": [*prefix_args, *mcp_args],
+        "args": [*prefix_args, *_profiled(mcp_args)],
     }
     save_json_dict(mcp_json, data, dry_run)
     if not dry_run:
@@ -784,7 +792,7 @@ def _upsert_vscode_mcp_server(mcp_json: Path, py_cmd: str, mcp_args: List[str], 
     servers[SKILL_NAME] = {
         "type": "stdio",
         "command": cmd_exe,
-        "args": [*prefix_args, *mcp_args],
+        "args": [*prefix_args, *_profiled(mcp_args)],
     }
     save_json_dict(mcp_json, data, dry_run)
     if not dry_run:
@@ -957,7 +965,7 @@ _TOML_TABLE_MCP_RE = re.compile(
 
 def _render_codex_mcp_block(py_cmd: str, mcp_args: List[str]) -> str:
     cmd_exe, prefix_args = _split_python_cmd(py_cmd)
-    all_args = [*prefix_args, *mcp_args]
+    all_args = [*prefix_args, *_profiled(mcp_args)]
     args_toml = "[" + ", ".join(json.dumps(a, ensure_ascii=False) for a in all_args) + "]"
     return (
         f"{TOML_MCP_BEGIN}\n"
@@ -1662,6 +1670,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--with-rules", action="store_true", help="Append fenced protocol snippet in CLAUDE.md / GEMINI.md / AGENTS.md")
     p.add_argument("--with-mcp", action="store_true", help="Register the zero-dependency `aoci_mcp.py` stdio MCP server")
     p.add_argument(
+        "--mcp-profile",
+        choices=["core", "sync", "full"],
+        default="full",
+        help="Tool set the registered MCP server advertises (core: 8 read-only tools; default: full)",
+    )
+    p.add_argument(
         "--as-plugin",
         action="store_true",
         help="Package into a self-contained Antigravity plugin bundle (`plugins/aoci-index/`)",
@@ -1690,6 +1704,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     configure_utf8_streams()
     args = build_parser().parse_args(argv)
+    global _MCP_PROFILE_ARGS
+    _MCP_PROFILE_ARGS = ["--profile", args.mcp_profile] if args.mcp_profile != "full" else []
 
     home_dir = Path(args.home_dir).resolve() if args.home_dir else Path.home().resolve()
     project_root = Path(args.project_root).resolve() if args.project_root else Path.cwd().resolve()

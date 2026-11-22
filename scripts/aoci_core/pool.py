@@ -21,14 +21,18 @@ from .constants import (
     CODE_FILE,
     ENTRY_RE,
     HUBS_FILE,
+    MANIFEST_FILE,
     MAX_SEMANTIC_POOL_ENTRIES,
+    META_FILE,
     MIN_RENAME_LINES,
     VALID_LAYERS,
     VALID_SIZES,
+    atomic_write_text,
     normalize_relpath,
     utc_now_iso,
 )
-from .graph import validate_parsed_entry_tags
+from .graph import _load_layer_rules_from_aoci, parse_glossary, parse_layer_rules, validate_parsed_entry_tags
+from .templates import parse_declared_domains, parse_manifest_field
 from . import hubs as _hubs
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -643,6 +647,128 @@ def _fallback_load_baseline(aoci_dir: Path) -> Dict[str, Any]:
         return {"files": {}}
 
 
+_META_MAX_TEXT = 2000
+_META_PLACEHOLDERS = ("", "-")
+
+
+def _meta_text(value: Any, limit: int = _META_MAX_TEXT) -> str:
+    """Single-line, length-capped text safe to write into a `#Directive:` line."""
+    return re.sub(r"\s+", " ", str(value)).strip()[:limit]
+
+
+def _layer_rule_specs(aoci_dir: Path) -> List[str]:
+    specs: List[str] = []
+    for fname in (MANIFEST_FILE, META_FILE):
+        try:
+            lines = (aoci_dir / fname).read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        except OSError:
+            continue
+        specs.extend(ln[len("#Layer-Rules:") :].strip() for ln in lines if ln.startswith("#Layer-Rules:"))
+    return [s for s in specs if s]
+
+
+def collect_bundle_meta(aoci_dir: Path) -> Dict[str, Any]:
+    """
+    Index-level context worth shipping with a pool bundle so a zero-token bootstrap is fully usable:
+    `#Global-Invariants:`, `#Project:`, declared Domain codes, `#Glossary:` groups, and `#Layer-Rules:`.
+    """
+    meta: Dict[str, Any] = {}
+    invariants = _meta_text(parse_manifest_field(aoci_dir, "#Global-Invariants:"))
+    if invariants not in _META_PLACEHOLDERS and "<todo" not in invariants.lower():
+        meta["global_invariants"] = invariants
+    project = _meta_text(parse_manifest_field(aoci_dir, "#Project:"), 200)
+    if project:
+        meta["project"] = project
+    domains = parse_declared_domains(aoci_dir)
+    if domains:
+        meta["domains"] = dict(sorted(domains.items()))
+    glossary = parse_glossary(aoci_dir)
+    if glossary:
+        meta["glossary"] = [list(g) for g in glossary]
+    rules = _layer_rule_specs(aoci_dir)
+    if rules:
+        meta["layer_rules"] = "; ".join(rules)
+    return meta
+
+
+def apply_bundle_meta(aoci_dir: Path, meta: Any, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Fill gaps in `.aoci/aoci.txt` / `aoci.meta.txt` from a bundle's `meta` without overriding local choices:
+    undeclared Domain codes -> `#Domains:`, unseen glossary groups -> `#Glossary:`, `#Layer-Rules:` only when
+    none exist, and `#Global-Invariants:` only while it is still the `-` placeholder. Bundle text is
+    sanitized to single directive lines. Returns what was (or, with `dry_run`, would be) applied.
+    """
+    if not isinstance(meta, dict):
+        return {}
+    manifest_p = aoci_dir / MANIFEST_FILE
+    meta_p = aoci_dir / META_FILE
+    if not manifest_p.is_file() or not meta_p.is_file():
+        return {"skipped": "index not initialized"}
+
+    applied: Dict[str, Any] = {}
+    meta_lines: List[str] = []
+
+    declared = parse_declared_domains(aoci_dir)
+    new_domains: List[str] = []
+    meta_domains = meta.get("domains")
+    raw_domains: Dict[str, Any] = meta_domains if isinstance(meta_domains, dict) else {}
+    for code, label in sorted(raw_domains.items()):
+        if not (isinstance(code, str) and re.fullmatch(r"[A-Z0-9]", code)) or code in declared:
+            continue
+        clean = re.sub(r"[^\w.-]+", "-", _meta_text(label, 40)).strip("-") or "domain"
+        new_domains.append(f"{code}={clean}")
+    if new_domains:
+        meta_lines.append("#Domains: " + ", ".join(new_domains))
+        applied["domains"] = [d.split("=", 1)[0] for d in new_domains]
+
+    seen = {tuple(sorted(t.lower() for t in grp)) for grp in parse_glossary(aoci_dir)}
+    new_groups: List[str] = []
+    for grp in meta.get("glossary") or []:
+        if not isinstance(grp, list):
+            continue
+        terms = [re.sub(r"[;；=＝]+", " ", _meta_text(t, 60)).strip() for t in grp if isinstance(t, str)]
+        terms = [t for t in dict.fromkeys(terms) if t]
+        sig = tuple(sorted(t.lower() for t in terms))
+        if len(terms) >= 2 and sig not in seen:
+            seen.add(sig)
+            new_groups.append(" = ".join(terms))
+    if new_groups:
+        meta_lines.append("#Glossary: " + "; ".join(new_groups))
+        applied["glossary_groups"] = len(new_groups)
+
+    rules_spec = _meta_text(meta.get("layer_rules", ""))
+    if rules_spec and parse_layer_rules(rules_spec) and not _load_layer_rules_from_aoci(aoci_dir):
+        meta_lines.append(f"#Layer-Rules: {rules_spec}")
+        applied["layer_rules"] = True
+
+    new_manifest: Optional[str] = None
+    invariants = _meta_text(meta.get("global_invariants", ""))
+    current_inv = _meta_text(parse_manifest_field(aoci_dir, "#Global-Invariants:"))
+    if invariants and invariants not in _META_PLACEHOLDERS and current_inv in _META_PLACEHOLDERS:
+        text = manifest_p.read_text(encoding="utf-8-sig", errors="replace")
+        lines = text.splitlines()
+        for idx, ln in enumerate(lines):
+            if ln.startswith("#Global-Invariants:"):
+                lines[idx] = f"#Global-Invariants: {invariants}"
+                new_manifest = "\n".join(lines) + "\n"
+                applied["global_invariants"] = True
+                break
+
+    if dry_run or not (meta_lines or new_manifest):
+        return applied
+    from .lock import IndexLock
+
+    with IndexLock(aoci_dir):
+        if meta_lines:
+            body = meta_p.read_text(encoding="utf-8-sig", errors="replace")
+            if body and not body.endswith("\n"):
+                body += "\n"
+            atomic_write_text(meta_p, body + "\n".join(meta_lines) + "\n")
+        if new_manifest is not None:
+            atomic_write_text(manifest_p, new_manifest)
+    return applied
+
+
 def export_semantic_pool(
     root: Path,
     git_info: Dict[str, Any],
@@ -720,14 +846,15 @@ def export_semantic_pool(
         {"path": rel, "symbol": sym, "span_sha256": sha, "f": fv, "s": sv}
         for (rel, sym, sha), (fv, sv) in sorted(hub_valid.items())
     ]
-    bundle = {
+    bundle: Dict[str, Any] = {
         "schema_version": 1,
         "format": "aoci-semantic-pool-v1",
         "exported_at": utc_now_iso(),
-        "by_path_sha": ps_list,
-        "by_sha": s_list,
-        "hubs_by_symbol_sha": hub_list,
     }
+    bundle_meta = collect_bundle_meta(root / AOCI_DIR_NAME) if include_current else {}
+    if bundle_meta:
+        bundle["meta"] = bundle_meta
+    bundle.update({"by_path_sha": ps_list, "by_sha": s_list, "hubs_by_symbol_sha": hub_list})
     raw_json = (json.dumps(bundle, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     use_gz = out_path.name.lower().endswith(".gz")
     payload_bytes = gzip.compress(raw_json, mtime=0) if use_gz else raw_json
@@ -748,6 +875,7 @@ def export_semantic_pool(
         "exported_by_path_sha": len(ps_list),
         "exported_by_sha": len(s_list),
         "exported_hubs": len(hub_list),
+        "exported_meta": sorted(bundle_meta),
     }
 
 
@@ -884,4 +1012,5 @@ def import_semantic_pool(
         "imported_hubs": len(hub_rows),
         "rejected": len(rejected),
         "rejected_samples": rejected[:10],
+        "meta_applied": apply_bundle_meta(root / AOCI_DIR_NAME, data.get("meta"), dry_run=dry_run),
     }

@@ -602,7 +602,7 @@ class TestImpactIndex:
                 self.tests_by_norm_stem.setdefault(ns, []).append(test_rel)
 
         self.static_records: List[
-            Tuple[str, str, str, Tuple[str, ...], Tuple[str, ...], str, str, Tuple[Tuple[str, List[str]], ...]]
+            Tuple[str, Optional[str], str, Tuple[str, ...], Tuple[str, ...], str, str, Tuple[Tuple[str, List[str]], ...]]
         ] = []
         cache_files = preloaded_outline_files if preloaded_outline_files is not None else _load_outline_cache(root)
         if cache_files or live_imports:

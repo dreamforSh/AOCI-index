@@ -18,7 +18,7 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from test_aoci import RepoTestCase, aoci_index  # noqa: E402
+from aoci_testkit import RepoTestCase, aoci_index  # noqa: E402
 import aoci_mcp  # noqa: E402
 from aoci_core import graph, installer, templates  # noqa: E402
 

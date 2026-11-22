@@ -2863,13 +2863,13 @@ def build_static_import_graph(
             cur_parts = cur_dir.split("/") if cur_dir else []
             for raw_spec in out["imports"]:
                 for spec in _expand_rust_use_tree(raw_spec):
-                    base_parts: Optional[List[str]] = None
+                    rust_base: Optional[List[str]] = None
                     segs: List[str] = []
                     if spec.startswith("crate::"):
-                        base_parts = crate_src.split("/")
+                        rust_base = crate_src.split("/")
                         segs = [s for s in spec[7:].split("::") if s]
                     elif spec.startswith("self::"):
-                        base_parts = list(cur_parts)
+                        rust_base = list(cur_parts)
                         segs = [s for s in spec[6:].split("::") if s]
                     elif spec.startswith("super::"):
                         sup_n = 0
@@ -2878,12 +2878,12 @@ def build_static_import_graph(
                             sup_n += 1
                             rem_spec = rem_spec[7:]
                         up = sup_n - (0 if bname in ("mod.rs", "lib.rs", "main.rs") else 1)
-                        base_parts = cur_parts[: max(0, len(cur_parts) - up)] if up > 0 else list(cur_parts)
+                        rust_base = cur_parts[: max(0, len(cur_parts) - up)] if up > 0 else list(cur_parts)
                         segs = [s for s in rem_spec.split("::") if s]
-                    if base_parts is None or not segs:
+                    if rust_base is None or not segs:
                         continue
                     for cut in range(len(segs), 0, -1):
-                        stem = "/".join([*base_parts, *segs[:cut]])
+                        stem = "/".join([*rust_base, *segs[:cut]])
                         for cand in (f"{stem}.rs", f"{stem}/mod.rs"):
                             if cand in known_set and cand != rel:
                                 resolved.append(cand)

@@ -217,6 +217,7 @@ _LAZY_MODULES: Dict[str, str] = {
     "_pack": "pack",
     "_parsers": "parsers",
     "_pool": "pool",
+    "_query_ops": "query_ops",
     "_refs": "refs",
     "_shards": "shards",
     "_symbols": "symbols",
@@ -263,6 +264,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, ...]] = {
     ),
     "evalbench": ("load_eval_cases", "run_eval"),
     "freshness": ("check_freshness", "load_baseline_files"),
+    "query_ops": ("run_query",),
     "doctor": (
         "run_index_doctor",
     ),

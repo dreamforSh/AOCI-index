@@ -6,7 +6,6 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import audit as _audit

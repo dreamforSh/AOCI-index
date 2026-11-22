@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -24,7 +23,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from test_aoci import HAS_GIT, RepoTestCase, aoci_index, cli, cli_json, hook  # noqa: E402
+from aoci_testkit import HAS_GIT, RepoTestCase, cli_json, hook  # noqa: E402
 import aoci_mcp  # noqa: E402
 
 

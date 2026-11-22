@@ -133,7 +133,7 @@ def parse_entry(rel: str, line: str) -> Optional[ParsedEntry]:
     )
 
 
-def parse_entries_map(entries: Dict[str, str]) -> Dict[str, ParsedEntry]:
+def parse_entries_map(entries: Mapping[str, str]) -> Dict[str, ParsedEntry]:
     """Parse all valid `object-fras-v2` lines in `entries` in a single pass."""
     parsed: Dict[str, ParsedEntry] = {}
     for rel, line in entries.items():
@@ -399,7 +399,7 @@ def build_explicit_mention_index(
     return _build_explicit_mention_index_from_parsed(set(entries.keys()), parsed)
 
 
-def bfs_neighbors_with_distance(adj: Dict[str, Set[str]], starts: Sequence[str], depth: int) -> Dict[str, int]:
+def bfs_neighbors_with_distance(adj: Mapping[str, Set[str]], starts: Sequence[str], depth: int) -> Dict[str, int]:
     seen: Set[str] = set(starts)
     frontier = [s for s in starts if s in adj]
     distances: Dict[str, int] = {}
@@ -417,7 +417,7 @@ def bfs_neighbors_with_distance(adj: Dict[str, Set[str]], starts: Sequence[str],
     return distances
 
 
-def bfs_neighbors(adj: Dict[str, Set[str]], starts: Sequence[str], depth: int) -> List[str]:
+def bfs_neighbors(adj: Mapping[str, Set[str]], starts: Sequence[str], depth: int) -> List[str]:
     return list(bfs_neighbors_with_distance(adj, starts, depth).keys())
 
 
@@ -1724,10 +1724,12 @@ def parse_glossary(aoci_dir: Path) -> List[List[str]]:
                         if line:
                             in_glossary_section = False
                         continue
+                    if re.match(r"^#[A-Za-z][\w-]*\s*:", line):
+                        continue  # `#Domains:` / `#Layer-Rules:` directives are not glossary rows
                     body = line.lstrip("#").strip()
                     low = body.lower()
-                    if not body or any(marker in low for marker in _GLOSSARY_EXAMPLE_MARKERS):
-                        continue
+                    if not body or low.startswith("syntax:") or any(m in low for m in _GLOSSARY_EXAMPLE_MARKERS):
+                        continue  # template documentation rows, not glossary groups
                     _add_groups(_parse_glossary_groups(body))
         except OSError:
             pass

@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from test_aoci import RepoTestCase, cli_json  # noqa: E402
+from aoci_testkit import RepoTestCase, cli_json  # noqa: E402
 from aoci_core import constants, ignore, installer, parsers, ts_accel  # noqa: E402
 
 

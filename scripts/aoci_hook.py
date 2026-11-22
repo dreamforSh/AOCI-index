@@ -482,7 +482,12 @@ def handle_stop(payload: Dict[str, Any], host: str, *, auto_heal: bool = False) 
         snap_sig: Dict[str, Optional[str]] = snapshot["signature"] if snapshot else {}
         cur_sig = aoci_index.drift_signature(drift)
 
-        def is_new(path: str) -> bool:
+        def is_new(
+            path: str,
+            snapshot: Optional[Dict[str, Any]] = snapshot,
+            snap_sig: Dict[str, Optional[str]] = snap_sig,
+            cur_sig: Dict[str, Optional[str]] = cur_sig,
+        ) -> bool:
             if snapshot is None:
                 return True
             return not (path in snap_sig and snap_sig[path] == cur_sig.get(path))

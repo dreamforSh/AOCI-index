@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -20,7 +19,7 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from test_aoci import HAS_GIT, RepoTestCase, aoci_index, cli_json  # noqa: E402
+from aoci_testkit import HAS_GIT, RepoTestCase, aoci_index, cli_json  # noqa: E402
 import aoci_mcp  # noqa: E402
 from aoci_core import graph, ignore, lock, parsers, pool, sync_prep, test_impact  # noqa: E402
 

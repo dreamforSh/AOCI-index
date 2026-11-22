@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import os
 import stat
@@ -19,6 +18,7 @@ from . import graph as _graph
 from . import hubs as _hubs
 from . import ignore as _ignore
 from . import pack as _pack
+from . import query_ops as _query_ops
 from . import refs as _refs
 from . import shards as _shards
 from . import symbols as _symbols
@@ -30,13 +30,11 @@ from .constants import (
     ENTRY_RE,
     HUBS_FILE,
     _is_within_root,
-    _parse_code_filter_set,
     _resolve_cli_file_path,
     normalize_relpath,
     write_text_lf,
 )
 from .graph import (
-    bfs_neighbors,
     build_context_subgraph,
     build_fras_graph,
     estimate_tokens,
@@ -186,166 +184,74 @@ def cmd_query(args: argparse.Namespace) -> int:
 
     entries, _ = _shards.parse_code_volume(code_path)
     parsed_map = parse_entries_map(entries)
-    impact_target = normalize_relpath(args.impact) if args.impact else None
-    raw_tests_for = getattr(args, "tests_for", None)
-    tests_for_target = normalize_relpath(raw_tests_for) if raw_tests_for else None
-    keyword = args.keyword.lower() if args.keyword else None
-    layer_set = _parse_code_filter_set(args.layer)
-    domain_set = _parse_code_filter_set(args.domain)
-    search_q = getattr(args, "search", None)
-    raw_top = getattr(args, "top", None)
-    top_k = (20 if search_q else 0) if raw_top is None else int(raw_top)
-    raw_depth = getattr(args, "depth", None)
-    impact_depth = int(raw_depth) if raw_depth is not None else 1
-    tests_depth = int(raw_depth) if raw_depth is not None else 3
+    graph_cache: Dict[str, Dict[str, Set[str]]] = {}
 
-    dependents: Optional[Dict[str, Set[str]]] = None
-    impact_set: Optional[Set[str]] = None
-    if impact_target or tests_for_target:
-        _, dependents = build_fras_graph(entries, parsed_entries=parsed_map)
-    if impact_target and dependents is not None:
-        # Impact = the target plus every entry that (transitively, up to --depth) depends on it
-        impact_set = {impact_target} | set(bfs_neighbors(dependents, [impact_target], impact_depth))
+    def _dependents() -> Dict[str, Set[str]]:
+        if "dependents" not in graph_cache:
+            graph_cache["dependents"] = build_fras_graph(entries, parsed_entries=parsed_map)[1]
+        return graph_cache["dependents"]
 
-    impacted_tests: Optional[List[Dict[str, Any]]] = None
-    impacted_test_paths: Optional[Set[str]] = None
-    if tests_for_target and dependents is not None:
-        impacted_tests = _test_impact.find_impacted_tests(
-            root,
-            entries,
-            dependents,
-            [tests_for_target],
-            max_depth=tests_depth,
-            parsed_entries=parsed_map,
-            live_imports=bool(getattr(args, "live_test_imports", False)),
-        )
-        impacted_test_paths = {item["path"] for item in impacted_tests}
-
-    has_filters = any(
-        (
-            layer_set is not None,
-            domain_set is not None,
-            args.min_importance,
-            args.path,
-            keyword,
-            impact_set is not None,
-            impacted_test_paths is not None,
-        )
-    )
-    filtered_paths: Optional[Set[str]] = None
-    results: List[str] = []
-    if has_filters or not search_q:
-        filtered_paths = set()
-        for rel, line in sorted(entries.items()):
-            pe = parsed_map.get(rel)
-            if pe is None:
-                continue
-            if layer_set is not None and pe.layer not in layer_set:
-                continue
-            if domain_set is not None and pe.domain not in domain_set:
-                continue
-            if args.min_importance and pe.imp < args.min_importance:
-                continue
-            if args.path and not fnmatch.fnmatchcase(rel, args.path):
-                continue
-            if keyword and keyword not in line.lower():
-                continue
-            if impact_set is not None and rel not in impact_set:
-                continue
-            if impacted_test_paths is not None and rel not in impacted_test_paths:
-                continue
-            filtered_paths.add(rel)
-            results.append(line)
-
-    if impacted_tests is not None:
-        impacted_tests = [
-            item for item in impacted_tests if filtered_paths is None or item["path"] in filtered_paths
-        ]
-        if not search_q:
-            results = [item["entry"] for item in impacted_tests]
-
-    scores_out: Optional[List[Dict[str, Any]]] = None
-    glossary_expansions: List[Dict[str, Any]] = []
-    retrieval_info: Optional[Dict[str, Any]] = None
-    if search_q:
-        glossary = parse_glossary(root / AOCI_DIR_NAME)
-        if getattr(args, "hybrid", False):
+    def _retriever(hybrid: bool) -> Any:
+        if hybrid:
             from . import hybrid as _hybrid
 
-            h_idx = _hybrid.HybridIndex(entries, parsed_entries=parsed_map, root=root, **_hybrid.options_from(args))
-            hits, glossary_expansions = h_idx.search_detailed(
-                search_q, candidate_paths=filtered_paths, top_k=top_k, glossary=glossary
-            )
-            retrieval_info = h_idx.describe()
-        else:
-            hits, glossary_expansions = search_entries_bm25_detailed(
-                entries,
-                search_q,
-                candidate_paths=filtered_paths,
-                top_k=top_k,
-                glossary=glossary,
-                parsed_entries=parsed_map,
-            )
-        results = [h["entry"] for h in hits]
-        scores_out = hits
-        if impacted_tests is not None:
-            hit_paths = {h["path"] for h in hits}
-            impacted_tests = [item for item in impacted_tests if item["path"] in hit_paths]
-    elif top_k > 0:
-        results = results[:top_k]
-        if impacted_tests is not None:
-            impacted_tests = impacted_tests[:top_k]
+            return _hybrid.HybridIndex(entries, parsed_entries=parsed_map, root=root, **_hybrid.options_from(args))
+        return _graph.BM25Index(entries, parsed_entries=parsed_map)
 
-    result_paths = (
-        [str(h["path"]) for h in scores_out]
-        if scores_out is not None
-        else [normalize_relpath(ln.split("[", 1)[0].strip()) for ln in results]
+    search_q = getattr(args, "search", None)
+    payload = _query_ops.run_query(
+        root,
+        entries,
+        parsed_map,
+        get_dependents=_dependents,
+        get_retriever=_retriever,
+        glossary=parse_glossary(root / AOCI_DIR_NAME) if search_q else (),
+        layer=args.layer,
+        domain=args.domain,
+        min_importance=args.min_importance,
+        path_glob=args.path,
+        keyword=args.keyword,
+        search=search_q,
+        top=getattr(args, "top", None),
+        impact=args.impact,
+        tests_for=getattr(args, "tests_for", None),
+        depth=getattr(args, "depth", None),
+        live_test_imports=bool(getattr(args, "live_test_imports", False)),
+        hybrid=bool(getattr(args, "hybrid", False)),
     )
-    stale_map = _freshness.check_freshness(root, result_paths)
-
     if args.json:
-        payload: Dict[str, Any] = {"count": len(results), "entries": results}
-        if scores_out is not None:
-            payload["scores"] = scores_out
-        if glossary_expansions:
-            payload["glossary_expansions"] = glossary_expansions
-        if impacted_tests is not None:
-            payload["impacted_tests"] = impacted_tests
-        if retrieval_info is not None:
-            payload["retrieval"] = retrieval_info
-        if stale_map:
-            payload["stale_entries"] = _freshness.stale_list(stale_map)
         print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    stale = _query_ops.stale_map(payload)
+
+    def _stale_line(rel: str) -> None:
+        if rel in stale:
+            print(f"#   ! stale: {_freshness.stale_note(stale[rel])}")
+
+    print(f"# Query matches: {payload['count']} / {len(entries)}")
+    retrieval_info = payload.get("retrieval")
+    if retrieval_info:
+        warn_txt = f" | {'; '.join(retrieval_info['warnings'])}" if retrieval_info.get("warnings") else ""
+        print(f"# Retrieval: hybrid ({', '.join(retrieval_info['channels'])}){warn_txt}")
+    if payload.get("glossary_expansions"):
+        exp_txt = "; ".join(f"{e['term']} -> {', '.join(e['aliases'])}" for e in payload["glossary_expansions"])
+        print(f"# Glossary: {exp_txt}")
+    if "scores" in payload:
+        for item in payload["scores"]:
+            print(item["entry"])
+            g_note = f", glossary=[{'; '.join(item['matched_glossary'])}]" if item.get("matched_glossary") else ""
+            print(f"#   match: score={item['score']}, terms=[{', '.join(item.get('matched_terms', []))}]{g_note}")
+            _stale_line(str(item["path"]))
+    elif payload.get("impacted_tests") is not None:
+        for item in payload["impacted_tests"]:
+            print(item["entry"])
+            print(f"#   test-impact: reason={item['reason']}, hop={item['hop']}, via={item['via']}")
+            _stale_line(str(item["path"]))
     else:
-        print(f"# Query matches: {len(results)} / {len(entries)}")
-        if retrieval_info is not None:
-            warn_txt = f" | {'; '.join(retrieval_info['warnings'])}" if retrieval_info.get("warnings") else ""
-            print(f"# Retrieval: hybrid ({', '.join(retrieval_info['channels'])}){warn_txt}")
-        if glossary_expansions:
-            exp_txt = "; ".join(f"{e['term']} -> {', '.join(e['aliases'])}" for e in glossary_expansions)
-            print(f"# Glossary: {exp_txt}")
-        if scores_out is not None:
-            for item in scores_out:
-                print(item["entry"])
-                g_note = (
-                    f", glossary=[{'; '.join(item['matched_glossary'])}]"
-                    if item.get("matched_glossary")
-                    else ""
-                )
-                print(f"#   match: score={item['score']}, terms=[{', '.join(item.get('matched_terms', []))}]{g_note}")
-                if item["path"] in stale_map:
-                    print(f"#   ! stale: {_freshness.stale_note(stale_map[item['path']])}")
-        elif impacted_tests is not None:
-            for item in impacted_tests:
-                print(item["entry"])
-                print(f"#   test-impact: reason={item['reason']}, hop={item['hop']}, via={item['via']}")
-                if item["path"] in stale_map:
-                    print(f"#   ! stale: {_freshness.stale_note(stale_map[item['path']])}")
-        else:
-            for line, rel in zip(results, result_paths):
-                print(line)
-                if rel in stale_map:
-                    print(f"#   ! stale: {_freshness.stale_note(stale_map[rel])}")
+        for line in payload["entries"]:
+            print(line)
+            _stale_line(normalize_relpath(line.split("[", 1)[0].strip()))
     return 0
 
 

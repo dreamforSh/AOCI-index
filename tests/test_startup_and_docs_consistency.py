@@ -22,7 +22,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from test_aoci import RepoTestCase, SKILL_DIR, aoci_index, cli  # noqa: E402
+from aoci_testkit import RepoTestCase, SKILL_DIR, aoci_index, cli  # noqa: E402
 from aoci_core import cli_parser  # noqa: E402
 
 SCRIPTS_DIR = SKILL_DIR / "scripts"
@@ -95,8 +95,9 @@ class LazyFacadeTests(unittest.TestCase):
         self.assertIs(aoci_index._graph, graph)
         self.assertIn("compute_drift", dir(aoci_index))
         self.assertIn("_write_ops", dir(aoci_index))
+        missing_name = "definitely_not_an_aoci_symbol"  # via a variable: the facade test scans `aoci_index.<attr>`
         with self.assertRaises(AttributeError):
-            getattr(aoci_index, "definitely_not_an_aoci_symbol")
+            getattr(aoci_index, missing_name)
 
         sentinel = object()
         with mock.patch.object(aoci_index, "estimate_tokens", sentinel):

@@ -14,10 +14,11 @@ dependencies = []
 [project.optional-dependencies]
 treesitter = ["tree-sitter-language-pack>=0.6.0"]
 embed = ["model2vec>=0.3"]
+dev = ["ruff==0.17.6", "mypy==2.4.1", "coverage==7.17.4"]
 
 [project.scripts]
 aoci-index = "aoci_index:main"
-aoci-mcp = "aoci_mcp:serve_stdio"
+aoci-mcp = "aoci_mcp:main"
 aoci-hook = "aoci_hook:main"
 aoci-install = "aoci_core.installer:main"
 
@@ -25,3 +26,34 @@ aoci-install = "aoci_core.installer:main"
 package-dir = {"" = "scripts"}
 py-modules = ["aoci_index", "aoci_mcp", "aoci_hook"]
 packages = ["aoci_core"]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 120
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Syntax errors, pyflakes, and bugbear. pyupgrade-style annotation rewrites stay off for Python 3.8 parity.
+select = ["E9", "F", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/aoci_index.py" = ["F401"]   # public facade: eager `constants` re-exports
+"tests/aoci_testkit.py" = ["F401"]   # shared test kit re-exports modules for the test files
+
+[tool.mypy]
+# mypy 2.x targets Python >= 3.10; Python 3.8 runtime compatibility is enforced by the CI matrix + syntax tests
+python_version = "3.10"
+files = ["scripts/aoci_core", "scripts/aoci_index.py", "scripts/aoci_mcp.py", "scripts/aoci_hook.py"]
+mypy_path = "scripts"
+ignore_missing_imports = true
+allow_redefinition_new = true
+local_partial_types = true
+
+[tool.coverage.run]
+source = ["scripts"]
+branch = true
+omit = ["scripts/install.py"]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = false

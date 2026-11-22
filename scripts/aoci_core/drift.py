@@ -180,7 +180,7 @@ def compute_drift(
 
     for rel in sorted(fingerprints.keys()):
         fp = fingerprints[rel]
-        cached = base_files.get(rel)
+        cached: Dict[str, Any] = base_files.get(rel) or {}
         item = {
             "path": rel,
             "lines": fp["lines"],

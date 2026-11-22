@@ -46,8 +46,6 @@ from .graph import (
     validate_parsed_entry_tags,
 )
 from .shards import (
-    parse_code_volume,
-    render_code_volume,
     sync_shards_if_enabled,
     write_code_volume,
 )

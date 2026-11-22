@@ -11,6 +11,21 @@ from typing import Any, Dict, Optional, Tuple
 from .constants import LOCK_FILE, LOCK_STALE_S, LOCK_TIMEOUT_S, utc_now_iso
 
 _THREAD_LOCKS = threading.local()
+_LOCAL_HOST: Optional[str] = None
+
+
+def _local_host() -> str:
+    """Hostname recorded in `.lock` so PID liveness is only trusted for holders on this machine."""
+    global _LOCAL_HOST
+    if _LOCAL_HOST is None:
+        try:
+            import socket
+
+            raw_host = socket.gethostname() or "localhost"
+            _LOCAL_HOST = raw_host.encode("ascii", "replace").decode("ascii").replace(" ", "_") or "localhost"
+        except Exception:
+            _LOCAL_HOST = "localhost"
+    return _LOCAL_HOST
 
 
 def _canonical_lock_key(path: Path) -> str:
@@ -69,16 +84,31 @@ def _pid_is_alive(pid: int) -> bool:
 
 
 class IndexLock:
-    """Exclusive cross-process lock on `.aoci/.lock` (O_CREAT|O_EXCL, dead-PID & TOCTOU-safe stale recovery)."""
+    """
+    Exclusive cross-process lock on `.aoci/.lock` (O_CREAT|O_EXCL, dead-PID & TOCTOU-safe stale recovery).
 
-    def __init__(self, aoci_dir: Path, timeout: float = LOCK_TIMEOUT_S, stale: float = LOCK_STALE_S) -> None:
+    The holder refreshes the lock's mtime every `stale / 4` seconds (heartbeat), so long operations are
+    never mistaken for crashed ones. Recovery rules: a dead same-host PID is reaped at once; a live
+    same-host PID is only reaped past `hard_stale` (default `stale * 12`: frozen holder or PID reuse);
+    locks from another host (or unparsable ones) fall back to the plain `stale` age limit.
+    """
+
+    def __init__(
+        self,
+        aoci_dir: Path,
+        timeout: float = LOCK_TIMEOUT_S,
+        stale: float = LOCK_STALE_S,
+        hard_stale: Optional[float] = None,
+    ) -> None:
         self.path = aoci_dir / LOCK_FILE
         self._key = _canonical_lock_key(self.path)
         self.timeout = timeout
         self.stale = stale
+        self.hard_stale = hard_stale if hard_stale is not None else stale * 12.0
         self._fd: Optional[int] = None
         self._token: Optional[str] = None
         self._reentrant: bool = False
+        self._heartbeat: Optional[Tuple[threading.Event, threading.Thread]] = None
 
     def _stale_snapshot(self) -> Optional[Tuple[int, str]]:
         """Return `(st_mtime_ns, raw_content)` when `.lock` is confirmed stale, else `None`."""
@@ -94,15 +124,41 @@ class IndexLock:
         except OSError:
             raw = ""
         tokens = raw.split()
-        if age > self.stale:
-            return (st.st_mtime_ns, raw)
+        pid: Optional[int] = None
         if tokens:
             try:
-                if not _pid_is_alive(int(tokens[0])):
-                    return (st.st_mtime_ns, raw)
+                pid = int(tokens[0])
             except ValueError:
-                pass
-        return None
+                pid = None
+        holder_host = tokens[3] if len(tokens) >= 4 else None  # pre-1.6 locks carry no host => assume local
+        if pid is not None and (holder_host is None or holder_host == _local_host()):
+            if not _pid_is_alive(pid):
+                return (st.st_mtime_ns, raw)
+            return (st.st_mtime_ns, raw) if age > self.hard_stale else None
+        return (st.st_mtime_ns, raw) if age > self.stale else None
+
+    def _start_heartbeat(self) -> None:
+        interval = max(0.05, self.stale / 4.0)
+        stop = threading.Event()
+        path = self.path
+
+        def _beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    os.utime(path, None)
+                except OSError:
+                    return
+
+        thread = threading.Thread(target=_beat, name="aoci-lock-heartbeat", daemon=True)
+        thread.start()
+        self._heartbeat = (stop, thread)
+
+    def _stop_heartbeat(self) -> None:
+        hb = self._heartbeat
+        self._heartbeat = None
+        if hb is not None:
+            hb[0].set()
+            hb[1].join(timeout=1.0)
 
     def _is_stale(self) -> bool:
         return self._stale_snapshot() is not None
@@ -144,8 +200,9 @@ class IndexLock:
                 token = os.urandom(6).hex()
                 self._token = token
                 self._reentrant = False
-                os.write(self._fd, f"{os.getpid()} {utc_now_iso()} {token}\n".encode("ascii"))
+                os.write(self._fd, f"{os.getpid()} {utc_now_iso()} {token} {_local_host()}\n".encode("ascii", "replace"))
                 held[self._key] = 1
+                self._start_heartbeat()
                 return self
             except (FileExistsError, PermissionError) as exc:
                 if isinstance(exc, PermissionError) and not self.path.exists():
@@ -156,7 +213,7 @@ class IndexLock:
                     raise TimeoutError(
                         f"Timed out after {self.timeout:.0f}s waiting for `{self.path}` "
                         "(another aoci_index.py writer is running; delete the file if it is stale)."
-                    )
+                    ) from None
                 time.sleep(delay)
                 delay = min(delay * 1.5, 0.2)
 
@@ -171,6 +228,7 @@ class IndexLock:
             self._reentrant = False
             return
         held.pop(self._key, None)
+        self._stop_heartbeat()
         if self._fd is not None:
             try:
                 os.close(self._fd)

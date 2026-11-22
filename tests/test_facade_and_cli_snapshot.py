@@ -23,7 +23,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from test_aoci import HAS_GIT, RepoTestCase, SKILL_DIR, aoci_index  # noqa: E402
+from aoci_testkit import HAS_GIT, RepoTestCase, SKILL_DIR, aoci_index  # noqa: E402
 from aoci_core import discovery, git_ops, graph, lock, parsers, shards  # noqa: E402
 
 SNAPSHOT_PATH = _TESTS_DIR / "cli_help_snapshot.json"

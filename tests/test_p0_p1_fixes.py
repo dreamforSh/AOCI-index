@@ -8,8 +8,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -25,9 +23,9 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from test_aoci import HAS_GIT, INSTALL, SKILL_DIR, RepoTestCase, aoci_hook, aoci_index, cli, cli_json, hook  # noqa: E402
+from aoci_testkit import HAS_GIT, INSTALL, SKILL_DIR, RepoTestCase, aoci_index, cli, cli_json, hook  # noqa: E402
 import aoci_mcp  # noqa: E402
-from aoci_core import hubs, ignore, installer, lock, parsers, pool  # noqa: E402
+from aoci_core import hubs, ignore, installer, parsers, pool  # noqa: E402
 
 
 class P0P1FixesTests(RepoTestCase):

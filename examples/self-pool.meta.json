@@ -1,0 +1,22 @@
+{
+  "project": "AOCI-index",
+  "global_invariants": "Zero runtime dependencies (Python 3.8+ stdlib only; tree-sitter and model2vec stay optional extras); `.aoci/` stays local via `.git/info/exclude` and is never committed; `aoci_core` modules never import `aoci_index`, `aoci_mcp`, or `aoci_hook`; every index writer serializes through `.aoci/.lock`; the MCP stdio server never writes non-JSON-RPC bytes to stdout; refresh `examples/self-pool.json.gz` after editing pooled files",
+  "domains": {
+    "G": "governance",
+    "H": "hooks-and-hosts",
+    "K": "kernel",
+    "M": "mcp",
+    "P": "parsers"
+  },
+  "glossary": [
+    ["索引", "index"],
+    ["钩子", "hook"],
+    ["锁", "lock", "mutex"],
+    ["订阅", "subscribe", "subscription", "subscriptions"],
+    ["通知", "notify", "notification", "notifications"],
+    ["漂移", "drift"],
+    ["重命名", "rename", "renames"],
+    ["测试", "test", "tests"],
+    ["回收", "reap", "reaping"]
+  ]
+}

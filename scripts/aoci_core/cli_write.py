@@ -778,6 +778,7 @@ def cmd_pool(args: argparse.Namespace) -> int:
             print(
                 f"[AOCI Pool Import{mode}] OK | ByPathSha={res['imported_by_path_sha']} | "
                 f"BySha={res['imported_by_sha']} | Hubs={res.get('imported_hubs', 0)} | Rejected={res['rejected']}"
+                + (f" | Meta={','.join(sorted(res['meta_applied']))}" if res.get("meta_applied") else "")
             )
         return 0
 

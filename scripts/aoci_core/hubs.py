@@ -571,6 +571,7 @@ def write_hubs_volume(hubs_path: Path, records: Any, updated_at: Optional[str] =
     items = records.values() if isinstance(records, Mapping) else records
     by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for item in items:
+        rec: Optional[Dict[str, Any]]
         if isinstance(item, str):
             rec = _parse_hub_line(item.strip())
             if rec is None:
