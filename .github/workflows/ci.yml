@@ -64,6 +64,57 @@ jobs:
       - name: mypy (config in pyproject.toml)
         run: python -m mypy
 
+      - name: mypy for Windows-only code paths
+        run: python -m mypy --platform win32
+
+  package:
+    name: Build & verify sdist/wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel (wheel is built from the sdist)
+        run: |
+          python -m pip install --upgrade --quiet build twine
+          python -m build --outdir dist
+
+      - name: Validate metadata
+        run: python -m twine check --strict dist/*
+
+      - name: Verify sdist and wheel contents
+        run: |
+          python - <<'PY'
+          import glob, tarfile, zipfile
+          sdist = tarfile.open(glob.glob("dist/*.tar.gz")[0]).getnames()
+          for need in ("SKILL.md", "CHANGELOG.md", "MANIFEST.in", "examples/self-pool.json.gz", "resources/plugin.json", "references/aoci-format-spec.md", "assets/logo.svg"):
+              assert any(n.endswith("/" + need) for n in sdist), f"sdist is missing {need}"
+          wheel = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for need in ("SKILL.md", "examples/self-pool.json.gz", "resources/plugin.json", "references/hooks-and-install.md", "scripts/aoci_mcp.py"):
+              assert "aoci_core/_skill_bundle/" + need in wheel, f"wheel skill bundle is missing {need}"
+          assert not any("/tests/" in n or n.startswith("tests/") for n in wheel), "tests must not ship in the wheel"
+          print(f"sdist files={len(sdist)} wheel files={len(wheel)}")
+          PY
+
+      - name: Smoke-test the wheel in an isolated venv
+        run: |
+          python -m venv /tmp/aoci-wheel-venv
+          /tmp/aoci-wheel-venv/bin/pip install --quiet dist/*.whl
+          /tmp/aoci-wheel-venv/bin/python -c "import importlib.util, pathlib, aoci_core; assert importlib.util.find_spec('install') is None; assert (pathlib.Path(aoci_core.__file__).parent / '_skill_bundle' / 'SKILL.md').is_file()"
+          /tmp/aoci-wheel-venv/bin/aoci-index --version
+          /tmp/aoci-wheel-venv/bin/aoci-mcp --help
+          /tmp/aoci-wheel-venv/bin/aoci-install --host claude-code --scope global --home-dir /tmp/aoci-wheel-home --dry-run
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
   coverage:
     name: Coverage (in-process suite)
     runs-on: ubuntu-latest
@@ -111,7 +162,7 @@ jobs:
 
   release:
     name: Build & Publish Release
-    needs: [test, lint]
+    needs: [test, lint, package]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -127,18 +178,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build Python sdist and wheel
-        run: |
-          python -m pip install --upgrade --quiet build
-          python -m build --outdir dist
-
-      - name: Smoke-test built wheel in isolated venv
-        run: |
-          python -m venv /tmp/aoci-wheel-venv
-          /tmp/aoci-wheel-venv/bin/pip install --quiet dist/*.whl
-          /tmp/aoci-wheel-venv/bin/python -c "import importlib.util, pathlib, aoci_core; assert importlib.util.find_spec('install') is None; assert (pathlib.Path(aoci_core.__file__).parent / '_skill_bundle' / 'SKILL.md').is_file()"
-          /tmp/aoci-wheel-venv/bin/aoci-index --version
-          /tmp/aoci-wheel-venv/bin/aoci-install --host claude-code --scope global --home-dir /tmp/aoci-wheel-home --dry-run
+      - name: Download the verified sdist/wheel from the package job
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
 
       - name: Package skill archives, checksums, and release notes
         env:

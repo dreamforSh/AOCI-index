@@ -12,6 +12,17 @@ from setuptools.command.build_py import build_py as _build_py
 _REPO_ROOT = Path(__file__).resolve().parent
 _SKILL_TOP_FILES = ("SKILL.md", "README.md", "LICENSE", "CHANGELOG.md", "pyproject.toml")
 _SKILL_TOP_DIRS = ("assets", "examples", "references", "resources", "scripts")
+# Files a usable installed skill cannot do without; a wheel missing any of them is never produced
+_REQUIRED_BUNDLE_FILES = (
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "resources/plugin.json",
+    "scripts/aoci_index.py",
+    "scripts/aoci_mcp.py",
+    "scripts/aoci_hook.py",
+    "scripts/aoci_core/installer.py",
+)
 _SKIP_PATTERNS = (
     "__pycache__",
     "_skill_bundle",
@@ -34,6 +45,13 @@ class BuildPyWithSkillBundle(_build_py):
         super().run()
         if self.editable_mode:
             return
+        missing = [rel for rel in _REQUIRED_BUNDLE_FILES if not (_REPO_ROOT / rel).is_file()]
+        if missing:
+            raise SystemExit(
+                "ERROR: incomplete source tree for the skill bundle (missing: "
+                + ", ".join(missing)
+                + "). Build from a git checkout or an sdist produced with MANIFEST.in."
+            )
         bundle_dest = Path(self.build_lib) / "aoci_core" / "_skill_bundle"
         if bundle_dest.exists():
             shutil.rmtree(bundle_dest)

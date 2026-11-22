@@ -7,6 +7,7 @@ PIDs only past `hard_stale`).
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -51,7 +52,7 @@ def _pid_is_alive(pid: int) -> bool:
     """Return True if a local OS process with `pid` still exists (never sends signals on Windows)."""
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if sys.platform == "win32":  # `sys.platform` (not `os.name`) lets type checkers narrow Windows-only ctypes APIs
         try:
             import ctypes
 

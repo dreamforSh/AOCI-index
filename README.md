@@ -193,6 +193,7 @@ python scripts/install.py --host all --scope global --with-hooks --with-mcp
 ### Optional Editable CLI Package & AST Extra
 
 ```bash
+pip install aoci_index-<version>-py3-none-any.whl   # wheel from https://github.com/dreamforSh/AOCI-index/releases
 pip install -e .                  # zero runtime dependencies
 pip install -e ".[treesitter]"    # optional tree-sitter AST accelerator
 pip install -e ".[embed]"         # optional model2vec dense channel for --hybrid --embed-backend model2vec

@@ -1,0 +1,17 @@
+# sdist contents. `setup.py` copies the skill bundle (SKILL.md, docs, assets, examples, references, resources,
+# scripts) into the wheel's `aoci_core/_skill_bundle`, and `python -m build` builds that wheel FROM this sdist,
+# so every path listed in setup.py's `_SKILL_TOP_FILES` / `_SKILL_TOP_DIRS` must be included here
+# (tests/test_packaging.py enforces it).
+include SKILL.md README.md CHANGELOG.md LICENSE pyproject.toml setup.py MANIFEST.in action.yml
+recursive-include assets *
+recursive-include examples *
+recursive-include references *
+recursive-include resources *
+recursive-include scripts *.py
+recursive-include tests *.py *.json
+recursive-include .github/scripts *.py
+
+prune .aoci
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod] *.bak *.orig.bak *.tmp .DS_Store .aoci-install.json

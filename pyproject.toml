@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]  # PEP 639 `license` expression; wheels still install on Python 3.8
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,9 +7,37 @@ name = "aoci-index"
 version = "1.6.0"
 description = "Zero-dependency AI-Oriented Codebase Indexer (.aoci/) with BM25/FRAS graph reader, task context packer, symbol zoom, lifecycle hooks, and stdio MCP server."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.8"
 dependencies = []
+authors = [{ name = "dreamforSh" }]
+keywords = ["codebase-index", "mcp", "model-context-protocol", "ai-agents", "claude-code", "code-search", "bm25"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Text Processing :: Indexing",
+]
+
+[project.urls]
+Homepage = "https://github.com/dreamforSh/AOCI-index"
+Repository = "https://github.com/dreamforSh/AOCI-index"
+Issues = "https://github.com/dreamforSh/AOCI-index/issues"
+Changelog = "https://github.com/dreamforSh/AOCI-index/blob/main/CHANGELOG.md"
+Releases = "https://github.com/dreamforSh/AOCI-index/releases"
 
 [project.optional-dependencies]
 treesitter = ["tree-sitter-language-pack>=0.6.0"]
